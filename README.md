@@ -7,7 +7,8 @@ This repository tracks the Rev2 handoff baseline in issue #1. Implemented workst
 ## Baseline
 
 - HAPI FHIR chart: `hapifhir/hapi-fhir-jpaserver` pinned through `charts/hapi-fhir-deploy/Chart.yaml`.
-- HAPI FHIR image: `docker.io/hapiproject/hapi:v8.8.0-1@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775`.
+- HAPI FHIR image: `docker.io/hapiproject/hapi:v8.10.0-2@sha256:c5e53fb34bf39958c336837795f504673103f212e179ced14c8f7b96b585a182`.
+- Image review: `v8.10.0-2` is the reviewed 8.10 distroless build selected for issue #3.
 - PostgreSQL: external service only, PostgreSQL 16 or 17.
 - Database configuration: explicit `spring.datasource.*` settings through chart `extraConfig`.
 - Observability: built-in Actuator health and Prometheus endpoints on the HAPI metrics port, plus `fhir-server-exporter` chart `1.2.35`.
@@ -33,7 +34,19 @@ Provision PostgreSQL outside this chart before installing HAPI FHIR:
 - Secret key: `password`.
 - Service DNS used by default values: `hapi-fhir-postgres-rw.postgres.svc.cluster.local`.
 
-Update both `externalDatabase` and `extraEnv.HAPI_FHIR_POSTGRES_JDBC_URL` in `charts/hapi-fhir-deploy/values.yaml` if your host, database, or username differs.
+Update these values in `charts/hapi-fhir-deploy/values.yaml` if your environment differs:
+
+- `hapi-fhir-jpaserver.externalDatabase.host`
+- `hapi-fhir-jpaserver.externalDatabase.port`
+- `hapi-fhir-jpaserver.externalDatabase.user`
+- `hapi-fhir-jpaserver.externalDatabase.database`
+- `hapi-fhir-jpaserver.externalDatabase.existingSecret`
+- `hapi-fhir-jpaserver.externalDatabase.existingSecretKey`
+- `hapi-fhir-jpaserver.extraEnv[]` item named `HAPI_FHIR_POSTGRES_JDBC_URL`
+- `hapi-fhir-jpaserver.extraEnv[]` item named `HAPI_FHIR_POSTGRES_USERNAME`
+- `hapi-fhir-jpaserver.extraEnv[]` item named `HAPI_FHIR_POSTGRES_PASSWORD`
+
+Update `manifests/external-secrets/hapi-fhir-postgres.yaml` if your External Secrets `ClusterSecretStore`, remote key, or remote property differs.
 
 ## Install
 
@@ -61,7 +74,9 @@ After rollout:
 
 ```sh
 kubectl -n fhir rollout status deploy/hapi-fhir-hapi-fhir-jpaserver
-kubectl -n fhir get pods,svc,secret hapi-fhir-postgres
+kubectl -n fhir get pods -l app.kubernetes.io/instance=hapi-fhir
+kubectl -n fhir get svc hapi-fhir-hapi-fhir-jpaserver
+kubectl -n fhir get secret hapi-fhir-postgres
 kubectl -n fhir port-forward svc/hapi-fhir-hapi-fhir-jpaserver 8080:8080
 curl -fsS http://localhost:8080/fhir/metadata
 ```

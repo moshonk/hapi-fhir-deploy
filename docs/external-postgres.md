@@ -2,6 +2,8 @@
 
 The HAPI FHIR Helm release uses the upstream chart's `externalDatabase` values and an explicit Spring Boot datasource override.
 
+The target database must be an externally managed PostgreSQL 16 or 17 instance, including a managed service or a CloudNativePG-managed cluster. This repository does not ship a PostgreSQL StatefulSet.
+
 ## Why Both Are Set
 
 The chart uses `externalDatabase` for its database connection wiring and wait-for-database behavior. The baseline also sets `spring.datasource.*` through `extraConfig` so the application fails against the intended PostgreSQL target instead of silently running with its embedded H2 defaults.
@@ -22,6 +24,24 @@ stringData:
 ```
 
 Do not commit a real Secret manifest. Use the External Secrets manifest in `manifests/external-secrets/hapi-fhir-postgres.yaml`, Sealed Secrets, or the platform's native secret injection mechanism.
+
+## Environment Overrides
+
+Update these locations when moving between environments:
+
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.externalDatabase.host`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.externalDatabase.port`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.externalDatabase.user`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.externalDatabase.database`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.externalDatabase.existingSecret`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.externalDatabase.existingSecretKey`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.extraEnv[]` item named `HAPI_FHIR_POSTGRES_JDBC_URL`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.extraEnv[]` item named `HAPI_FHIR_POSTGRES_USERNAME`
+- `charts/hapi-fhir-deploy/values.yaml`: `hapi-fhir-jpaserver.extraEnv[]` item named `HAPI_FHIR_POSTGRES_PASSWORD`
+- `manifests/external-secrets/hapi-fhir-postgres.yaml`: `spec.secretStoreRef.name`
+- `manifests/external-secrets/hapi-fhir-postgres.yaml`: `spec.data[]` entry with `secretKey: password`
+
+Keep `externalDatabase` and the `extraEnv` datasource values aligned. The chart uses `externalDatabase` for database wait behavior, while `extraConfig` consumes the Secret-backed environment variables as explicit `spring.datasource.*` settings.
 
 ## Connection Budget
 
