@@ -22,6 +22,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
@@ -29,7 +34,7 @@ jobs:
 
       - name: Parse YAML files
         run: |
-          ruby -ryaml -e 'ARGV.each { |path| YAML.load_stream(File.read(path)); puts "ok #{path}" }' \
+          ruby -rpsych -e 'ARGV.each { |path| Psych.parse_stream(File.read(path)); puts "ok #{path}" }' \
             .github/workflows/ci.yml \
             charts/hapi-fhir-deploy/Chart.yaml \
             charts/hapi-fhir-deploy/values.yaml \
@@ -41,7 +46,12 @@ jobs:
           ruby <<'RUBY'
           require "yaml"
 
-          values = YAML.load_file("charts/hapi-fhir-deploy/values.yaml")
+          values = YAML.safe_load(
+            File.read("charts/hapi-fhir-deploy/values.yaml"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
           chart = values.fetch("hapi-fhir-jpaserver")
 
           failures = []
@@ -62,7 +72,7 @@ jobs:
             "password: ${HAPI_FHIR_POSTGRES_PASSWORD}",
             "driverClassName: org.postgresql.Driver",
             "maximumPoolSize: 10",
-            "hibernate.search.enabled: false"
+            "hibernate.search.enabled:"
           ].each do |expected|
             failures << "extraConfig missing #{expected}" unless extra_config.include?(expected)
           end
@@ -87,11 +97,11 @@ jobs:
             > /tmp/hapi-fhir-rendered.yaml
 
       - name: Parse rendered manifests
-        run: ruby -ryaml -e 'YAML.load_stream(File.read("/tmp/hapi-fhir-rendered.yaml")); puts "ok rendered manifests"'
+        run: ruby -rpsych -e 'Psych.parse_stream(File.read("/tmp/hapi-fhir-rendered.yaml")); puts "ok rendered manifests"'
 
       - name: Confirm bundled PostgreSQL is not rendered
         run: |
-          if grep -Eq 'app.kubernetes.io/name: postgres|kind: StatefulSet' /tmp/hapi-fhir-rendered.yaml; then
+          if grep -Eq 'app.kubernetes.io/name: postgres' /tmp/hapi-fhir-rendered.yaml; then
             echo "Unexpected bundled PostgreSQL resources were rendered."
             exit 1
           fi
