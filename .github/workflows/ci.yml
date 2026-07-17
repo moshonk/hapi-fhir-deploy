@@ -139,14 +139,28 @@ jobs:
       - name: Confirm datasource env and Secret references are rendered
         run: |
           ruby <<'RUBY'
-          require "yaml"
+          require "psych"
 
-          documents = YAML.safe_load_stream(
-            File.read("/tmp/hapi-fhir-rendered.yaml"),
-            permitted_classes: [],
-            permitted_symbols: [],
-            aliases: false
-          ).compact
+          def plain_yaml(node)
+            case node
+            when Psych::Nodes::Document
+              plain_yaml(node.root)
+            when Psych::Nodes::Mapping
+              node.children.each_slice(2).to_h { |key, value| [plain_yaml(key), plain_yaml(value)] }
+            when Psych::Nodes::Sequence
+              node.children.map { |child| plain_yaml(child) }
+            when Psych::Nodes::Scalar
+              node.value
+            when Psych::Nodes::Stream
+              node.children.map { |child| plain_yaml(child) }
+            when nil
+              nil
+            else
+              abort "Unsupported YAML node: #{node.class}"
+            end
+          end
+
+          documents = plain_yaml(Psych.parse_stream(File.read("/tmp/hapi-fhir-rendered.yaml"))).compact
           deployment = documents.find do |document|
             document["kind"] == "Deployment" &&
               document.dig("metadata", "name") == "hapi-fhir-hapi-fhir-jpaserver"
