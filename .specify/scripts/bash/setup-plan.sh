@@ -52,13 +52,8 @@ else
             echo "Copied plan template to $IMPL_PLAN"
         fi
     else
-        if $JSON_MODE; then
-            echo "Warning: Plan template not found" >&2
-        else
-            echo "Warning: Plan template not found"
-        fi
-        # Create a basic plan file if template doesn't exist
-        touch "$IMPL_PLAN"
+        echo "ERROR: Plan template not found; cannot create $IMPL_PLAN" >&2
+        exit 1
     fi
 fi
 
