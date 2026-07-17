@@ -63,6 +63,26 @@ jobs:
           failures << "HAPI image tag must not be latest" if image_tag.empty? || image_tag == "latest" || image_tag.end_with?(":latest")
           failures << "HAPI image must be digest pinned" unless image_tag.include?("@sha256:")
 
+          chart_dependencies = YAML.safe_load(
+            File.read("charts/hapi-fhir-deploy/Chart.yaml"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          ).fetch("dependencies")
+          exporter_dependency = chart_dependencies.find { |dependency| dependency["name"] == "fhir-server-exporter" }
+          failures << "fhir-server-exporter dependency must be pinned" unless exporter_dependency&.fetch("version") == "1.2.35"
+
+          failures << "HAPI ServiceMonitor must be enabled" unless chart.dig("metrics", "serviceMonitor", "enabled") == true
+          failures << "readiness probe must use Actuator readiness" unless chart.dig("readinessProbe", "httpGet", "path") == "/actuator/health/readiness"
+          failures << "liveness probe must use Actuator liveness" unless chart.dig("livenessProbe", "httpGet", "path") == "/actuator/health/liveness"
+
+          exporter = values.fetch("fhir-server-exporter")
+          failures << "fhir-server-exporter must be enabled" unless exporter["enabled"] == true
+          failures << "fhir-server-exporter ServiceMonitor must be enabled" unless exporter.dig("serviceMonitor", "enabled") == true
+          exporter_image_tag = exporter.dig("image", "tag").to_s
+          failures << "fhir-server-exporter image tag must not be latest" if exporter_image_tag.empty? || exporter_image_tag == "latest" || exporter_image_tag.end_with?(":latest")
+          failures << "fhir-server-exporter image must be digest pinned" unless exporter_image_tag.include?("@sha256:")
+
           extra_config = chart.fetch("extraConfig")
           [
             "spring:",
@@ -72,7 +92,10 @@ jobs:
             "password: ${HAPI_FHIR_POSTGRES_PASSWORD}",
             "driverClassName: org.postgresql.Driver",
             "maximumPoolSize: 10",
-            "hibernate.search.enabled:"
+            "hibernate.search.enabled:",
+            "management:",
+            "probes:",
+            "include: health,prometheus"
           ].each do |expected|
             failures << "extraConfig missing #{expected}" unless extra_config.include?(expected)
           end

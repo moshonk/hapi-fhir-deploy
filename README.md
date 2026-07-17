@@ -2,7 +2,7 @@
 
 Kubernetes deployment baseline for a scalable HAPI FHIR JPA Server using the official HAPI FHIR Helm chart and an external PostgreSQL database.
 
-This repository tracks the Rev2 handoff baseline in issue #1. The first implemented workstream is Helm values and external PostgreSQL wiring.
+This repository tracks the Rev2 handoff baseline in issue #1. Implemented workstreams include external PostgreSQL wiring and the Actuator/Micrometer observability baseline.
 
 ## Baseline
 
@@ -10,15 +10,17 @@ This repository tracks the Rev2 handoff baseline in issue #1. The first implemen
 - HAPI FHIR image: `docker.io/hapiproject/hapi:v8.8.0-1@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775`.
 - PostgreSQL: external service only, PostgreSQL 16 or 17.
 - Database configuration: explicit `spring.datasource.*` settings through chart `extraConfig`.
+- Observability: built-in Actuator health and Prometheus endpoints on the HAPI metrics port, plus `fhir-server-exporter` chart `1.2.35`.
 - Search indexing: Hibernate Search is disabled until the D6 indexing memo decides between Lucene disabled and Elasticsearch/OpenSearch.
 - Messaging: no Kafka or Zookeeper in this starter architecture.
 
 ## Files
 
-- `charts/hapi-fhir-deploy/Chart.yaml`: Helm wrapper chart with the official HAPI FHIR chart dependency pinned to `0.23.0`.
-- `charts/hapi-fhir-deploy/values.yaml`: baseline values for external PostgreSQL, Hikari pool sizing, pinned image, resources, and PodDisruptionBudget.
+- `charts/hapi-fhir-deploy/Chart.yaml`: Helm wrapper chart with the official HAPI FHIR chart dependency pinned to `0.23.0` and `fhir-server-exporter` pinned to `1.2.35`.
+- `charts/hapi-fhir-deploy/values.yaml`: baseline values for external PostgreSQL, Hikari pool sizing, pinned images, resources, PodDisruptionBudget, probes, ServiceMonitors, and the FHIR server exporter.
 - `manifests/namespace.yaml`: namespace expected by the example install commands.
 - `manifests/external-secrets/hapi-fhir-postgres.yaml`: External Secrets manifest that creates the `hapi-fhir-postgres` runtime Secret.
+- `docs/observability.md`: monitoring rollout, scrape, metric continuity, and rollback checks.
 
 ## Database Contract
 
@@ -65,3 +67,7 @@ curl -fsS http://localhost:8080/fhir/metadata
 ```
 
 If the deployment does not start, inspect the HAPI pod logs first for `spring.datasource` or PostgreSQL authentication errors. H2 fallback should not be considered acceptable for this baseline.
+
+## Monitoring
+
+The chart exposes HAPI Actuator probes at `/actuator/health/liveness` and `/actuator/health/readiness`, Prometheus metrics at `/actuator/prometheus`, and deploys `fhir-server-exporter` against the in-cluster HAPI FHIR service. See [docs/observability.md](docs/observability.md) for rollout checks, Prometheus scrape validation, metric continuity queries, and rollback guidance.
