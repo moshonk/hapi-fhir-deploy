@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-hapi-fhir-deployment:
+    name: Validate HAPI FHIR deployment
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Parse YAML files
+        run: |
+          ruby -ryaml -e 'ARGV.each { |path| YAML.load_stream(File.read(path)); puts "ok #{path}" }' \
+            .github/workflows/ci.yml \
+            charts/hapi-fhir-deploy/Chart.yaml \
+            charts/hapi-fhir-deploy/values.yaml \
+            manifests/namespace.yaml \
+            manifests/external-secrets/hapi-fhir-postgres.yaml
+
+      - name: Check Rev2 baseline decisions
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          values = YAML.load_file("charts/hapi-fhir-deploy/values.yaml")
+          chart = values.fetch("hapi-fhir-jpaserver")
+
+          failures = []
+          failures << "embedded PostgreSQL must be disabled" unless chart.dig("postgres", "enabled") == false
+          failures << "external database secret must be hapi-fhir-postgres" unless chart.dig("externalDatabase", "existingSecret") == "hapi-fhir-postgres"
+          failures << "external database secret key must be password" unless chart.dig("externalDatabase", "existingSecretKey") == "password"
+
+          image_tag = chart.dig("image", "tag").to_s
+          failures << "HAPI image tag must not be latest" if image_tag.empty? || image_tag == "latest" || image_tag.end_with?(":latest")
+          failures << "HAPI image must be digest pinned" unless image_tag.include?("@sha256:")
+
+          extra_config = chart.fetch("extraConfig")
+          [
+            "spring:",
+            "datasource:",
+            "url: ${HAPI_FHIR_POSTGRES_JDBC_URL}",
+            "username: ${HAPI_FHIR_POSTGRES_USERNAME}",
+            "password: ${HAPI_FHIR_POSTGRES_PASSWORD}",
+            "driverClassName: org.postgresql.Driver",
+            "maximumPoolSize: 10",
+            "hibernate.search.enabled: false"
+          ].each do |expected|
+            failures << "extraConfig missing #{expected}" unless extra_config.include?(expected)
+          end
+
+          if failures.any?
+            warn failures.map { |failure| "- #{failure}" }.join("\n")
+            exit 1
+          end
+          RUBY
+
+      - name: Build Helm dependencies
+        run: helm dependency build charts/hapi-fhir-deploy
+
+      - name: Lint Helm chart
+        run: helm lint charts/hapi-fhir-deploy --values charts/hapi-fhir-deploy/values.yaml
+
+      - name: Render Helm chart
+        run: |
+          helm template hapi-fhir charts/hapi-fhir-deploy \
+            --namespace fhir \
+            --values charts/hapi-fhir-deploy/values.yaml \
+            > /tmp/hapi-fhir-rendered.yaml
+
+      - name: Parse rendered manifests
+        run: ruby -ryaml -e 'YAML.load_stream(File.read("/tmp/hapi-fhir-rendered.yaml")); puts "ok rendered manifests"'
+
+      - name: Confirm bundled PostgreSQL is not rendered
+        run: |
+          if grep -Eq 'app.kubernetes.io/name: postgres|kind: StatefulSet' /tmp/hapi-fhir-rendered.yaml; then
+            echo "Unexpected bundled PostgreSQL resources were rendered."
+            exit 1
+          fi
