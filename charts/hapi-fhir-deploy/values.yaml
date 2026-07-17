@@ -43,6 +43,15 @@ hapi-fhir-jpaserver:
         properties:
           hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
           hibernate.search.enabled: false
+    management:
+      endpoint:
+        health:
+          probes:
+            enabled: true
+      endpoints:
+        web:
+          exposure:
+            include: health,prometheus
 
   resourcesPreset: none
   resources:
@@ -57,10 +66,74 @@ hapi-fhir-jpaserver:
     enabled: true
     minAvailable: 1
 
+  readinessProbe:
+    httpGet:
+      path: /actuator/health/readiness
+      port: http-metrics
+    failureThreshold: 5
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    successThreshold: 1
+    timeoutSeconds: 20
+
+  livenessProbe:
+    httpGet:
+      path: /actuator/health/liveness
+      port: http-metrics
+    failureThreshold: 5
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    successThreshold: 1
+    timeoutSeconds: 20
+
+  startupProbe:
+    httpGet:
+      path: /actuator/health/readiness
+      port: http-metrics
+    failureThreshold: 20
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    timeoutSeconds: 20
+
   metrics:
+    service:
+      port: 8081
     serviceMonitor:
-      enabled: false
+      enabled: true
+      interval: 30s
+      scrapeTimeout: 10s
 
   service:
     type: ClusterIP
     port: 8080
+
+fhir-server-exporter:
+  enabled: true
+  fhirServerUrl: http://hapi-fhir-hapi-fhir-jpaserver:8080/fhir
+  fhirServerName: hapi-fhir
+  fetchIntervalSeconds: 300
+
+  image:
+    registry: ghcr.io
+    repository: chgl/fhir-server-exporter
+    tag: v3.0.15@sha256:d2f34aa65bc7e65de5073864d03907759979f477ed06460061d3eb9c23d64408
+    pullPolicy: IfNotPresent
+
+  resourcesPreset: none
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  serviceMonitor:
+    enabled: true
+    interval: 60s
+    scrapeTimeout: 10s
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1

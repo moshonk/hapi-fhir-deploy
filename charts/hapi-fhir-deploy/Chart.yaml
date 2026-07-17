@@ -8,3 +8,7 @@ dependencies:
   - name: hapi-fhir-jpaserver
     version: 0.23.0
     repository: https://hapifhir.github.io/hapi-fhir-jpaserver-starter/
+  - name: fhir-server-exporter
+    version: 1.2.35
+    repository: https://chgl.github.io/charts
+    condition: fhir-server-exporter.enabled
