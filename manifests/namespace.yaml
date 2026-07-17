@@ -4,4 +4,3 @@ metadata:
   name: fhir
   labels:
     app.kubernetes.io/part-of: hapi-fhir
-    app.kubernetes.io/managed-by: helm

@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-18
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: GitHub issue #3, issue #1 epic, merged PR #8, and PR #8 review comments.
 
@@ -59,7 +59,7 @@ As a maintainer, I can verify namespace, pod, service, and Secret resources with
 - The runtime Secret is missing or the password key is absent.
 - The external PostgreSQL server is version 13, 14, 15, or otherwise outside the supported 16/17 target.
 - The chart repository is unreachable during dependency build.
-- HAPI image tag selection differs from issue #3's `v8.10.0` request and the currently committed `v8.8.0-1` digest pin.
+- A future HAPI image tag changes the reviewed `v8.10.0-2` digest pin.
 - A future chart release changes the rendered Deployment resource names or supported values.
 
 ## Requirements *(mandatory)*
@@ -71,7 +71,7 @@ As a maintainer, I can verify namespace, pod, service, and Secret resources with
 - **FR-003**: The chart values MUST configure an external PostgreSQL 16 or 17 target.
 - **FR-004**: The application configuration MUST include explicit `spring.datasource.url`, `spring.datasource.username`, `spring.datasource.password`, `spring.datasource.driverClassName`, and HAPI PostgreSQL dialect settings.
 - **FR-005**: Database credentials MUST be provided through a Kubernetes Secret reference, not committed plaintext values.
-- **FR-006**: The HAPI image MUST be pinned to a reviewed tag and digest; the open image-version discrepancy between issue #3 and the current baseline MUST be resolved by explicit review before implementation is treated as complete.
+- **FR-006**: The HAPI image MUST be pinned to a reviewed tag and digest.
 - **FR-007**: Kafka, Zookeeper, embedded H2, bundled PostgreSQL, and hand-rolled PostgreSQL StatefulSets MUST remain absent.
 - **FR-008**: Documentation MUST identify exact file paths and value locations for changing database host, JDBC URL, database name, username, Secret name, and Secret key.
 - **FR-009**: Verification commands MUST use resource names and selectors that work as written.

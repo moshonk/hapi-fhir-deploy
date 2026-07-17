@@ -3,7 +3,7 @@ name: hapi-fhir-deploy
 description: Deployment baseline for a scalable HAPI FHIR JPA Server on Kubernetes
 type: application
 version: 0.1.0
-appVersion: "8.8.0"
+appVersion: "8.10.0"
 dependencies:
   - name: hapi-fhir-jpaserver
     version: 0.23.0

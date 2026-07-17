@@ -4,7 +4,7 @@ hapi-fhir-jpaserver:
   image:
     registry: docker.io
     repository: hapiproject/hapi
-    tag: "v8.8.0-1@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775"
+    tag: "v8.10.0-2@sha256:c5e53fb34bf39958c336837795f504673103f212e179ced14c8f7b96b585a182"
     pullPolicy: IfNotPresent
 
   postgres:
