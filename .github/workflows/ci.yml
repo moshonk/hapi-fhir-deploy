@@ -70,7 +70,7 @@ jobs:
             aliases: false
           ).fetch("dependencies")
           exporter_dependency = chart_dependencies.find { |dependency| dependency["name"] == "fhir-server-exporter" }
-          failures << "fhir-server-exporter dependency must be pinned" unless exporter_dependency&.fetch("version") == "1.2.35"
+          failures << "fhir-server-exporter dependency must be pinned" unless exporter_dependency&.dig("version") == "1.2.35"
 
           failures << "HAPI ServiceMonitor must be enabled" unless chart.dig("metrics", "serviceMonitor", "enabled") == true
           failures << "readiness probe must use Actuator readiness" unless chart.dig("readinessProbe", "httpGet", "path") == "/actuator/health/readiness"

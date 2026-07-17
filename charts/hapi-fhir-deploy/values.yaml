@@ -110,7 +110,7 @@ hapi-fhir-jpaserver:
 
 fhir-server-exporter:
   enabled: true
-  fhirServerUrl: http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir
+  fhirServerUrl: http://hapi-fhir-hapi-fhir-jpaserver:8080/fhir
   fhirServerName: hapi-fhir
   fetchIntervalSeconds: 300
 

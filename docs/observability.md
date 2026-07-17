@@ -6,8 +6,8 @@ The monitoring integration expects Prometheus Operator `ServiceMonitor` CRDs to 
 
 ## Runtime Surfaces
 
-- HAPI HTTP service: `hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080`
-- HAPI Actuator metrics service port: `hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8081`
+- HAPI HTTP service: `hapi-fhir-hapi-fhir-jpaserver:8080`
+- HAPI Actuator metrics service port: `hapi-fhir-hapi-fhir-jpaserver:8081`
 - Health probes:
   - `/actuator/health/liveness`
   - `/actuator/health/readiness`
@@ -16,7 +16,7 @@ The monitoring integration expects Prometheus Operator `ServiceMonitor` CRDs to 
 - FHIR server exporter:
   - chart: `fhir-server-exporter` `1.2.35`
   - image: `ghcr.io/chgl/fhir-server-exporter:v3.0.15@sha256:d2f34aa65bc7e65de5073864d03907759979f477ed06460061d3eb9c23d64408`
-  - target: `http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir`
+  - target: `http://hapi-fhir-hapi-fhir-jpaserver:8080/fhir`
 
 ## Rollout Verification
 
