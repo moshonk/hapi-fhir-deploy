@@ -23,6 +23,8 @@ Preserve these decisions unless an issue or ADR explicitly changes them:
 - `manifests/`: supporting Kubernetes manifests that the chart does not own.
 - `docs/`: architecture and operational notes that should match committed manifests and values.
 - `.github/workflows/ci.yml`: validation workflow for YAML parsing and Helm rendering.
+- `.specify/`: Spec Kit project constitution, scripts, generic commands, workflow, and templates.
+- `specs/`: Spec Kit feature specifications mapped to the Rev2 child workstreams.
 
 ## Working Rules
 
@@ -31,6 +33,18 @@ Preserve these decisions unless an issue or ADR explicitly changes them:
 - Keep README and docs synchronized with the actual chart values, manifests, image pins, and issue status.
 - When working from an issue, keep changes scoped to that workstream and preserve the other roadmap items.
 - For operational changes, document rollout verification and rollback expectations.
+- For Spec Kit work, start with `.specify/memory/constitution.md`, then the relevant `specs/*/spec.md`.
+
+## Spec Kit Workflow
+
+Spec Kit is initialized with the generic integration because the bundled Codex integration writes to `.agents/`, which is read-only in this workspace profile. Slash-command source files live under `.specify/commands/`.
+
+- `001-helm-postgres-baseline`: issue #3 and PR #8 review deltas.
+- `002-observability-pipeline`: issue #2.
+- `003-autoscaling-connection-budget`: issue #5.
+- `004-runtime-rollout-controls`: issue #7.
+- `005-indexing-strategy-memo`: issue #4 and D6.
+- `006-documentation-handoff`: issue #6 and PR #8/#10 documentation review deltas.
 
 ## Validation Expectations
 
@@ -56,10 +70,10 @@ If `helm dependency build` cannot reach the upstream chart repository, report th
 
 ## Recommended Copilot Artifacts
 
-These Awesome Copilot resources are a good fit for this repository's work:
+These external Awesome Copilot resources are a good fit for this repository's work when available outside this repository:
 
-- `agents/platform-sre-kubernetes.agent.md`: for Kubernetes reliability, rollout, and security-heavy changes.
-- `skills/documentation-writer`: for README, memo, and runbook work.
-- `skills/security-review`: for changes involving secrets, ingress, auth, or exposure risk.
-- `skills/acquire-codebase-knowledge`: for future onboarding or repository mapping tasks.
-- `instructions/kubernetes-manifests.instructions.md`, `instructions/kubernetes-deployment-best-practices.instructions.md`, `instructions/devops-core-principles.instructions.md`, and `instructions/markdown-gfm.instructions.md`: baseline patterns adapted into this repository's local Copilot instructions.
+- External `agents/platform-sre-kubernetes.agent.md`: for Kubernetes reliability, rollout, and security-heavy changes.
+- External `skills/documentation-writer`: for README, memo, and runbook work.
+- External `skills/security-review`: for changes involving secrets, ingress, auth, or exposure risk.
+- External `skills/acquire-codebase-knowledge`: for future onboarding or repository mapping tasks.
+- Local `.github/instructions/kubernetes-manifests.instructions.md`, `.github/instructions/github-actions.instructions.md`, and `.github/instructions/markdown-docs.instructions.md`: repository-specific instruction files.
