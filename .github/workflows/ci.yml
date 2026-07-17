@@ -97,6 +97,17 @@ jobs:
           failures << "fhir-server-exporter image must be digest pinned" unless exporter_image_tag.include?("@sha256:")
 
           extra_config = chart.fetch("extraConfig")
+          parsed_extra_config = YAML.safe_load(
+            extra_config,
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          hibernate_properties = parsed_extra_config.dig("spring", "jpa", "properties") || {}
+          search_enabled = hibernate_properties["hibernate.search.enabled"]
+          search_backend_type = hibernate_properties["hibernate.search.backend.type"].to_s.downcase
+          search_backend_hosts = hibernate_properties["hibernate.search.backend.hosts"].to_s
+
           [
             "spring:",
             "datasource:",
@@ -105,14 +116,31 @@ jobs:
             "password: ${HAPI_FHIR_POSTGRES_PASSWORD}",
             "driverClassName: org.postgresql.Driver",
             "maximumPoolSize: 10",
-            "hibernate.search.enabled:",
             "management:",
             "probes:",
             "include: health,prometheus"
           ].each do |expected|
             failures << "extraConfig missing #{expected}" unless extra_config.include?(expected)
           end
+          failures << "hibernate.search.enabled must be explicit" if search_enabled.nil?
+          if [true, "true"].include?(search_enabled) && chart.fetch("replicaCount").to_i > 1
+            shared_backend = ["elasticsearch", "opensearch"].include?(search_backend_type) && !search_backend_hosts.empty?
+            failures << "Hibernate Search requires shared Elasticsearch/OpenSearch backend settings for multi-replica deployments" unless shared_backend
+          end
           failures << "extraConfig must not reference H2" if extra_config.match?(/\bh2\b/i)
+
+          indexing_memo = File.read("docs/indexing-strategy.md")
+          [
+            "Decision: Option A",
+            "Operational complexity and cost",
+            "Query consistency under replica scaling",
+            "Performance considerations",
+            "Security and data governance",
+            "Migration path",
+            "Rollback plan"
+          ].each do |expected|
+            failures << "indexing memo missing #{expected}" unless indexing_memo.include?(expected)
+          end
 
           if failures.any?
             warn failures.map { |failure| "- #{failure}" }.join("\n")

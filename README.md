@@ -12,7 +12,7 @@ This repository tracks the Rev2 handoff baseline in issue #1. Implemented workst
 - PostgreSQL: external service only, PostgreSQL 16 or 17.
 - Database configuration: explicit `spring.datasource.*` settings through chart `extraConfig`.
 - Observability: built-in Actuator health and Prometheus endpoints on the HAPI metrics port, plus `fhir-server-exporter` chart `1.2.35`.
-- Search indexing: Hibernate Search is disabled until the D6 indexing memo decides between Lucene disabled and Elasticsearch/OpenSearch.
+- Search indexing: Hibernate Search advanced indexing is disabled by design; see [docs/indexing-strategy.md](docs/indexing-strategy.md).
 - Messaging: no Kafka or Zookeeper in this starter architecture.
 
 ## Files
@@ -22,6 +22,7 @@ This repository tracks the Rev2 handoff baseline in issue #1. Implemented workst
 - `manifests/namespace.yaml`: namespace expected by the example install commands.
 - `manifests/external-secrets/hapi-fhir-postgres.yaml`: External Secrets manifest that creates the `hapi-fhir-postgres` runtime Secret.
 - `docs/observability.md`: monitoring rollout, scrape, metric continuity, and rollback checks.
+- `docs/indexing-strategy.md`: D6 memo comparing disabled advanced indexing with shared Elasticsearch/OpenSearch.
 
 ## Database Contract
 
