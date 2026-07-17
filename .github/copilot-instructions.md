@@ -2,9 +2,12 @@
 
 This repository is a Helm-wrapper and Kubernetes manifests baseline for deploying HAPI FHIR JPA Server with external PostgreSQL.
 
+These are the GitHub Copilot entry-point instructions. Keep them aligned with `AGENTS.md`, `CLAUDE.md`, and `.specify/memory/constitution.md`.
+
 ## Repository-wide expectations
 
 - Treat issue #1 as the roadmap and keep changes aligned with the active child issue scope.
+- For Spec Kit work, read `.specify/memory/constitution.md` first, then the relevant `specs/*/spec.md`.
 - Preserve the Rev2 decisions already documented in the repository:
   - no Kafka/Zookeeper
   - explicit `spring.datasource.*` configuration
@@ -14,6 +17,14 @@ This repository is a Helm-wrapper and Kubernetes manifests baseline for deployin
 - Prefer changing `charts/hapi-fhir-deploy/values.yaml` before adding standalone manifests.
 - Do not commit plaintext secrets, passwords, kubeconfigs, or example values that look usable in production.
 - Keep docs consistent with the actual manifests, chart pins, secret names, and operational steps in the repo.
+
+## Agent compatibility
+
+- Codex uses `AGENTS.md` as its repository entry point.
+- Claude Code uses `CLAUDE.md` and the generated `.claude/skills/speckit-*` Spec Kit skills.
+- GitHub Copilot uses this file, path-specific instructions in `.github/instructions/`, agents in `.github/agents/`, and prompts in `.github/prompts/`.
+- Spec Kit's repository default integration is `generic`; command definitions live in `.specify/commands/`, while Claude-native skills live in `.claude/skills/`.
+- All agents should preserve the same architecture guardrails and validation expectations.
 
 ## Kubernetes and Helm guidance
 

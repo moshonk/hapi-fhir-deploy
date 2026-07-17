@@ -23,7 +23,11 @@ Preserve these decisions unless an issue or ADR explicitly changes them:
 - `manifests/`: supporting Kubernetes manifests that the chart does not own.
 - `docs/`: architecture and operational notes that should match committed manifests and values.
 - `.github/workflows/ci.yml`: validation workflow for YAML parsing and Helm rendering.
+- `.github/copilot-instructions.md`, `.github/instructions/`, `.github/agents/`, and `.github/prompts/`: GitHub Copilot entry points and Spec Kit prompts.
+- `AGENTS.md`: Codex entry point and shared agent guide.
+- `CLAUDE.md`: Claude Code entry point.
 - `.specify/`: Spec Kit project constitution, scripts, generic commands, workflow, and templates.
+- `.claude/skills/`: Claude Code Spec Kit skills generated from the installed Claude integration.
 - `specs/`: Spec Kit feature specifications mapped to the Rev2 child workstreams.
 
 ## Working Rules
@@ -37,7 +41,15 @@ Preserve these decisions unless an issue or ADR explicitly changes them:
 
 ## Spec Kit Workflow
 
-Spec Kit is initialized with the generic integration because the bundled Codex integration writes to `.agents/`, which is read-only in this workspace profile. Slash-command source files live under `.specify/commands/`.
+Spec Kit is initialized with the generic integration as the default because the bundled Codex integration writes to `.agents/`, which is read-only in this workspace profile. Generic slash-command source files live under `.specify/commands/`.
+
+Agent-specific entry points:
+
+- GitHub Copilot: use `.github/copilot-instructions.md` plus `.github/instructions/*`; invoke Spec Kit through `.github/agents/speckit.*.agent.md` or `.github/prompts/speckit.*.prompt.md`.
+- Codex: use this `AGENTS.md`; invoke Spec Kit by reading `.specify/commands/speckit.*.md` and following the command body.
+- Claude Code: use `CLAUDE.md`; invoke Spec Kit through `.claude/skills/speckit-*/SKILL.md`, where command names use hyphens such as `/speckit-plan`.
+
+All agents must apply `.specify/memory/constitution.md` before planning or implementing any spec.
 
 - `001-helm-postgres-baseline`: issue #3 and PR #8 review deltas.
 - `002-observability-pipeline`: issue #2.
@@ -68,9 +80,9 @@ ruby -rpsych -e 'Psych.parse_stream(File.read("/tmp/hapi-fhir-rendered.yaml")); 
 
 If `helm dependency build` cannot reach the upstream chart repository, report the network failure instead of masking it.
 
-## Recommended Copilot Artifacts
+## Optional External Agent Resources
 
-These external Awesome Copilot resources are a good fit for this repository's work when available outside this repository:
+These external resources are useful when available, but local repository instructions remain authoritative:
 
 - External `agents/platform-sre-kubernetes.agent.md`: for Kubernetes reliability, rollout, and security-heavy changes.
 - External `skills/documentation-writer`: for README, memo, and runbook work.
