@@ -1,0 +1,27 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: hapi-fhir-postgres
+  namespace: fhir
+  labels:
+    app.kubernetes.io/name: hapi-fhir-postgres
+    app.kubernetes.io/part-of: hapi-fhir
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: platform-secrets
+  target:
+    name: hapi-fhir-postgres
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      metadata:
+        labels:
+          app.kubernetes.io/name: hapi-fhir-postgres
+          app.kubernetes.io/part-of: hapi-fhir
+  data:
+    - secretKey: password
+      remoteRef:
+        key: prod/hapi-fhir/postgres
+        property: password

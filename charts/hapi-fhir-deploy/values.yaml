@@ -1,0 +1,66 @@
+hapi-fhir-jpaserver:
+  replicaCount: 2
+
+  image:
+    registry: docker.io
+    repository: hapiproject/hapi
+    tag: "v8.8.0-1@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775"
+    pullPolicy: IfNotPresent
+
+  postgres:
+    enabled: false
+
+  externalDatabase:
+    host: hapi-fhir-postgres-rw.postgres.svc.cluster.local
+    port: 5432
+    user: hapi_fhir
+    database: hapi_fhir
+    existingSecret: hapi-fhir-postgres
+    existingSecretKey: password
+
+  extraEnv:
+    - name: HAPI_FHIR_POSTGRES_JDBC_URL
+      value: jdbc:postgresql://hapi-fhir-postgres-rw.postgres.svc.cluster.local:5432/hapi_fhir
+    - name: HAPI_FHIR_POSTGRES_USERNAME
+      value: hapi_fhir
+    - name: HAPI_FHIR_POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: hapi-fhir-postgres
+          key: password
+
+  extraConfig: |
+    spring:
+      datasource:
+        url: ${HAPI_FHIR_POSTGRES_JDBC_URL}
+        username: ${HAPI_FHIR_POSTGRES_USERNAME}
+        password: ${HAPI_FHIR_POSTGRES_PASSWORD}
+        driverClassName: org.postgresql.Driver
+        hikari:
+          minimumIdle: 2
+          maximumPoolSize: 10
+      jpa:
+        properties:
+          hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
+          hibernate.search.enabled: false
+
+  resourcesPreset: none
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  metrics:
+    serviceMonitor:
+      enabled: false
+
+  service:
+    type: ClusterIP
+    port: 8080
