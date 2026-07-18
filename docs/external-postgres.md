@@ -45,14 +45,22 @@ Keep `externalDatabase` and the `extraEnv` datasource values aligned. The chart 
 
 ## Connection Budget
 
-The baseline sets `spring.datasource.hikari.maximumPoolSize` to `10` and starts with `replicaCount: 2`, so the HAPI application budget is:
+The baseline sets `spring.datasource.hikari.maximumPoolSize` to `10` and starts with `replicaCount: 2`, so the steady-state HAPI application budget is:
 
 ```text
 max_app_connections = replicaCount * hikari.maximumPoolSize
 max_app_connections = 2 * 10 = 20
 ```
 
-Keep this below the PostgreSQL `max_connections` budget after subtracting reserved admin, migration, monitoring, and maintenance connections. Any autoscaling workstream must update this math before increasing replicas or pool size.
+The issue #5 autoscaling baseline in `manifests/autoscaling/hapi-fhir-scaledobject.yaml` assumes PostgreSQL `max_connections: 100` with `50` reserved connections, so it caps scale-out at:
+
+```text
+maxReplicas <= floor((max_connections - reserved) / hikari.maximumPoolSize)
+maxReplicas <= floor((100 - 50) / 10)
+maxReplicas <= 5
+```
+
+Keep application connections below the PostgreSQL `max_connections` budget after subtracting reserved admin, migration, monitoring, maintenance, and provider-overhead connections. PgBouncer transaction pooling is required before raising desired replicas beyond the native PostgreSQL budget. See `docs/autoscaling.md` for the rollout and recalculation workflow.
 
 ## Search Indexing
 

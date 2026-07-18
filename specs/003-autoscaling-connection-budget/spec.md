@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-18
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: GitHub issue #5, issue #1 epic, docs/external-postgres.md, and repository constitution.
 
@@ -98,6 +98,7 @@ As an operator, I can use a CPU trigger as a secondary signal so pods scale when
 - Observability work has made the HAPI FHIR request-rate metric available before autoscaling is enabled in production.
 - Initial deployments keep Hikari maximum pool size at the currently documented value unless runtime tuning updates it.
 - PgBouncer is out of scope unless the target environment's required replicas exceed native PostgreSQL capacity.
+- The committed per-pod RPS threshold is provisional and documented in `docs/autoscaling.md` until load testing records a final value.
 
 ## Source Context
 
