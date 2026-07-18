@@ -1,8 +1,8 @@
 # HAPI FHIR Deploy
 
-Helm-first Kubernetes deployment baseline for a scalable HAPI FHIR JPA Server using external PostgreSQL.
+Scalable HAPI FHIR Kubernetes deployment baseline with external PostgreSQL.
 
-This repository implements the Rev2 handoff tracked by issue #1. It is intended to be enough for an incoming engineer to install, validate, operate, and extend the baseline without re-reading the handoff document.
+This repository implements the Rev2 handoff tracked by issue #1 through a Helm-first deployment path. It is intended to be enough for an incoming engineer to install, validate, operate, and extend the baseline without re-reading the handoff document.
 
 ## Current Baseline
 
