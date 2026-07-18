@@ -56,4 +56,4 @@ Keep this below the PostgreSQL `max_connections` budget after subtracting reserv
 
 ## Search Indexing
 
-`hibernate.search.enabled: false` is deliberate. The D6 memo must decide whether this deployment keeps Lucene disabled or adds Elasticsearch/OpenSearch. Do not introduce an Elasticsearch/OpenSearch dependency in this baseline until that decision is recorded.
+`hibernate.search.enabled: false` is deliberate. The D6 memo in `docs/indexing-strategy.md` selects disabled advanced indexing for the starter baseline. Do not introduce Lucene, Elasticsearch, or OpenSearch dependencies unless a follow-up issue changes that decision and provides shared-backend configuration, migration, and rollback plans.

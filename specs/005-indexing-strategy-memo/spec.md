@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-18
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: GitHub issue #4, issue #1 epic, docs/external-postgres.md, CI review feedback from PR #9, and repository constitution.
 
@@ -95,7 +95,7 @@ As a project maintainer, I can turn a decision to use Elasticsearch/OpenSearch i
 
 ## Assumptions
 
-- The default starter architecture keeps advanced indexing disabled until the memo is merged.
+- The default starter architecture keeps advanced indexing disabled unless a future follow-up issue implements shared Elasticsearch/OpenSearch.
 - Elasticsearch/OpenSearch deployment, sizing, credentials, and network controls are separate implementation concerns.
 - The repository has no handoff PDF committed, so the memo must be self-contained.
 
