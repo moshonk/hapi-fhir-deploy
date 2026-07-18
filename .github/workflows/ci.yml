@@ -221,6 +221,27 @@ jobs:
             failures << "autoscaling docs missing #{expected}" unless autoscaling_docs.include?(normalized_expected)
           end
 
+          readme = File.read("README.md").gsub(/\s+/, " ").strip
+          [
+            "D1: Kafka and Zookeeper are not part of the OSS starter architecture",
+            "D2: HAPI FHIR is configured with explicit `spring.datasource.*` settings",
+            "D3: Observability uses built-in Actuator and Micrometer",
+            "D4: PostgreSQL support targets version `16` or `17` only",
+            "D5: Charts, images, and workflow/tool versions are pinned",
+            "D6: Hibernate Search remains disabled",
+            "No scale-to-zero behavior",
+            "No implicit embedded-Lucene indexing across multiple replicas",
+            "HAPI chart | `hapifhir/hapi-fhir-jpaserver` chart `0.23.0`",
+            "GitHub Actions Helm setup | `azure/setup-helm@v4`, Helm `v3.15.4`",
+            "maxReplicas <= floor((100 - 50) / 10)",
+            "Observability Checklist",
+            "Rollback And Graceful Shutdown",
+            "Scalable HAPI FHIR Kubernetes deployment baseline with external PostgreSQL"
+          ].each do |expected|
+            normalized_expected = expected.gsub(/\s+/, " ").strip
+            failures << "README missing #{expected}" unless readme.include?(normalized_expected)
+          end
+
           if failures.any?
             warn failures.map { |failure| "- #{failure}" }.join("\n")
             exit 1
