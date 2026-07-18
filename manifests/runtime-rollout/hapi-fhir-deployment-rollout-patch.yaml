@@ -1,0 +1,15 @@
+# Strategic merge patch for lifecycle fields not exposed by chart 0.23.0.
+# Apply with:
+# kubectl -n fhir patch deployment hapi-fhir-hapi-fhir-jpaserver \
+#   --type strategic \
+#   --patch-file manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: hapi-fhir-jpaserver
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 15

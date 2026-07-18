@@ -83,6 +83,8 @@ That leaves `50` PostgreSQL connections reserved for admin access, migrations, m
 
 Do not raise `maxReplicaCount`, `spring.datasource.hikari.maximumPoolSize`, or the KEDA RPS threshold without recalculating this equation against the target database's real `max_connections`.
 
+The runtime rollout workstream keeps Hikari at `10` until load tests justify a different value. Raising Hikari to `20` would reduce this native PostgreSQL ceiling to `2` replicas unless PostgreSQL capacity changes or PgBouncer transaction pooling is introduced.
+
 ## PgBouncer Requirement
 
 PgBouncer transaction pooling is required before native PostgreSQL budget is exceeded. Introduce PgBouncer and recompute `maxReplicaCount` when either of these is true:

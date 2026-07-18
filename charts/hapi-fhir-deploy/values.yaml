@@ -19,6 +19,10 @@ hapi-fhir-jpaserver:
     existingSecretKey: password
 
   extraEnv:
+    - name: JAVA_TOOL_OPTIONS
+      value: "-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+    - name: SERVER_SHUTDOWN
+      value: graceful
     - name: HAPI_FHIR_POSTGRES_JDBC_URL
       value: jdbc:postgresql://hapi-fhir-postgres-rw.postgres.svc.cluster.local:5432/hapi_fhir
     - name: HAPI_FHIR_POSTGRES_USERNAME
@@ -31,6 +35,8 @@ hapi-fhir-jpaserver:
 
   extraConfig: |
     spring:
+      lifecycle:
+        timeout-per-shutdown-phase: 30s
       datasource:
         url: ${HAPI_FHIR_POSTGRES_JDBC_URL}
         username: ${HAPI_FHIR_POSTGRES_USERNAME}
@@ -65,6 +71,15 @@ hapi-fhir-jpaserver:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: hapi-fhir
+          app.kubernetes.io/name: hapi-fhir-jpaserver
 
   readinessProbe:
     httpGet:
