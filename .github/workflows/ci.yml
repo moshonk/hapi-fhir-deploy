@@ -104,16 +104,38 @@ jobs:
           failures << "fhir-server-exporter image must be digest pinned" unless exporter_image_tag.include?("@sha256:")
 
           extra_config = chart.fetch("extraConfig")
-          parsed_extra_config = YAML.safe_load(
-            extra_config,
-            permitted_classes: [],
-            permitted_symbols: [],
-            aliases: false
-          )
+          unless extra_config.is_a?(String)
+            failures << "extraConfig must be a YAML string"
+            extra_config = extra_config.to_s
+          end
+
+          parsed_extra_config = begin
+            parsed = YAML.safe_load(
+              extra_config,
+              permitted_classes: [],
+              permitted_symbols: [],
+              aliases: false
+            )
+            if parsed.nil?
+              {}
+            elsif parsed.is_a?(Hash)
+              parsed
+            else
+              failures << "extraConfig must parse as a YAML mapping"
+              {}
+            end
+          rescue Psych::SyntaxError => e
+            failures << "extraConfig must be valid YAML: #{e.message.lines.first.strip}"
+            {}
+          end
           hibernate_properties = parsed_extra_config.dig("spring", "jpa", "properties") || {}
+          unless hibernate_properties.is_a?(Hash)
+            failures << "spring.jpa.properties in extraConfig must parse as a YAML mapping"
+            hibernate_properties = {}
+          end
           search_enabled = hibernate_properties["hibernate.search.enabled"]
           search_backend_type = hibernate_properties["hibernate.search.backend.type"].to_s.downcase
-          search_backend_hosts = hibernate_properties["hibernate.search.backend.hosts"].to_s
+          search_backend_hosts = hibernate_properties["hibernate.search.backend.hosts"].to_s.strip
           hikari_maximum_pool_size = parsed_extra_config.dig("spring", "datasource", "hikari", "maximumPoolSize").to_i
 
           [
