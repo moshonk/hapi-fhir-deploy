@@ -2,7 +2,7 @@
 
 Kubernetes deployment baseline for a scalable HAPI FHIR JPA Server using the official HAPI FHIR Helm chart and an external PostgreSQL database.
 
-This repository tracks the Rev2 handoff baseline in issue #1. Implemented workstreams include external PostgreSQL wiring and the Actuator/Micrometer observability baseline.
+This repository tracks the Rev2 handoff baseline in issue #1. Implemented workstreams include external PostgreSQL wiring, the Actuator/Micrometer observability baseline, and connection-budgeted autoscaling.
 
 ## Baseline
 
@@ -12,6 +12,7 @@ This repository tracks the Rev2 handoff baseline in issue #1. Implemented workst
 - PostgreSQL: external service only, PostgreSQL 16 or 17.
 - Database configuration: explicit `spring.datasource.*` settings through chart `extraConfig`.
 - Observability: built-in Actuator health and Prometheus endpoints on the HAPI metrics port, plus `fhir-server-exporter` chart `1.2.35`.
+- Autoscaling: KEDA `ScaledObject` with Prometheus request-rate and CPU triggers, capped by PostgreSQL connection-budget math.
 - Search indexing: Hibernate Search advanced indexing is disabled by design; see [docs/indexing-strategy.md](docs/indexing-strategy.md).
 - Messaging: no Kafka or Zookeeper in this starter architecture.
 
@@ -21,7 +22,9 @@ This repository tracks the Rev2 handoff baseline in issue #1. Implemented workst
 - `charts/hapi-fhir-deploy/values.yaml`: baseline values for external PostgreSQL, Hikari pool sizing, pinned images, resources, PodDisruptionBudget, probes, ServiceMonitors, and the FHIR server exporter.
 - `manifests/namespace.yaml`: namespace expected by the example install commands.
 - `manifests/external-secrets/hapi-fhir-postgres.yaml`: External Secrets manifest that creates the `hapi-fhir-postgres` runtime Secret.
+- `manifests/autoscaling/hapi-fhir-scaledobject.yaml`: KEDA autoscaler for the HAPI FHIR deployment.
 - `docs/observability.md`: monitoring rollout, scrape, metric continuity, and rollback checks.
+- `docs/autoscaling.md`: KEDA rollout, connection-budget math, PgBouncer threshold, and rollback checks.
 - `docs/indexing-strategy.md`: D6 memo comparing disabled advanced indexing with shared Elasticsearch/OpenSearch.
 
 ## Database Contract
@@ -69,6 +72,14 @@ helm upgrade --install hapi-fhir charts/hapi-fhir-deploy \
 
 The `ExternalSecret` references a placeholder `ClusterSecretStore` named `platform-secrets` and remote key `prod/hapi-fhir/postgres`. Replace those with the secret store and key path for the target cluster.
 
+If KEDA and Metrics Server are installed, apply the connection-budgeted autoscaler after the Helm release is healthy:
+
+```sh
+kubectl apply -f manifests/autoscaling/hapi-fhir-scaledobject.yaml
+```
+
+See [docs/autoscaling.md](docs/autoscaling.md) before changing `maxReplicaCount`, Hikari pool size, Prometheus address, or the provisional per-pod RPS threshold.
+
 ## Verification
 
 After rollout:
@@ -87,3 +98,7 @@ If the deployment does not start, inspect the HAPI pod logs first for `spring.da
 ## Monitoring
 
 The chart exposes HAPI Actuator probes at `/actuator/health/liveness` and `/actuator/health/readiness`, Prometheus metrics at `/actuator/prometheus`, and deploys `fhir-server-exporter` against the in-cluster HAPI FHIR service. See [docs/observability.md](docs/observability.md) for rollout checks, Prometheus scrape validation, metric continuity queries, and rollback guidance.
+
+## Autoscaling
+
+The KEDA `ScaledObject` keeps at least `2` HAPI FHIR replicas, scales on `sum(rate(http_server_requests_seconds_count{job="hapi-fhir-actuator"}[2m]))`, uses CPU utilization at `70%` as a secondary trigger, and caps scale-out at `5` replicas from `floor((100 - 50) / 10)`. See [docs/autoscaling.md](docs/autoscaling.md) for the full connection-budget equation and PgBouncer requirement.

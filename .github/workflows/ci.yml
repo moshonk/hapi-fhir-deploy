@@ -39,6 +39,7 @@ jobs:
             charts/hapi-fhir-deploy/Chart.yaml \
             charts/hapi-fhir-deploy/values.yaml \
             manifests/namespace.yaml \
+            manifests/autoscaling/hapi-fhir-scaledobject.yaml \
             manifests/external-secrets/hapi-fhir-postgres.yaml
 
       - name: Check Rev2 baseline decisions
@@ -55,6 +56,12 @@ jobs:
           chart = values.fetch("hapi-fhir-jpaserver")
           namespace = YAML.safe_load(
             File.read("manifests/namespace.yaml"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          autoscaler = YAML.safe_load(
+            File.read("manifests/autoscaling/hapi-fhir-scaledobject.yaml"),
             permitted_classes: [],
             permitted_symbols: [],
             aliases: false
@@ -97,16 +104,39 @@ jobs:
           failures << "fhir-server-exporter image must be digest pinned" unless exporter_image_tag.include?("@sha256:")
 
           extra_config = chart.fetch("extraConfig")
-          parsed_extra_config = YAML.safe_load(
-            extra_config,
-            permitted_classes: [],
-            permitted_symbols: [],
-            aliases: false
-          )
+          unless extra_config.is_a?(String)
+            failures << "extraConfig must be a YAML string"
+            extra_config = extra_config.to_s
+          end
+
+          parsed_extra_config = begin
+            parsed = YAML.safe_load(
+              extra_config,
+              permitted_classes: [],
+              permitted_symbols: [],
+              aliases: false
+            )
+            if parsed.nil?
+              {}
+            elsif parsed.is_a?(Hash)
+              parsed
+            else
+              failures << "extraConfig must parse as a YAML mapping"
+              {}
+            end
+          rescue Psych::SyntaxError => e
+            failures << "extraConfig must be valid YAML: #{e.message.lines.first.strip}"
+            {}
+          end
           hibernate_properties = parsed_extra_config.dig("spring", "jpa", "properties") || {}
+          unless hibernate_properties.is_a?(Hash)
+            failures << "spring.jpa.properties in extraConfig must parse as a YAML mapping"
+            hibernate_properties = {}
+          end
           search_enabled = hibernate_properties["hibernate.search.enabled"]
           search_backend_type = hibernate_properties["hibernate.search.backend.type"].to_s.downcase
-          search_backend_hosts = hibernate_properties["hibernate.search.backend.hosts"].to_s
+          search_backend_hosts = hibernate_properties["hibernate.search.backend.hosts"].to_s.strip
+          hikari_maximum_pool_size = parsed_extra_config.dig("spring", "datasource", "hikari", "maximumPoolSize").to_i
 
           [
             "spring:",
@@ -129,6 +159,43 @@ jobs:
           end
           failures << "extraConfig must not reference H2" if extra_config.match?(/\bh2\b/i)
 
+          postgres_max_connections = 100
+          reserved_connections = 50
+          failures << "Hikari maximumPoolSize must be greater than zero" unless hikari_maximum_pool_size.positive?
+          replica_ceiling = hikari_maximum_pool_size.positive? ? (postgres_max_connections - reserved_connections) / hikari_maximum_pool_size : 0
+          autoscaler_spec = autoscaler["spec"]
+          unless autoscaler_spec.is_a?(Hash)
+            failures << "HAPI autoscaler spec must be a YAML mapping"
+            autoscaler_spec = {}
+          end
+          failures << "HAPI autoscaler must be a KEDA ScaledObject" unless autoscaler["apiVersion"] == "keda.sh/v1alpha1" && autoscaler["kind"] == "ScaledObject"
+          failures << "HAPI autoscaler must live in fhir namespace" unless autoscaler.dig("metadata", "namespace") == "fhir"
+          failures << "HAPI autoscaler must target hapi-fhir-hapi-fhir-jpaserver Deployment" unless autoscaler_spec.dig("scaleTargetRef", "kind") == "Deployment" && autoscaler_spec.dig("scaleTargetRef", "name") == "hapi-fhir-hapi-fhir-jpaserver"
+          failures << "HAPI autoscaler minReplicaCount must be at least 2" unless autoscaler_spec["minReplicaCount"].to_i >= 2
+          failures << "HAPI autoscaler maxReplicaCount must be set" unless autoscaler_spec.key?("maxReplicaCount")
+          failures << "HAPI autoscaler maxReplicaCount must not exceed connection budget #{replica_ceiling}" unless autoscaler_spec["maxReplicaCount"].to_i <= replica_ceiling
+          failures << "HAPI autoscaler cooldownPeriod must be at least 300 seconds" unless autoscaler_spec["cooldownPeriod"].to_i >= 300
+          failures << "HAPI autoscaler scale-down stabilization must be at least 300 seconds" unless autoscaler_spec.dig("advanced", "horizontalPodAutoscalerConfig", "behavior", "scaleDown", "stabilizationWindowSeconds").to_i >= 300
+
+          triggers = autoscaler_spec["triggers"]
+          unless triggers.is_a?(Array)
+            failures << "HAPI autoscaler triggers must be a YAML sequence"
+            triggers = []
+          end
+          prometheus_trigger = triggers.find { |trigger| trigger["type"] == "prometheus" && trigger["name"] == "hapi-fhir-rps" }
+          cpu_trigger = triggers.find { |trigger| trigger["type"] == "cpu" && trigger["name"] == "hapi-fhir-cpu" }
+          failures << "HAPI autoscaler must include Prometheus RPS trigger" unless prometheus_trigger
+          failures << "HAPI autoscaler must include CPU trigger" unless cpu_trigger
+          if prometheus_trigger
+            query = prometheus_trigger.dig("metadata", "query").to_s
+            failures << "HAPI autoscaler Prometheus query must use http_server_requests_seconds_count rate over 2m" unless query.include?('rate(http_server_requests_seconds_count{job="hapi-fhir-actuator"}[2m])')
+            failures << "HAPI autoscaler Prometheus threshold must be provisional 5 RPS per pod" unless prometheus_trigger.dig("metadata", "threshold") == "5"
+            failures << "HAPI autoscaler Prometheus trigger must fail on null metrics" unless prometheus_trigger.dig("metadata", "ignoreNullValues") == "false"
+          end
+          if cpu_trigger
+            failures << "HAPI autoscaler CPU trigger must target 70 percent utilization" unless cpu_trigger["metricType"] == "Utilization" && cpu_trigger.dig("metadata", "value") == "70"
+          end
+
           indexing_memo = File.read("docs/indexing-strategy.md")
           [
             "Decision: Option A",
@@ -140,6 +207,18 @@ jobs:
             "Rollback plan"
           ].each do |expected|
             failures << "indexing memo missing #{expected}" unless indexing_memo.include?(expected)
+          end
+
+          autoscaling_docs = File.read("docs/autoscaling.md").gsub(/\s+/, " ").strip
+          [
+            "maxReplicas <= floor((postgres_max_connections - reserved_connections) / hikari_maximum_pool_size)",
+            "maxReplicas <= floor((100 - 50) / 10)",
+            "maxReplicas <= 5",
+            "provisional_per_pod_rps_threshold = 5",
+            "PgBouncer transaction pooling is required"
+          ].each do |expected|
+            normalized_expected = expected.gsub(/\s+/, " ").strip
+            failures << "autoscaling docs missing #{expected}" unless autoscaling_docs.include?(normalized_expected)
           end
 
           if failures.any?
