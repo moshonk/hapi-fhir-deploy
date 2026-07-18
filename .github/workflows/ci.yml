@@ -40,6 +40,7 @@ jobs:
             charts/hapi-fhir-deploy/values.yaml \
             manifests/namespace.yaml \
             manifests/autoscaling/hapi-fhir-scaledobject.yaml \
+            manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml \
             manifests/external-secrets/hapi-fhir-postgres.yaml
 
       - name: Check Rev2 baseline decisions
@@ -62,6 +63,12 @@ jobs:
           )
           autoscaler = YAML.safe_load(
             File.read("manifests/autoscaling/hapi-fhir-scaledobject.yaml"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          rollout_patch = YAML.safe_load(
+            File.read("manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml"),
             permitted_classes: [],
             permitted_symbols: [],
             aliases: false
@@ -95,6 +102,26 @@ jobs:
           failures << "HAPI ServiceMonitor must be enabled" unless chart.dig("metrics", "serviceMonitor", "enabled") == true
           failures << "readiness probe must use Actuator readiness" unless chart.dig("readinessProbe", "httpGet", "path") == "/actuator/health/readiness"
           failures << "liveness probe must use Actuator liveness" unless chart.dig("livenessProbe", "httpGet", "path") == "/actuator/health/liveness"
+          failures << "HAPI PodDisruptionBudget must preserve one pod" unless chart.dig("podDisruptionBudget", "enabled") == true && chart.dig("podDisruptionBudget", "minAvailable") == 1
+
+          env = Array(chart["extraEnv"]).to_h { |entry| [entry.fetch("name"), entry] }
+          java_tool_options = env.dig("JAVA_TOOL_OPTIONS", "value").to_s
+          [
+            "-XX:MaxRAMPercentage=75",
+            "-XX:+UseG1GC",
+            "-XX:MaxGCPauseMillis=200"
+          ].each do |expected|
+            failures << "JAVA_TOOL_OPTIONS missing #{expected}" unless java_tool_options.include?(expected)
+          end
+          failures << "SERVER_SHUTDOWN must enable graceful shutdown" unless env.dig("SERVER_SHUTDOWN", "value") == "graceful"
+
+          topology_spread = Array(chart["topologySpreadConstraints"])
+          zone_spread = topology_spread.find { |constraint| constraint["topologyKey"] == "topology.kubernetes.io/zone" }
+          failures << "HAPI topology spread constraint must target topology.kubernetes.io/zone" unless zone_spread
+          if zone_spread
+            failures << "HAPI topology spread maxSkew must be 1" unless zone_spread["maxSkew"] == 1
+            failures << "HAPI topology spread must use ScheduleAnyway for single-zone fallback" unless zone_spread["whenUnsatisfiable"] == "ScheduleAnyway"
+          end
 
           exporter = values.fetch("fhir-server-exporter")
           failures << "fhir-server-exporter must be enabled" unless exporter["enabled"] == true
@@ -137,6 +164,7 @@ jobs:
           search_backend_type = hibernate_properties["hibernate.search.backend.type"].to_s.downcase
           search_backend_hosts = hibernate_properties["hibernate.search.backend.hosts"].to_s.strip
           hikari_maximum_pool_size = parsed_extra_config.dig("spring", "datasource", "hikari", "maximumPoolSize").to_i
+          shutdown_phase_timeout = parsed_extra_config.dig("spring", "lifecycle", "timeout-per-shutdown-phase").to_s
 
           [
             "spring:",
@@ -153,11 +181,17 @@ jobs:
             failures << "extraConfig missing #{expected}" unless extra_config.include?(expected)
           end
           failures << "hibernate.search.enabled must be explicit" if search_enabled.nil?
+          failures << "spring.lifecycle.timeout-per-shutdown-phase must be 30s" unless shutdown_phase_timeout == "30s"
           if [true, "true"].include?(search_enabled) && chart.fetch("replicaCount").to_i > 1
             shared_backend = ["elasticsearch", "opensearch"].include?(search_backend_type) && !search_backend_hosts.empty?
             failures << "Hibernate Search requires shared Elasticsearch/OpenSearch backend settings for multi-replica deployments" unless shared_backend
           end
           failures << "extraConfig must not reference H2" if extra_config.match?(/\bh2\b/i)
+
+          patch_container = Array(rollout_patch.dig("spec", "template", "spec", "containers"))
+            .find { |container| container["name"] == "hapi-fhir-jpaserver" }
+          failures << "runtime rollout patch must set terminationGracePeriodSeconds >= 60" unless rollout_patch.dig("spec", "template", "spec", "terminationGracePeriodSeconds").to_i >= 60
+          failures << "runtime rollout patch must set preStop sleep to 15 seconds" unless patch_container&.dig("lifecycle", "preStop", "sleep", "seconds") == 15
 
           postgres_max_connections = 100
           reserved_connections = 50
@@ -221,6 +255,22 @@ jobs:
             failures << "autoscaling docs missing #{expected}" unless autoscaling_docs.include?(normalized_expected)
           end
 
+          runtime_docs = File.read("docs/runtime-rollout.md").gsub(/\s+/, " ").strip
+          [
+            "-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "SERVER_SHUTDOWN=graceful",
+            "spring.lifecycle.timeout-per-shutdown-phase=30s",
+            "maximumPoolSize: 10",
+            "maxReplicas <= floor((100 - 50) / 20)",
+            "terminationGracePeriodSeconds: 60",
+            "seconds: 15",
+            "Kubernetes `1.30` or newer",
+            "ScheduleAnyway"
+          ].each do |expected|
+            normalized_expected = expected.gsub(/\s+/, " ").strip
+            failures << "runtime rollout docs missing #{expected}" unless runtime_docs.include?(normalized_expected)
+          end
+
           readme = File.read("README.md").gsub(/\s+/, " ").strip
           [
             "D1: Kafka and Zookeeper are not part of the OSS starter architecture",
@@ -236,6 +286,8 @@ jobs:
             "maxReplicas <= floor((100 - 50) / 10)",
             "Observability Checklist",
             "Rollback And Graceful Shutdown",
+            "docs/runtime-rollout.md",
+            "Kubernetes `1.30` or newer",
             "Scalable HAPI FHIR Kubernetes deployment baseline with external PostgreSQL"
           ].each do |expected|
             normalized_expected = expected.gsub(/\s+/, " ").strip
@@ -304,7 +356,9 @@ jobs:
             "SPRING_DATASOURCE_URL" => "jdbc:postgresql://hapi-fhir-postgres-rw.postgres.svc.cluster.local:5432/hapi_fhir?ApplicationName=hapi-fhir",
             "SPRING_DATASOURCE_USERNAME" => "hapi_fhir",
             "SPRING_DATASOURCE_DRIVERCLASSNAME" => "org.postgresql.Driver",
-            "spring.jpa.properties.hibernate.dialect" => "ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect"
+            "spring.jpa.properties.hibernate.dialect" => "ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect",
+            "JAVA_TOOL_OPTIONS" => "-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "SERVER_SHUTDOWN" => "graceful"
           }
           failures = expected_literals.filter_map do |name, value|
             "#{name} must be rendered as #{value}" unless env.dig(name, "value") == value
@@ -314,6 +368,10 @@ jobs:
           unless password_ref == { "name" => "hapi-fhir-postgres", "key" => "password" }
             failures << "SPRING_DATASOURCE_PASSWORD must reference hapi-fhir-postgres/password"
           end
+
+          topology_spread = Array(deployment.dig("spec", "template", "spec", "topologySpreadConstraints"))
+          zone_spread = topology_spread.find { |constraint| constraint["topologyKey"] == "topology.kubernetes.io/zone" }
+          failures << "rendered Deployment must include zone topology spread constraint" unless zone_spread
 
           if failures.any?
             warn failures.map { |failure| "- #{failure}" }.join("\n")

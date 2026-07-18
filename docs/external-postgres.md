@@ -62,6 +62,8 @@ maxReplicas <= 5
 
 Keep application connections below the PostgreSQL `max_connections` budget after subtracting reserved admin, migration, monitoring, maintenance, and provider-overhead connections. PgBouncer transaction pooling is required before raising desired replicas beyond the native PostgreSQL budget. See `docs/autoscaling.md` for the rollout and recalculation workflow.
 
+Issue #7 requested keeping `hikari.maximum-pool-size=20` unless load tests justify a change. The committed baseline keeps `maximumPoolSize: 10` because issue #5's autoscaling ceiling is based on the native PostgreSQL budget above. Raising Hikari to `20` without changing the database or adding PgBouncer would reduce the safe native ceiling to `floor((100 - 50) / 20) = 2` replicas. See `docs/runtime-rollout.md` for the runtime tuning decision.
+
 ## Search Indexing
 
 `hibernate.search.enabled: false` is deliberate. The D6 memo in `docs/indexing-strategy.md` selects disabled advanced indexing for the starter baseline. Do not introduce Lucene, Elasticsearch, or OpenSearch dependencies unless a follow-up issue changes that decision and provides shared-backend configuration, migration, and rollback plans.

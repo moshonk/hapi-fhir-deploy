@@ -14,6 +14,8 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - FHIR HTTP port: `8080`.
 - Actuator metrics port: `8081`.
 - Replicas: `2` steady-state minimum.
+- Runtime tuning: `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:MaxGCPauseMillis=200`.
+- Graceful shutdown: `SERVER_SHUTDOWN=graceful`, `spring.lifecycle.timeout-per-shutdown-phase=30s`, 15-second `preStop`, and 60-second termination grace.
 - Database: external PostgreSQL `16` or `17`; no in-chart PostgreSQL.
 - Runtime Secret: `fhir/hapi-fhir-postgres`, key `password`.
 - Observability: built-in Actuator and Micrometer with Prometheus `ServiceMonitor`; no custom JMX exporter image.
@@ -59,9 +61,11 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `manifests/namespace.yaml`: namespace bootstrap manifest.
 - `manifests/external-secrets/hapi-fhir-postgres.yaml`: External Secrets manifest that creates the runtime database Secret.
 - `manifests/autoscaling/hapi-fhir-scaledobject.yaml`: KEDA autoscaler for the HAPI FHIR deployment.
+- `manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml`: strategic merge patch for lifecycle fields the upstream chart does not expose.
 - `docs/external-postgres.md`: database contract, Secret shape, environment overrides, and connection budget.
 - `docs/observability.md`: Actuator, Prometheus, exporter, rollout, and rollback checks.
 - `docs/autoscaling.md`: KEDA rollout, connection-budget math, PgBouncer threshold, verification, and rollback.
+- `docs/runtime-rollout.md`: JVM flags, graceful shutdown, topology spread, PDB alignment, and rollout verification.
 - `docs/indexing-strategy.md`: D6 decision memo for disabled advanced indexing.
 - `specs/`: Spec Kit workstream specs for the Rev2 child issues.
 
@@ -73,6 +77,7 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - External PostgreSQL `16` or `17`.
 - Prometheus Operator `ServiceMonitor` CRDs for observability.
 - KEDA `2.20.x` and Metrics Server before applying autoscaling.
+- Kubernetes `1.30` or newer for the runtime rollout patch's `preStop.sleep` lifecycle hook.
 
 ## Database Contract
 
@@ -128,6 +133,14 @@ After the HAPI rollout is healthy, apply the autoscaler if KEDA and Metrics Serv
 
 ```sh
 kubectl apply -f manifests/autoscaling/hapi-fhir-scaledobject.yaml
+```
+
+Apply the runtime rollout patch after Helm install or upgrade to set lifecycle fields not exposed by chart `0.23.0`:
+
+```sh
+kubectl -n fhir patch deployment hapi-fhir-hapi-fhir-jpaserver \
+  --type strategic \
+  --patch-file manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml
 ```
 
 ## Rollout Verification
@@ -213,6 +226,8 @@ The committed values assume PostgreSQL `max_connections: 100`, reserved connecti
 
 ## Rollback And Graceful Shutdown
 
+Runtime rollout assumptions are documented in [docs/runtime-rollout.md](docs/runtime-rollout.md). The baseline uses a 15-second `preStop` drain, 30-second Spring shutdown phase timeout, and 60-second pod termination grace period.
+
 Remove autoscaling before forcing a manual replica count:
 
 ```sh
@@ -259,6 +274,7 @@ ruby -rpsych -e 'ARGV.each { |path| Psych.parse_stream(File.read(path)); puts "o
   charts/hapi-fhir-deploy/values.yaml \
   manifests/namespace.yaml \
   manifests/autoscaling/hapi-fhir-scaledobject.yaml \
+  manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml \
   manifests/external-secrets/hapi-fhir-postgres.yaml
 ```
 

@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-18
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: GitHub issue #7, issue #1 epic, current values.yaml, and repository constitution.
 
@@ -103,6 +103,7 @@ As a platform engineer, I can keep replicas available during disruptions and spr
 - The target production cluster has at least two schedulable nodes and may have zone labels.
 - Some rollout behavior can only be validated in a live cluster, not purely through Helm rendering.
 - Autoscaling stabilization may be implemented in the autoscaling spec but is governed by this runtime spec.
+- The committed baseline keeps Hikari `maximumPoolSize: 10`; raising it to `20` requires load-test evidence plus updated PostgreSQL or PgBouncer capacity math.
 
 ## Source Context
 
