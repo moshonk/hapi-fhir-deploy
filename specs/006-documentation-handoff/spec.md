@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-18
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: GitHub issue #6, issue #1 epic, merged PR #10, PR review feedback from #8 and #10, and repository docs.
 
@@ -103,6 +103,7 @@ As an operator, I can find rollout, rollback, observability, autoscaling, connec
 - The README remains concise and links to deeper docs when detail would make it hard to scan.
 - GitHub repository settings may require owner permissions unavailable to some contributors.
 - Documentation updates should not change deployment behavior unless a referenced spec requires it.
+- The GitHub repository description is set to `Scalable HAPI FHIR Kubernetes deployment baseline with external PostgreSQL`.
 
 ## Source Context
 
