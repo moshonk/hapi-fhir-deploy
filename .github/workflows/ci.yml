@@ -163,16 +163,25 @@ jobs:
           reserved_connections = 50
           failures << "Hikari maximumPoolSize must be greater than zero" unless hikari_maximum_pool_size.positive?
           replica_ceiling = hikari_maximum_pool_size.positive? ? (postgres_max_connections - reserved_connections) / hikari_maximum_pool_size : 0
-          autoscaler_spec = autoscaler.fetch("spec")
+          autoscaler_spec = autoscaler["spec"]
+          unless autoscaler_spec.is_a?(Hash)
+            failures << "HAPI autoscaler spec must be a YAML mapping"
+            autoscaler_spec = {}
+          end
           failures << "HAPI autoscaler must be a KEDA ScaledObject" unless autoscaler["apiVersion"] == "keda.sh/v1alpha1" && autoscaler["kind"] == "ScaledObject"
           failures << "HAPI autoscaler must live in fhir namespace" unless autoscaler.dig("metadata", "namespace") == "fhir"
           failures << "HAPI autoscaler must target hapi-fhir-hapi-fhir-jpaserver Deployment" unless autoscaler_spec.dig("scaleTargetRef", "kind") == "Deployment" && autoscaler_spec.dig("scaleTargetRef", "name") == "hapi-fhir-hapi-fhir-jpaserver"
-          failures << "HAPI autoscaler minReplicaCount must be at least 2" unless autoscaler_spec.fetch("minReplicaCount").to_i >= 2
-          failures << "HAPI autoscaler maxReplicaCount must not exceed connection budget #{replica_ceiling}" unless autoscaler_spec.fetch("maxReplicaCount").to_i <= replica_ceiling
-          failures << "HAPI autoscaler cooldownPeriod must be at least 300 seconds" unless autoscaler_spec.fetch("cooldownPeriod").to_i >= 300
+          failures << "HAPI autoscaler minReplicaCount must be at least 2" unless autoscaler_spec["minReplicaCount"].to_i >= 2
+          failures << "HAPI autoscaler maxReplicaCount must be set" unless autoscaler_spec.key?("maxReplicaCount")
+          failures << "HAPI autoscaler maxReplicaCount must not exceed connection budget #{replica_ceiling}" unless autoscaler_spec["maxReplicaCount"].to_i <= replica_ceiling
+          failures << "HAPI autoscaler cooldownPeriod must be at least 300 seconds" unless autoscaler_spec["cooldownPeriod"].to_i >= 300
           failures << "HAPI autoscaler scale-down stabilization must be at least 300 seconds" unless autoscaler_spec.dig("advanced", "horizontalPodAutoscalerConfig", "behavior", "scaleDown", "stabilizationWindowSeconds").to_i >= 300
 
-          triggers = autoscaler_spec.fetch("triggers")
+          triggers = autoscaler_spec["triggers"]
+          unless triggers.is_a?(Array)
+            failures << "HAPI autoscaler triggers must be a YAML sequence"
+            triggers = []
+          end
           prometheus_trigger = triggers.find { |trigger| trigger["type"] == "prometheus" && trigger["name"] == "hapi-fhir-rps" }
           cpu_trigger = triggers.find { |trigger| trigger["type"] == "cpu" && trigger["name"] == "hapi-fhir-cpu" }
           failures << "HAPI autoscaler must include Prometheus RPS trigger" unless prometheus_trigger
@@ -200,7 +209,7 @@ jobs:
             failures << "indexing memo missing #{expected}" unless indexing_memo.include?(expected)
           end
 
-          autoscaling_docs = File.read("docs/autoscaling.md")
+          autoscaling_docs = File.read("docs/autoscaling.md").gsub(/\s+/, " ").strip
           [
             "maxReplicas <= floor((postgres_max_connections - reserved_connections) / hikari_maximum_pool_size)",
             "maxReplicas <= floor((100 - 50) / 10)",
@@ -208,7 +217,8 @@ jobs:
             "provisional_per_pod_rps_threshold = 5",
             "PgBouncer transaction pooling is required"
           ].each do |expected|
-            failures << "autoscaling docs missing #{expected}" unless autoscaling_docs.include?(expected)
+            normalized_expected = expected.gsub(/\s+/, " ").strip
+            failures << "autoscaling docs missing #{expected}" unless autoscaling_docs.include?(normalized_expected)
           end
 
           if failures.any?
