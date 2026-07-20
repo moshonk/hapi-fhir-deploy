@@ -45,6 +45,7 @@ Environment:
   TERRAFORM_BIN           Terraform executable; defaults to terraform.
   ANSIBLE_PLAYBOOK_BIN    ansible-playbook executable; defaults to ansible-playbook.
   ANSIBLE_GALAXY_BIN      ansible-galaxy executable; defaults to ansible-galaxy.
+  LAB_KUBECONFIG          Explicit kubeconfig path for deploy; otherwise uses generated lab kubeconfig.
   SYNTHEA_CMD             Synthea executable path; otherwise synthea or $SYNTHEA_HOME/run_synthea.
   LAB_SEED_LOADER_CMD     Optional loader command invoked as: CMD DATASET_DIR FHIR_BASE_URL.
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
@@ -74,6 +75,10 @@ run() {
 }
 
 need_command() {
+  if [[ "$1" == */* ]]; then
+    [[ -x "$1" ]] || die "required executable path not found or not executable: $1"
+    return 0
+  fi
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
@@ -168,6 +173,7 @@ require_run() {
 validate_run_id() {
   [[ -n "$RUN_ID" ]] || die "--run is required"
   [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "--run must contain only letters, numbers, dots, underscores, or hyphens"
+  [[ "$RUN_ID" != "." && "$RUN_ID" != ".." ]] || die "--run cannot be '.' or '..'"
 }
 
 require_profile() {
@@ -282,7 +288,12 @@ cmd_deploy() {
   local state
   state="$(state_dir)"
   local terraform_output_file="${TERRAFORM_OUTPUT_FILE:-$state/terraform-output.json}"
-  local kubeconfig_file="${KUBECONFIG:-$state/kubeconfig}"
+  local kubeconfig_file="$state/kubeconfig"
+  if [[ -n "${LAB_KUBECONFIG:-}" ]]; then
+    kubeconfig_file="$LAB_KUBECONFIG"
+  elif [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" != *:* ]]; then
+    kubeconfig_file="$KUBECONFIG"
+  fi
 
   if [[ "$DRY_RUN" == true ]]; then
     [[ -f "$terraform_output_file" ]] || log "Dry run: Terraform output file is not present yet: $terraform_output_file"
