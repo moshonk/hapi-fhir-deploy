@@ -1,0 +1,525 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARTIFACT_ROOT="${LAB_ARTIFACTS_DIR:-$ROOT_DIR/ansible/artifacts/lab}"
+RUN_ROOT="${LAB_RUNS_DIR:-$ARTIFACT_ROOT/runs}"
+
+COMMAND="${1:-}"
+if [[ -n "$COMMAND" ]]; then
+  shift
+fi
+
+CLOUD=""
+NAME=""
+RUN_ID=""
+PATIENTS=""
+SEED=""
+PROFILE=""
+AUTO_APPROVE=false
+YES=false
+DRY_RUN=false
+TF_VARS=()
+ANSIBLE_EXTRA_VARS=()
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/lab up --cloud aws|azure|gcp --name NAME [--auto-approve] [--var key=value]
+  scripts/lab deploy --cloud aws|azure|gcp --name NAME [--extra-vars key=value]
+  scripts/lab seed --patients N --seed S [--run RUN_ID]
+  scripts/lab benchmark --profile smoke|baseline|load|stress [--run RUN_ID]
+  scripts/lab report --run RUN_ID
+  scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
+
+Commands:
+  up         Provision cloud infrastructure with Terraform and save ignored local outputs.
+  deploy     Run the provider-neutral Ansible deployment workflow.
+  seed       Generate deterministic Synthea FHIR data and optionally invoke a loader.
+  benchmark  Run a k6 FHIR benchmark profile.
+  report     Generate a local Markdown report from a run directory.
+  down       Destroy cloud infrastructure. Use this promptly to control cloud cost.
+
+Environment:
+  LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
+  TERRAFORM_BIN           Terraform executable; defaults to terraform.
+  ANSIBLE_PLAYBOOK_BIN    ansible-playbook executable; defaults to ansible-playbook.
+  ANSIBLE_GALAXY_BIN      ansible-galaxy executable; defaults to ansible-galaxy.
+  LAB_KUBECONFIG          Explicit kubeconfig path for deploy; otherwise uses generated lab kubeconfig.
+  SYNTHEA_CMD             Synthea executable path; otherwise synthea or $SYNTHEA_HOME/run_synthea.
+  LAB_SEED_LOADER_CMD     Optional loader command invoked as: CMD DATASET_DIR FHIR_BASE_URL.
+  FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
+  K6_BIN                  k6 executable; defaults to k6.
+  K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
+  LAB_REPORT_CMD          Optional report command invoked as: CMD RUN_DIR REPORT_PATH.
+USAGE
+}
+
+die() {
+  printf 'scripts/lab: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf '==> %s\n' "$*" >&2
+}
+
+run() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+  if [[ "$DRY_RUN" == true ]]; then
+    return 0
+  fi
+  "$@"
+}
+
+need_command() {
+  if [[ "$1" == */* ]]; then
+    [[ -x "$1" ]] || die "required executable path not found or not executable: $1"
+    return 0
+  fi
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+need_command_unless_dry_run() {
+  if [[ "$DRY_RUN" == true && ! -x "$1" ]] && ! command -v "$1" >/dev/null 2>&1; then
+    log "Dry run: skipping missing command check for $1"
+    return 0
+  fi
+  need_command "$1"
+}
+
+timestamp() {
+  date -u +%Y%m%d-%H%M%S
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cloud)
+        CLOUD="${2:-}"
+        shift 2
+        ;;
+      --name)
+        NAME="${2:-}"
+        shift 2
+        ;;
+      --run)
+        RUN_ID="${2:-}"
+        shift 2
+        ;;
+      --patients)
+        PATIENTS="${2:-}"
+        shift 2
+        ;;
+      --seed)
+        SEED="${2:-}"
+        shift 2
+        ;;
+      --profile)
+        PROFILE="${2:-}"
+        shift 2
+        ;;
+      --auto-approve)
+        AUTO_APPROVE=true
+        shift
+        ;;
+      --yes)
+        YES=true
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+      --var|--terraform-var)
+        TF_VARS+=("-var" "${2:-}")
+        shift 2
+        ;;
+      --extra-vars)
+        ANSIBLE_EXTRA_VARS+=("-e" "${2:-}")
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+require_cloud() {
+  case "$CLOUD" in
+    aws|azure|gcp) ;;
+    "") die "--cloud is required and must be aws, azure, or gcp" ;;
+    *) die "unsupported cloud '$CLOUD'; expected aws, azure, or gcp" ;;
+  esac
+}
+
+require_name() {
+  [[ -n "$NAME" ]] || die "--name is required"
+  [[ "$NAME" =~ ^[a-z][a-z0-9-]{2,31}$ ]] || die "--name must match Terraform lab_name: ^[a-z][a-z0-9-]{2,31}$"
+}
+
+require_run() {
+  [[ -n "$RUN_ID" ]] || die "--run is required"
+  validate_run_id
+}
+
+validate_run_id() {
+  [[ -n "$RUN_ID" ]] || die "--run is required"
+  [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "--run must contain only letters, numbers, dots, underscores, or hyphens"
+  [[ "$RUN_ID" != "." && "$RUN_ID" != ".." ]] || die "--run cannot be '.' or '..'"
+}
+
+require_profile() {
+  case "$PROFILE" in
+    smoke|baseline|load|stress) ;;
+    "") die "--profile is required and must be smoke, baseline, load, or stress" ;;
+    *) die "unsupported profile '$PROFILE'; expected smoke, baseline, load, or stress" ;;
+  esac
+}
+
+state_dir() {
+  printf '%s/%s/%s' "$ARTIFACT_ROOT" "$CLOUD" "$NAME"
+}
+
+run_dir() {
+  printf '%s/%s' "$RUN_ROOT" "$RUN_ID"
+}
+
+terraform_bin() {
+  printf '%s' "${TERRAFORM_BIN:-terraform}"
+}
+
+terraform_dir() {
+  printf '%s/infra/terraform/%s' "$ROOT_DIR" "$CLOUD"
+}
+
+terraform_workspace_ensure() {
+  local tf_bin="$1"
+  local tf_dir="$2"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    run "$tf_bin" -chdir="$tf_dir" workspace select "$NAME"
+    return 0
+  fi
+
+  if ! "$tf_bin" -chdir="$tf_dir" workspace select "$NAME" >/dev/null 2>&1; then
+    run "$tf_bin" -chdir="$tf_dir" workspace new "$NAME"
+  else
+    run "$tf_bin" -chdir="$tf_dir" workspace select "$NAME"
+  fi
+}
+
+terraform_workspace_select() {
+  local tf_bin="$1"
+  local tf_dir="$2"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    run "$tf_bin" -chdir="$tf_dir" workspace select "$NAME"
+    return 0
+  fi
+
+  "$tf_bin" -chdir="$tf_dir" workspace select "$NAME" >/dev/null 2>&1 ||
+    die "Terraform workspace '$NAME' does not exist for $CLOUD; run up first or choose the correct --name"
+  run "$tf_bin" -chdir="$tf_dir" workspace select "$NAME"
+}
+
+write_terraform_outputs() {
+  local tf_bin="$1"
+  local tf_dir="$2"
+  local dir="$3"
+  local output_file="$dir/terraform-output.json"
+  local kubeconfig_file="$dir/kubeconfig"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Would write Terraform outputs to $output_file and $kubeconfig_file"
+    return 0
+  fi
+
+  "$tf_bin" -chdir="$tf_dir" output -json >"$output_file"
+  "$tf_bin" -chdir="$tf_dir" output -raw kubeconfig >"$kubeconfig_file"
+  chmod 600 "$kubeconfig_file"
+  log "Wrote ignored Terraform outputs to $output_file"
+  log "Wrote ignored kubeconfig to $kubeconfig_file"
+}
+
+cmd_up() {
+  require_cloud
+  require_name
+
+  local tf_bin
+  tf_bin="$(terraform_bin)"
+  need_command_unless_dry_run "$tf_bin"
+
+  local tf_dir
+  tf_dir="$(terraform_dir)"
+  [[ -d "$tf_dir" ]] || die "Terraform module not found: $tf_dir"
+
+  local dir
+  dir="$(state_dir)"
+  mkdir -p "$dir"
+
+  log "Provisioning $CLOUD lab '$NAME' with Terraform workspace '$NAME'"
+  run "$tf_bin" -chdir="$tf_dir" init
+  terraform_workspace_ensure "$tf_bin" "$tf_dir"
+
+  local apply_args=("apply" "-var" "lab_name=$NAME")
+  if [[ "$AUTO_APPROVE" == true ]]; then
+    apply_args+=("-auto-approve")
+  fi
+  if ((${#TF_VARS[@]})); then
+    apply_args+=("${TF_VARS[@]}")
+  fi
+
+  run "$tf_bin" -chdir="$tf_dir" "${apply_args[@]}"
+  write_terraform_outputs "$tf_bin" "$tf_dir" "$dir"
+}
+
+cmd_deploy() {
+  require_cloud
+  require_name
+
+  local state
+  state="$(state_dir)"
+  local terraform_output_file="${TERRAFORM_OUTPUT_FILE:-$state/terraform-output.json}"
+  local kubeconfig_file="$state/kubeconfig"
+  if [[ -n "${LAB_KUBECONFIG:-}" ]]; then
+    kubeconfig_file="$LAB_KUBECONFIG"
+  elif [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" != *:* ]]; then
+    kubeconfig_file="$KUBECONFIG"
+  fi
+
+  if [[ "$DRY_RUN" == true ]]; then
+    [[ -f "$terraform_output_file" ]] || log "Dry run: Terraform output file is not present yet: $terraform_output_file"
+    [[ -f "$kubeconfig_file" ]] || log "Dry run: kubeconfig is not present yet: $kubeconfig_file"
+  else
+    [[ -f "$terraform_output_file" ]] || die "Terraform output file not found: $terraform_output_file"
+    [[ -f "$kubeconfig_file" ]] || die "kubeconfig not found: $kubeconfig_file"
+  fi
+
+  local ansible_playbook_bin="${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook}"
+  local ansible_galaxy_bin="${ANSIBLE_GALAXY_BIN:-ansible-galaxy}"
+  need_command_unless_dry_run "$ansible_playbook_bin"
+  need_command_unless_dry_run "$ansible_galaxy_bin"
+
+  local collections_path="$ROOT_DIR/.ansible/collections"
+  mkdir -p "$collections_path"
+
+  log "Installing pinned Ansible collections"
+  run "$ansible_galaxy_bin" collection install -r "$ROOT_DIR/ansible/requirements.yml" -p "$collections_path"
+
+  log "Deploying HAPI FHIR to $CLOUD lab '$NAME' with Ansible"
+  local env_args=(
+    "ANSIBLE_COLLECTIONS_PATH=$collections_path${ANSIBLE_COLLECTIONS_PATH:+:$ANSIBLE_COLLECTIONS_PATH}"
+    "KUBECONFIG=$kubeconfig_file"
+    "TERRAFORM_OUTPUT_FILE=$terraform_output_file"
+  )
+  local playbook_args=(
+    -i "$ROOT_DIR/ansible/inventory.ini" \
+    "$ROOT_DIR/ansible/playbooks/lab.yml" \
+    -e "lab_kubeconfig=$kubeconfig_file" \
+    -e "terraform_output_file=$terraform_output_file"
+  )
+  if ((${#ANSIBLE_EXTRA_VARS[@]})); then
+    playbook_args+=("${ANSIBLE_EXTRA_VARS[@]}")
+  fi
+  run env "${env_args[@]}" "$ansible_playbook_bin" "${playbook_args[@]}"
+}
+
+find_synthea() {
+  if [[ -n "${SYNTHEA_CMD:-}" ]]; then
+    printf '%s' "$SYNTHEA_CMD"
+  elif command -v synthea >/dev/null 2>&1; then
+    command -v synthea
+  elif [[ -n "${SYNTHEA_HOME:-}" && -x "$SYNTHEA_HOME/run_synthea" ]]; then
+    printf '%s/run_synthea' "$SYNTHEA_HOME"
+  else
+    return 1
+  fi
+}
+
+cmd_seed() {
+  [[ -n "$PATIENTS" ]] || die "--patients is required"
+  [[ "$PATIENTS" =~ ^[0-9]+$ ]] || die "--patients must be a positive integer"
+  [[ "$PATIENTS" -gt 0 ]] || die "--patients must be greater than zero"
+  [[ -n "$SEED" ]] || die "--seed is required"
+  [[ "$SEED" =~ ^[0-9]+$ ]] || die "--seed must be a non-negative integer"
+
+  if [[ -z "$RUN_ID" ]]; then
+    RUN_ID="$(timestamp)-seed"
+  fi
+  validate_run_id
+
+  local dir
+  dir="$(run_dir)"
+  local dataset_dir="$dir/synthea"
+  mkdir -p "$dataset_dir"
+
+  local synthea_cmd
+  if ! synthea_cmd="$(find_synthea)"; then
+    if [[ "$DRY_RUN" == true ]]; then
+      synthea_cmd="${SYNTHEA_CMD:-synthea}"
+      log "Dry run: skipping missing Synthea command check for $synthea_cmd"
+    else
+      die "Synthea not found; set SYNTHEA_CMD or SYNTHEA_HOME"
+    fi
+  fi
+
+  log "Generating Synthea dataset in $dataset_dir"
+  run "$synthea_cmd" \
+    -p "$PATIENTS" \
+    -s "$SEED" \
+    --exporter.fhir.export=true \
+    --exporter.fhir.transaction_bundle=true \
+    --exporter.baseDirectory="$dataset_dir"
+
+  if [[ "$DRY_RUN" != true ]]; then
+    cat >"$dir/dataset-metadata.json" <<JSON
+{
+  "run_id": "$RUN_ID",
+  "patients": $PATIENTS,
+  "seed": $SEED,
+  "dataset_dir": "$dataset_dir",
+  "created_at_utc": "$(date -u +%FT%TZ)"
+}
+JSON
+  fi
+
+  if [[ -n "${LAB_SEED_LOADER_CMD:-}" ]]; then
+    [[ -n "${FHIR_BASE_URL:-}" ]] || die "FHIR_BASE_URL is required when LAB_SEED_LOADER_CMD is set"
+    log "Loading generated bundles into $FHIR_BASE_URL"
+    run "$LAB_SEED_LOADER_CMD" "$dataset_dir" "$FHIR_BASE_URL"
+  else
+    log "No LAB_SEED_LOADER_CMD set; generated data only. Issue #22 will add the default loader."
+  fi
+}
+
+cmd_benchmark() {
+  require_profile
+
+  if [[ -z "$RUN_ID" ]]; then
+    RUN_ID="$(timestamp)-${PROFILE}"
+  fi
+  validate_run_id
+  [[ -n "${FHIR_BASE_URL:-}" ]] || die "FHIR_BASE_URL is required for benchmark"
+
+  local k6_bin="${K6_BIN:-k6}"
+  need_command_unless_dry_run "$k6_bin"
+
+  local script="${K6_SCRIPT:-$ROOT_DIR/benchmarks/k6/$PROFILE.js}"
+  if [[ "$DRY_RUN" == true ]]; then
+    [[ -f "$script" ]] || log "Dry run: k6 script is not present yet: $script"
+  else
+    [[ -f "$script" ]] || die "k6 script not found: $script; set K6_SCRIPT or add benchmark profiles from issue #23"
+  fi
+
+  local dir
+  dir="$(run_dir)"
+  mkdir -p "$dir"
+
+  log "Running k6 $PROFILE benchmark against $FHIR_BASE_URL"
+  run "$k6_bin" run \
+    -e "FHIR_BASE_URL=$FHIR_BASE_URL" \
+    -e "PROFILE=$PROFILE" \
+    --summary-export "$dir/k6-summary.json" \
+    "$script"
+}
+
+cmd_report() {
+  require_run
+
+  local dir
+  dir="$(run_dir)"
+  [[ -d "$dir" ]] || die "run directory not found: $dir"
+
+  local report_path="$dir/report.md"
+  if [[ -n "${LAB_REPORT_CMD:-}" ]]; then
+    log "Generating report with LAB_REPORT_CMD"
+    run "$LAB_REPORT_CMD" "$dir" "$report_path"
+    return 0
+  fi
+
+  log "Generating Markdown report at $report_path"
+  if [[ "$DRY_RUN" == true ]]; then
+    return 0
+  fi
+
+  {
+    printf '# HAPI FHIR Benchmark Run %s\n\n' "$RUN_ID"
+    printf '- Run directory: `%s`\n' "$dir"
+    printf '- Generated at UTC: `%s`\n' "$(date -u +%FT%TZ)"
+    if [[ -f "$dir/dataset-metadata.json" ]]; then
+      printf '- Dataset metadata: `%s`\n' "$dir/dataset-metadata.json"
+    fi
+    if [[ -f "$dir/k6-summary.json" ]]; then
+      printf '- k6 summary: `%s`\n' "$dir/k6-summary.json"
+    fi
+    printf '\n## Notes\n\n'
+    printf 'This fallback report records local artifacts only. Use `LAB_REPORT_CMD` to plug in a richer report generator.\n'
+  } >"$report_path"
+}
+
+confirm_destroy() {
+  if [[ "$YES" == true ]]; then
+    return 0
+  fi
+
+  printf 'Destroying lab resources can delete data and is required to stop cloud cost.\n' >&2
+  printf 'Type the lab name "%s" to destroy %s resources: ' "$NAME" "$CLOUD" >&2
+  local answer=""
+  read -r answer || die "destroy confirmation failed"
+  [[ "$answer" == "$NAME" ]] || die "destroy cancelled"
+}
+
+cmd_down() {
+  require_cloud
+  require_name
+
+  local tf_bin
+  tf_bin="$(terraform_bin)"
+  need_command_unless_dry_run "$tf_bin"
+
+  local tf_dir
+  tf_dir="$(terraform_dir)"
+  [[ -d "$tf_dir" ]] || die "Terraform module not found: $tf_dir"
+
+  log "Preparing to destroy $CLOUD lab '$NAME'"
+  run "$tf_bin" -chdir="$tf_dir" init
+  terraform_workspace_select "$tf_bin" "$tf_dir"
+  confirm_destroy
+
+  local destroy_args=("destroy" "-var" "lab_name=$NAME")
+  if [[ "$YES" == true || "$AUTO_APPROVE" == true ]]; then
+    destroy_args+=("-auto-approve")
+  fi
+  if ((${#TF_VARS[@]})); then
+    destroy_args+=("${TF_VARS[@]}")
+  fi
+
+  run "$tf_bin" -chdir="$tf_dir" "${destroy_args[@]}"
+  log "Destroy completed for $CLOUD lab '$NAME'"
+}
+
+if [[ -z "$COMMAND" || "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+parse_args "$@"
+
+case "$COMMAND" in
+  up) cmd_up ;;
+  deploy) cmd_deploy ;;
+  seed) cmd_seed ;;
+  benchmark) cmd_benchmark ;;
+  report) cmd_report ;;
+  down) cmd_down ;;
+  help) usage ;;
+  *) die "unknown command: $COMMAND" ;;
+esac
