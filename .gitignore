@@ -17,3 +17,8 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 *.kubeconfig
+
+# Ansible local artifacts and downloaded collections
+.ansible/
+ansible/artifacts/*
+!ansible/artifacts/.gitkeep

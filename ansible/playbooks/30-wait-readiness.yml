@@ -1,0 +1,115 @@
+---
+- name: Wait for HAPI FHIR benchmark lab readiness
+  hosts: lab
+  gather_facts: false
+  vars_files:
+    - ../group_vars/lab.yml
+  environment: "{{ {'KUBECONFIG': lab_kubeconfig} if (lab_kubeconfig | length > 0) else {} }}"
+  pre_tasks:
+    - name: Require kubeconfig for readiness checks
+      ansible.builtin.assert:
+        that:
+          - lab_kubeconfig | length > 0
+        fail_msg: "Set KUBECONFIG or pass lab_kubeconfig before running readiness checks."
+
+  tasks:
+    - name: Wait for Kubernetes deployments
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - -n
+          - "{{ item.namespace }}"
+          - rollout
+          - status
+          - "deploy/{{ item.name }}"
+          - "--timeout={{ rollout_timeout }}"
+      changed_when: false
+      loop:
+        - namespace: "{{ hapi_namespace }}"
+          name: "{{ hapi_deployment_name }}"
+          enabled: true
+        - namespace: "{{ hapi_namespace }}"
+          name: "{{ exporter_deployment_name }}"
+          enabled: true
+        - namespace: "{{ keda_namespace }}"
+          name: "{{ keda_operator_deployment_name }}"
+          enabled: "{{ install_keda }}"
+        - namespace: "{{ metrics_server_namespace }}"
+          name: "{{ metrics_server_deployment_name }}"
+          enabled: "{{ install_metrics_server }}"
+      when: item.enabled | bool
+
+    - name: Wait for HAPI service to expose FHIR and Actuator ports
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ hapi_service_name }}"
+      register: hapi_service_info
+      until:
+        - hapi_service_info.resources | length == 1
+        - 8080 in (hapi_service_info.resources[0].spec.ports | map(attribute='port') | list)
+        - 8081 in (hapi_service_info.resources[0].spec.ports | map(attribute='port') | list)
+      retries: 30
+      delay: 10
+
+    - name: Wait for exporter service
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ exporter_service_name }}"
+      register: exporter_service_info
+      until: exporter_service_info.resources | length == 1
+      retries: 30
+      delay: 10
+
+    - name: Wait for HAPI ServiceMonitor
+      kubernetes.core.k8s_info:
+        api_version: monitoring.coreos.com/v1
+        kind: ServiceMonitor
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ hapi_servicemonitor_name }}"
+      register: hapi_servicemonitor_info
+      until: hapi_servicemonitor_info.resources | length == 1
+      retries: 30
+      delay: 10
+
+    - name: Wait for exporter ServiceMonitor
+      kubernetes.core.k8s_info:
+        api_version: monitoring.coreos.com/v1
+        kind: ServiceMonitor
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ exporter_servicemonitor_name }}"
+      register: exporter_servicemonitor_info
+      until: exporter_servicemonitor_info.resources | length == 1
+      retries: 30
+      delay: 10
+
+    - name: Wait for KEDA ScaledObject to become ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - -n
+          - "{{ hapi_namespace }}"
+          - get
+          - scaledobject
+          - "{{ hapi_scaledobject_name }}"
+          - -o
+          - "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
+      register: scaledobject_ready
+      changed_when: false
+      until: scaledobject_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      when: apply_autoscaling | bool
+
+    - name: Verify Kubernetes Metrics API is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - --raw
+          - /apis/metrics.k8s.io/v1beta1/nodes
+      changed_when: false
+      when: install_metrics_server | bool

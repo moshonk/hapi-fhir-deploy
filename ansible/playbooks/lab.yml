@@ -1,0 +1,12 @@
+---
+- name: Install benchmark lab add-ons
+  import_playbook: 00-install-addons.yml
+
+- name: Deploy HAPI FHIR
+  import_playbook: 20-deploy-hapi-fhir.yml
+
+- name: Wait for readiness
+  import_playbook: 30-wait-readiness.yml
+
+- name: Collect deployment metadata
+  import_playbook: 40-collect-metadata.yml

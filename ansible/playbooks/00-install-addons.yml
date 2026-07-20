@@ -1,0 +1,90 @@
+---
+- name: Install benchmark lab cluster add-ons
+  hosts: lab
+  gather_facts: false
+  vars_files:
+    - ../group_vars/lab.yml
+  environment: "{{ {'KUBECONFIG': lab_kubeconfig} if (lab_kubeconfig | length > 0) else {} }}"
+  pre_tasks:
+    - name: Require kubeconfig for add-on installation
+      ansible.builtin.assert:
+        that:
+          - lab_kubeconfig | length > 0
+        fail_msg: "Set KUBECONFIG or pass lab_kubeconfig before running the Ansible lab playbooks."
+
+  tasks:
+    - name: Add pinned add-on Helm repositories
+      kubernetes.core.helm_repository:
+        name: "{{ item.name }}"
+        repo_url: "{{ item.repo_url }}"
+      loop:
+        - name: prometheus-community
+          repo_url: https://prometheus-community.github.io/helm-charts
+        - name: metrics-server
+          repo_url: https://kubernetes-sigs.github.io/metrics-server
+        - name: kedacore
+          repo_url: https://kedacore.github.io/charts
+
+    - name: Install Prometheus Operator and Prometheus
+      kubernetes.core.helm:
+        name: "{{ prometheus_release_name }}"
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: "{{ kube_prometheus_stack_chart_version }}"
+        release_namespace: "{{ prometheus_namespace }}"
+        create_namespace: true
+        update_repo_cache: true
+        wait: true
+        wait_timeout: "{{ helm_wait_timeout }}"
+        values:
+          alertmanager:
+            enabled: false
+          defaultRules:
+            create: false
+          grafana:
+            enabled: false
+      when: install_prometheus_stack | bool
+
+    - name: Install Metrics Server
+      kubernetes.core.helm:
+        name: "{{ metrics_server_release_name }}"
+        chart_ref: metrics-server/metrics-server
+        chart_version: "{{ metrics_server_chart_version }}"
+        release_namespace: "{{ metrics_server_namespace }}"
+        update_repo_cache: true
+        wait: true
+        wait_timeout: "{{ helm_wait_timeout }}"
+      when: install_metrics_server | bool
+
+    - name: Install KEDA
+      kubernetes.core.helm:
+        name: "{{ keda_release_name }}"
+        chart_ref: kedacore/keda
+        chart_version: "{{ keda_chart_version }}"
+        release_namespace: "{{ keda_namespace }}"
+        create_namespace: true
+        update_repo_cache: true
+        wait: true
+        wait_timeout: "{{ helm_wait_timeout }}"
+      when: install_keda | bool
+
+    - name: Wait for ServiceMonitor CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: servicemonitors.monitoring.coreos.com
+      register: servicemonitor_crd
+      until: servicemonitor_crd.resources | length == 1
+      retries: 30
+      delay: 10
+      when: install_prometheus_stack | bool
+
+    - name: Wait for KEDA ScaledObject CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: scaledobjects.keda.sh
+      register: scaledobject_crd
+      until: scaledobject_crd.resources | length == 1
+      retries: 30
+      delay: 10
+      when: install_keda | bool

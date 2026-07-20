@@ -1,0 +1,88 @@
+---
+- name: Collect HAPI FHIR deployment metadata
+  hosts: lab
+  gather_facts: false
+  vars_files:
+    - ../group_vars/lab.yml
+  environment: "{{ {'KUBECONFIG': lab_kubeconfig} if (lab_kubeconfig | length > 0) else {} }}"
+  pre_tasks:
+    - name: Require kubeconfig for metadata collection
+      ansible.builtin.assert:
+        that:
+          - lab_kubeconfig | length > 0
+        fail_msg: "Set KUBECONFIG or pass lab_kubeconfig before collecting metadata."
+
+  tasks:
+    - name: Ensure metadata artifact directory exists
+      ansible.builtin.file:
+        path: "{{ metadata_output_path | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Capture HAPI deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ hapi_deployment_name }}"
+      register: hapi_deployment_info
+
+    - name: Capture exporter deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ exporter_deployment_name }}"
+      register: exporter_deployment_info
+
+    - name: Capture HAPI service
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ hapi_service_name }}"
+      register: hapi_service_metadata
+
+    - name: Capture exporter service
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ exporter_service_name }}"
+      register: exporter_service_metadata
+
+    - name: Capture KEDA ScaledObject
+      kubernetes.core.k8s_info:
+        api_version: keda.sh/v1alpha1
+        kind: ScaledObject
+        namespace: "{{ hapi_namespace }}"
+        name: "{{ hapi_scaledobject_name }}"
+      register: scaledobject_metadata
+      when: apply_autoscaling | bool
+
+    - name: Get metadata timestamp
+      ansible.builtin.command:
+        argv:
+          - date
+          - -u
+          - "+%Y-%m-%dT%H:%M:%SZ"
+      register: metadata_timestamp
+      changed_when: false
+
+    - name: Write non-sensitive deployment metadata
+      ansible.builtin.copy:
+        dest: "{{ metadata_output_path }}"
+        mode: "0600"
+        content: "{{ deployment_metadata | to_nice_json }}\n"
+      vars:
+        deployment_metadata:
+          generated_at: "{{ metadata_timestamp.stdout }}"
+          namespace: "{{ hapi_namespace }}"
+          release: "{{ hapi_release_name }}"
+          chart_path: "{{ chart_path }}"
+          values_path: "{{ values_path }}"
+          hapi_deployment: "{{ hapi_deployment_info.resources[0] | default({}) }}"
+          exporter_deployment: "{{ exporter_deployment_info.resources[0] | default({}) }}"
+          hapi_service: "{{ hapi_service_metadata.resources[0] | default({}) }}"
+          exporter_service: "{{ exporter_service_metadata.resources[0] | default({}) }}"
+          scaledobject: "{{ scaledobject_metadata.resources[0] | default({}) }}"

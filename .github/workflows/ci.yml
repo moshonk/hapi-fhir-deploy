@@ -37,6 +37,14 @@ jobs:
         with:
           terraform_version: "1.9.8"
 
+      - name: Set up Ansible
+        run: |
+          python3 -m pip install --user -r ansible/requirements.txt
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Ansible collections
+        run: ansible-galaxy collection install -r ansible/requirements.yml
+
       - name: Parse YAML files
         run: |
           ruby -rpsych -e 'ARGV.each { |path| Psych.parse_stream(File.read(path)); puts "ok #{path}" }' \
@@ -47,6 +55,13 @@ jobs:
             manifests/autoscaling/hapi-fhir-scaledobject.yaml \
             manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml \
             manifests/external-secrets/hapi-fhir-postgres.yaml
+
+      - name: Parse Ansible YAML files
+        run: |
+          ruby -rpsych -e 'Dir["ansible/**/*.yml", "ansible/**/*.yaml"].sort.each { |path| Psych.parse_stream(File.read(path)); puts "ok #{path}" }'
+
+      - name: Syntax-check Ansible playbooks
+        run: ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml --syntax-check
 
       - name: Check Rev2 baseline decisions
         run: |

@@ -1,0 +1,128 @@
+---
+- name: Deploy HAPI FHIR Helm baseline
+  hosts: lab
+  gather_facts: false
+  vars_files:
+    - ../group_vars/lab.yml
+  environment: "{{ {'KUBECONFIG': lab_kubeconfig} if (lab_kubeconfig | length > 0) else {} }}"
+  pre_tasks:
+    - name: Require kubeconfig for HAPI deployment
+      ansible.builtin.assert:
+        that:
+          - lab_kubeconfig | length > 0
+        fail_msg: "Set KUBECONFIG or pass lab_kubeconfig before running the Ansible lab playbooks."
+
+    - name: Initialize Terraform output data
+      ansible.builtin.set_fact:
+        terraform_outputs: {}
+
+    - name: Check Terraform output file when provided
+      ansible.builtin.stat:
+        path: "{{ terraform_output_file }}"
+      register: terraform_output_stat
+      when: terraform_output_file | length > 0
+
+    - name: Require provided Terraform output file to exist
+      ansible.builtin.assert:
+        that:
+          - terraform_output_stat.stat.exists
+        fail_msg: "terraform_output_file was provided but does not exist: {{ terraform_output_file }}"
+      when: terraform_output_file | length > 0
+
+    - name: Read Terraform output file
+      ansible.builtin.slurp:
+        path: "{{ terraform_output_file }}"
+      register: terraform_output_slurp
+      no_log: true
+      when: terraform_output_file | length > 0
+
+    - name: Parse Terraform output file
+      ansible.builtin.set_fact:
+        terraform_outputs: "{{ terraform_output_slurp.content | b64decode | from_json }}"
+      no_log: true
+      when: terraform_output_file | length > 0
+
+    - name: Resolve database connection inputs
+      ansible.builtin.set_fact:
+        lab_database_endpoint: "{{ hapi_database_host | default(terraform_outputs.database_endpoint.value | default(''), true) }}"
+        lab_database_port: "{{ hapi_database_port | default(terraform_outputs.database_port.value | default(5432), true) }}"
+        lab_database_name: "{{ hapi_database_name | default(terraform_outputs.database_name.value | default('hapi_fhir'), true) }}"
+        lab_database_username: "{{ hapi_database_username | default(terraform_outputs.database_username.value | default('hapi_fhir'), true) }}"
+        lab_database_password: "{{ hapi_database_password | default(terraform_outputs.database_password.value | default(''), true) }}"
+      no_log: true
+
+    - name: Require database endpoint and generated password
+      ansible.builtin.assert:
+        that:
+          - lab_database_endpoint | length > 0
+          - lab_database_name | length > 0
+          - lab_database_username | length > 0
+          - lab_database_password | length > 0
+        fail_msg: "Provide hapi_database_host and hapi_database_password, or pass terraform_output_file from issue #19."
+      no_log: true
+
+  tasks:
+    - name: Ensure local generated artifact directory exists
+      ansible.builtin.file:
+        path: "{{ runtime_values_path | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Apply HAPI namespace manifest
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ namespace_manifest_path }}"
+
+    - name: Create runtime PostgreSQL Secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ hapi_database_secret_name }}"
+            namespace: "{{ hapi_namespace }}"
+            labels:
+              app.kubernetes.io/name: hapi-fhir-postgres
+              app.kubernetes.io/part-of: hapi-fhir
+          type: Opaque
+          stringData:
+            "{{ hapi_database_secret_key }}": "{{ lab_database_password }}"
+      no_log: true
+
+    - name: Render runtime Helm values without secret material
+      ansible.builtin.template:
+        src: ../templates/hapi-fhir-values.runtime.yaml.j2
+        dest: "{{ runtime_values_path }}"
+        mode: "0600"
+
+    - name: Build HAPI FHIR Helm dependencies
+      ansible.builtin.command:
+        cmd: helm dependency build charts/hapi-fhir-deploy
+        chdir: "{{ repo_root }}"
+      changed_when: false
+
+    - name: Install or upgrade HAPI FHIR Helm release
+      kubernetes.core.helm:
+        name: "{{ hapi_release_name }}"
+        chart_ref: "{{ chart_path }}"
+        release_namespace: "{{ hapi_namespace }}"
+        values_files:
+          - "{{ values_path }}"
+          - "{{ runtime_values_path }}"
+        wait: true
+        wait_timeout: "{{ helm_wait_timeout }}"
+
+    - name: Apply runtime rollout patch
+      kubernetes.core.k8s:
+        state: patched
+        namespace: "{{ hapi_namespace }}"
+        merge_type:
+          - strategic-merge
+        definition: "{{ lookup('file', runtime_rollout_patch_path) | from_yaml }}"
+
+    - name: Apply HAPI FHIR KEDA autoscaler
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ autoscaling_manifest_path }}"
+      when: apply_autoscaling | bool
