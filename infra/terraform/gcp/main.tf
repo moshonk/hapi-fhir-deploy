@@ -98,11 +98,12 @@ resource "google_container_cluster" "lab" {
 }
 
 resource "google_container_node_pool" "lab" {
-  name       = "${local.name}-workers"
-  cluster    = google_container_cluster.lab.name
-  location   = google_container_cluster.lab.location
-  node_count = var.cluster_node_count
-  version    = var.kubernetes_version
+  name           = "${local.name}-workers"
+  cluster        = google_container_cluster.lab.name
+  location       = google_container_cluster.lab.location
+  node_count     = var.cluster_node_count
+  node_locations = [var.zone]
+  version        = var.kubernetes_version
 
   autoscaling {
     min_node_count = var.cluster_min_nodes

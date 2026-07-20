@@ -34,7 +34,7 @@ output "kubeconfig" {
     - name: ${aws_eks_cluster.lab.name}
       user:
         exec:
-          apiVersion: client.authentication.k8s.io/v1beta1
+          apiVersion: client.authentication.k8s.io/v1
           command: aws
           args:
           - eks
