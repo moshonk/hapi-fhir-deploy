@@ -1,0 +1,52 @@
+---
+lab_kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('', true) }}"
+terraform_output_file: "{{ lookup('env', 'TERRAFORM_OUTPUT_FILE') | default('', true) }}"
+
+repo_root: "{{ playbook_dir }}/../.."
+chart_path: "{{ repo_root }}/charts/hapi-fhir-deploy"
+values_path: "{{ chart_path }}/values.yaml"
+namespace_manifest_path: "{{ repo_root }}/manifests/namespace.yaml"
+autoscaling_manifest_path: "{{ repo_root }}/manifests/autoscaling/hapi-fhir-scaledobject.yaml"
+runtime_rollout_patch_path: "{{ repo_root }}/manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml"
+runtime_values_path: "{{ repo_root }}/ansible/artifacts/generated/hapi-fhir-values.runtime.yaml"
+metadata_output_path: "{{ repo_root }}/ansible/artifacts/deployment-metadata.json"
+
+hapi_namespace: fhir
+hapi_release_name: hapi-fhir
+hapi_deployment_name: hapi-fhir-hapi-fhir-jpaserver
+exporter_deployment_name: hapi-fhir-fhir-server-exporter
+hapi_service_name: hapi-fhir-hapi-fhir-jpaserver
+exporter_service_name: hapi-fhir-fhir-server-exporter
+hapi_servicemonitor_name: hapi-fhir-hapi-fhir-jpaserver
+exporter_servicemonitor_name: hapi-fhir-fhir-server-exporter
+hapi_scaledobject_name: hapi-fhir-jpaserver
+
+hapi_database_host: ""
+hapi_database_port: 5432
+hapi_database_name: hapi_fhir
+hapi_database_username: hapi_fhir
+hapi_database_password: "{{ lookup('env', 'HAPI_FHIR_POSTGRES_PASSWORD') | default('', true) }}"
+hapi_database_secret_name: hapi-fhir-postgres
+hapi_database_secret_key: password
+
+install_prometheus_stack: true
+install_metrics_server: true
+install_keda: true
+apply_autoscaling: true
+
+prometheus_namespace: monitoring
+prometheus_release_name: prometheus
+kube_prometheus_stack_chart_version: "87.17.0"
+
+metrics_server_namespace: kube-system
+metrics_server_release_name: metrics-server
+metrics_server_chart_version: "3.13.1"
+metrics_server_deployment_name: metrics-server
+
+keda_namespace: keda
+keda_release_name: keda
+keda_chart_version: "2.20.1"
+keda_operator_deployment_name: keda-operator
+
+helm_wait_timeout: 10m
+rollout_timeout: 600s

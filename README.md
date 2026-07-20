@@ -53,6 +53,12 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 | GitHub Actions Ruby setup | `ruby/setup-ruby@v1`, Ruby `3.3` |
 | GitHub Actions Helm setup | `azure/setup-helm@v4`, Helm `v3.15.4` |
 | KEDA API | `keda.sh/v1alpha1` `ScaledObject`; install KEDA `2.20.x` CRDs/controller |
+| Ansible core | `ansible-core==2.19.1` |
+| Python Kubernetes client | `kubernetes==36.0.3` |
+| Ansible Kubernetes collection | `kubernetes.core` collection `6.5.0` |
+| KEDA Helm chart | `kedacore/keda` chart `2.20.1` |
+| Metrics Server Helm chart | `metrics-server/metrics-server` chart `3.13.1` |
+| Prometheus Operator Helm chart | `prometheus-community/kube-prometheus-stack` chart `87.17.0` |
 
 ## Repository Map
 
@@ -62,6 +68,8 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `manifests/external-secrets/hapi-fhir-postgres.yaml`: External Secrets manifest that creates the runtime database Secret.
 - `manifests/autoscaling/hapi-fhir-scaledobject.yaml`: KEDA autoscaler for the HAPI FHIR deployment.
 - `manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml`: strategic merge patch for lifecycle fields the upstream chart does not expose.
+- `ansible/`: provider-neutral lab orchestration for add-ons, runtime Secret creation, Helm deployment, readiness waits, and metadata collection.
+- `infra/terraform/`: multi-cloud benchmark lab infrastructure modules for AWS, Azure, and GCP.
 - `docs/external-postgres.md`: database contract, Secret shape, environment overrides, and connection budget.
 - `docs/observability.md`: Actuator, Prometheus, exporter, rollout, and rollback checks.
 - `docs/autoscaling.md`: KEDA rollout, connection-budget math, PgBouncer threshold, verification, and rollback.
@@ -73,6 +81,7 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 
 - Kubernetes cluster with permission to manage resources in namespace `fhir`.
 - Helm `3.x`.
+- Ansible with pinned Python dependencies from `ansible/requirements.txt` and the pinned `kubernetes.core` collection from `ansible/requirements.yml` when using the lab orchestration playbooks.
 - External Secrets Operator and a `ClusterSecretStore` named `platform-secrets`, or an equivalent secret-management process.
 - External PostgreSQL `16` or `17`.
 - Prometheus Operator `ServiceMonitor` CRDs for observability.
@@ -142,6 +151,19 @@ kubectl -n fhir patch deployment hapi-fhir-hapi-fhir-jpaserver \
   --type strategic \
   --patch-file manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml
 ```
+
+For ephemeral benchmark lab clusters, the Ansible workflow can install add-ons, create the runtime PostgreSQL Secret, run Helm, apply autoscaling/runtime manifests, wait for readiness, and collect non-sensitive deployment metadata:
+
+```sh
+python3 -m pip install -r ansible/requirements.txt
+ansible-galaxy collection install -r ansible/requirements.yml
+export KUBECONFIG=/path/to/lab.kubeconfig
+terraform -chdir=infra/terraform/aws output -json > ansible/artifacts/terraform-aws.json
+ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml \
+  -e terraform_output_file=ansible/artifacts/terraform-aws.json
+```
+
+See [ansible/README.md](ansible/README.md) for provider-neutral runtime inputs and artifact handling. Do not commit generated kubeconfigs, Terraform output JSON, runtime values, metadata output, or real database passwords.
 
 ## Rollout Verification
 

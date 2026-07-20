@@ -1,0 +1,23 @@
+hapi-fhir-jpaserver:
+  externalDatabase:
+    host: "{{ lab_database_endpoint }}"
+    port: {{ lab_database_port }}
+    user: "{{ lab_database_username }}"
+    database: "{{ lab_database_name }}"
+    existingSecret: "{{ hapi_database_secret_name }}"
+    existingSecretKey: "{{ hapi_database_secret_key }}"
+
+  extraEnv:
+    - name: JAVA_TOOL_OPTIONS
+      value: "-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+    - name: SERVER_SHUTDOWN
+      value: graceful
+    - name: HAPI_FHIR_POSTGRES_JDBC_URL
+      value: "jdbc:postgresql://{{ lab_database_endpoint }}:{{ lab_database_port }}/{{ lab_database_name }}"
+    - name: HAPI_FHIR_POSTGRES_USERNAME
+      value: "{{ lab_database_username }}"
+    - name: HAPI_FHIR_POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: "{{ hapi_database_secret_name }}"
+          key: "{{ hapi_database_secret_key }}"
