@@ -60,6 +60,11 @@ jobs:
         run: |
           ruby -rpsych -e 'Dir["ansible/**/*.yml", "ansible/**/*.yaml"].sort.each { |path| Psych.parse_stream(File.read(path)); puts "ok #{path}" }'
 
+      - name: Check lab CLI syntax
+        run: |
+          bash -n scripts/lab
+          scripts/lab --help >/tmp/lab-help.txt
+
       - name: Syntax-check Ansible playbooks
         run: ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml --syntax-check
 

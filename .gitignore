@@ -5,6 +5,7 @@ charts/**/charts/
 
 # Terraform local state and secrets
 **/.terraform/
+**/terraform.tfstate.d/
 *.tfstate
 *.tfstate.*
 *.tfvars

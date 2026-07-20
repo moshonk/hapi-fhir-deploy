@@ -70,7 +70,9 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml`: strategic merge patch for lifecycle fields the upstream chart does not expose.
 - `ansible/`: provider-neutral lab orchestration for add-ons, runtime Secret creation, Helm deployment, readiness waits, and metadata collection.
 - `infra/terraform/`: multi-cloud benchmark lab infrastructure modules for AWS, Azure, and GCP.
+- `scripts/lab`: ephemeral benchmark lab wrapper for provision, deploy, seed, benchmark, report, and destroy workflows.
 - `docs/external-postgres.md`: database contract, Secret shape, environment overrides, and connection budget.
+- `docs/lab-cli.md`: lab wrapper usage, artifact handling, and teardown procedure.
 - `docs/observability.md`: Actuator, Prometheus, exporter, rollout, and rollback checks.
 - `docs/autoscaling.md`: KEDA rollout, connection-budget math, PgBouncer threshold, verification, and rollback.
 - `docs/runtime-rollout.md`: JVM flags, graceful shutdown, topology spread, PDB alignment, and rollout verification.
@@ -164,6 +166,19 @@ ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml \
 ```
 
 See [ansible/README.md](ansible/README.md) for provider-neutral runtime inputs and artifact handling. Do not commit generated kubeconfigs, Terraform output JSON, runtime values, metadata output, or real database passwords.
+
+The lab wrapper runs the provision, deploy, seed, benchmark, report, and destroy stages consistently:
+
+```sh
+scripts/lab up --cloud aws --name hapi-bench --auto-approve
+scripts/lab deploy --cloud aws --name hapi-bench
+scripts/lab seed --patients 1000 --seed 12345 --run smoke-aws
+FHIR_BASE_URL=http://localhost:8080/fhir scripts/lab benchmark --profile smoke --run smoke-aws
+scripts/lab report --run smoke-aws
+scripts/lab down --cloud aws --name hapi-bench --yes
+```
+
+Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` promptly after each lab run to destroy cloud resources and control cost. See [docs/lab-cli.md](docs/lab-cli.md) for wrapper options, ignored artifact paths, Synthea/k6 integration points, and teardown details.
 
 ## Rollout Verification
 
