@@ -21,7 +21,7 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "GCP zone for the regional node pool."
+  description = "GCP zone used as the GKE node pool location."
   type        = string
   default     = "us-central1-a"
 }
