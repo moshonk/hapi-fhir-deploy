@@ -32,6 +32,11 @@ jobs:
         with:
           version: v3.15.4
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
       - name: Parse YAML files
         run: |
           ruby -rpsych -e 'ARGV.each { |path| Psych.parse_stream(File.read(path)); puts "ok #{path}" }' \
@@ -315,6 +320,14 @@ jobs:
 
       - name: Parse rendered manifests
         run: ruby -rpsych -e 'Psych.parse_stream(File.read("/tmp/hapi-fhir-rendered.yaml")); puts "ok rendered manifests"'
+
+      - name: Validate Terraform benchmark lab modules
+        run: |
+          terraform fmt -check -recursive infra/terraform
+          for module in infra/terraform/aws infra/terraform/azure infra/terraform/gcp; do
+            terraform -chdir="$module" init -backend=false
+            terraform -chdir="$module" validate
+          done
 
       - name: Confirm datasource env and Secret references are rendered
         run: |
