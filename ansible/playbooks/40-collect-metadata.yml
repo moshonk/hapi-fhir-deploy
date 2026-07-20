@@ -60,6 +60,10 @@
       register: scaledobject_metadata
       when: apply_autoscaling | bool
 
+    - name: Normalize optional KEDA ScaledObject metadata
+      ansible.builtin.set_fact:
+        lab_scaledobject_resource: "{{ ((scaledobject_metadata | default({'resources': []})).resources | default([]) | first) | default({}) }}"
+
     - name: Get metadata timestamp
       ansible.builtin.command:
         argv:
@@ -85,4 +89,4 @@
           exporter_deployment: "{{ exporter_deployment_info.resources[0] | default({}) }}"
           hapi_service: "{{ hapi_service_metadata.resources[0] | default({}) }}"
           exporter_service: "{{ exporter_service_metadata.resources[0] | default({}) }}"
-          scaledobject: "{{ scaledobject_metadata.resources[0] | default({}) }}"
+          scaledobject: "{{ lab_scaledobject_resource }}"

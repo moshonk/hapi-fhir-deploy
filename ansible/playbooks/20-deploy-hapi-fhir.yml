@@ -119,7 +119,17 @@
         namespace: "{{ hapi_namespace }}"
         merge_type:
           - strategic-merge
-        definition: "{{ lookup('file', runtime_rollout_patch_path) | from_yaml }}"
+        definition: >-
+          {{
+            {
+              'apiVersion': 'apps/v1',
+              'kind': 'Deployment',
+              'metadata': {
+                'name': hapi_deployment_name,
+                'namespace': hapi_namespace
+              }
+            } | combine(lookup('file', runtime_rollout_patch_path) | from_yaml, recursive=True)
+          }}
 
     - name: Apply HAPI FHIR KEDA autoscaler
       kubernetes.core.k8s:

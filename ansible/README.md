@@ -2,7 +2,7 @@
 
 These playbooks deploy the HAPI FHIR Helm baseline onto a Kubernetes cluster after Terraform has provisioned the provider-specific infrastructure.
 
-The workflow is provider-neutral once `KUBECONFIG` points at the target cluster:
+The workflow is provider-neutral once `KUBECONFIG` points at the target cluster. The control node must have Python 3, Helm `3.x`, `kubectl`, and access to the target cluster:
 
 ```sh
 python3 -m pip install -r ansible/requirements.txt

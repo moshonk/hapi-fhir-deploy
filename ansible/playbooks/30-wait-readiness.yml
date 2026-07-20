@@ -74,6 +74,7 @@
       until: hapi_servicemonitor_info.resources | length == 1
       retries: 30
       delay: 10
+      when: install_prometheus_stack | bool
 
     - name: Wait for exporter ServiceMonitor
       kubernetes.core.k8s_info:
@@ -85,6 +86,7 @@
       until: exporter_servicemonitor_info.resources | length == 1
       retries: 30
       delay: 10
+      when: install_prometheus_stack | bool
 
     - name: Wait for KEDA ScaledObject to become ready
       ansible.builtin.command:
@@ -99,7 +101,10 @@
           - "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
       register: scaledobject_ready
       changed_when: false
-      until: scaledobject_ready.stdout == "True"
+      failed_when: false
+      until:
+        - scaledobject_ready.rc == 0
+        - scaledobject_ready.stdout == "True"
       retries: 30
       delay: 10
       when: apply_autoscaling | bool
@@ -111,5 +116,10 @@
           - get
           - --raw
           - /apis/metrics.k8s.io/v1beta1/nodes
+      register: metrics_api_ready
       changed_when: false
+      failed_when: false
+      until: metrics_api_ready.rc == 0
+      retries: 30
+      delay: 10
       when: install_metrics_server | bool
