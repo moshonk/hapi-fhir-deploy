@@ -1,0 +1,43 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:patient-1",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "patient-1",
+        "name": [
+          {
+            "family": "Example",
+            "given": [
+              "Synthea"
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/patient-1"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:observation-1",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "observation-1",
+        "status": "final",
+        "code": {
+          "text": "Example observation"
+        },
+        "subject": {
+          "reference": "Patient/patient-1"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/observation-1"
+      }
+    }
+  ]
+}

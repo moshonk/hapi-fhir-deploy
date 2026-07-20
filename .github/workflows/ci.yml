@@ -64,6 +64,20 @@ jobs:
         run: |
           bash -n scripts/lab
           scripts/lab --help >/tmp/lab-help.txt
+          scripts/lab seed --patients 1 --seed 123 --run ci-seed --dry-run >/tmp/lab-seed-dry-run.txt
+
+      - name: Check Synthea loader
+        run: |
+          ruby -c scripts/synthea_loader.rb
+          ruby scripts/synthea_loader.rb \
+            --input test/fixtures/synthea \
+            --metadata /tmp/synthea-loader-metadata.json \
+            --patients 1 \
+            --seed 123 \
+            --run-id ci-seed \
+            --metadata-only
+          ruby -rjson -e 'm = JSON.parse(File.read("/tmp/synthea-loader-metadata.json")); abort "patient count mismatch" unless m.dig("synthea", "patients") == 1; abort "seed mismatch" unless m.dig("synthea", "seed") == 123; abort "Patient count mismatch" unless m.dig("synthea", "resource_counts", "Patient") == 1; abort "Observation count mismatch" unless m.dig("synthea", "resource_counts", "Observation") == 1; abort "unexpected import errors" unless m.dig("import", "error_count") == 0'
+          ruby test/synthea_loader_http_test.rb
 
       - name: Syntax-check Ansible playbooks
         run: ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml --syntax-check

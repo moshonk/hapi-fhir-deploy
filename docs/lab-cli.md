@@ -1,11 +1,11 @@
 # Lab Utility CLI
 
-The `scripts/lab` wrapper coordinates the ephemeral benchmark workflow for issue #21:
+The `scripts/lab` wrapper coordinates the ephemeral benchmark workflow:
 
 ```sh
 scripts/lab up --cloud aws --name hapi-bench --auto-approve
 scripts/lab deploy --cloud aws --name hapi-bench
-scripts/lab seed --patients 1000 --seed 12345 --run smoke-aws
+FHIR_BASE_URL=http://localhost:8080/fhir scripts/lab seed --patients 1000 --seed 12345 --run smoke-aws
 FHIR_BASE_URL=http://localhost:8080/fhir scripts/lab benchmark --profile smoke --run smoke-aws
 scripts/lab report --run smoke-aws
 scripts/lab down --cloud aws --name hapi-bench --yes
@@ -45,19 +45,22 @@ By default, `deploy` uses `ansible/artifacts/lab/<cloud>/<name>/kubeconfig`. Set
 ### Seed
 
 ```sh
-scripts/lab seed --patients N --seed S [--run RUN_ID]
+FHIR_BASE_URL=https://example/fhir scripts/lab seed --patients N --seed S [--run RUN_ID]
 ```
 
-`seed` calls Synthea through `SYNTHEA_CMD`, a `synthea` executable on `PATH`, or `$SYNTHEA_HOME/run_synthea`. It writes deterministic FHIR transaction bundle output and dataset metadata below `ansible/artifacts/lab/runs/<run-id>/`.
+`seed` calls Synthea through `SYNTHEA_CMD`, a `synthea` executable on `PATH`, or `$SYNTHEA_HOME/run_synthea`. It applies `benchmarks/synthea/synthea.properties` by default and passes `patients`, `seed`, transaction-bundle export settings, and the ignored output directory at runtime.
+
+After generation, `seed` calls `scripts/synthea_loader.rb` by default to POST FHIR R4 JSON transaction bundles to `FHIR_BASE_URL`. The loader writes `dataset-metadata.json` below `ansible/artifacts/lab/runs/<run-id>/` with the population size, seed, transaction bundle count, generated FHIR resource counts, import duration, HTTP/FHIR response status counts, imported entry count, and import errors.
 
 Run IDs may contain only letters, numbers, dots, underscores, and hyphens.
 
-Until the default seed loader from issue #22 is added, set `LAB_SEED_LOADER_CMD` and `FHIR_BASE_URL` to load generated bundles into HAPI FHIR:
+Use `--generate-only` when you want to create and count the deterministic dataset without importing it:
 
 ```sh
-LAB_SEED_LOADER_CMD=./path/to/loader FHIR_BASE_URL=https://example/fhir \
-  scripts/lab seed --patients 1000 --seed 12345 --run baseline-aws
+scripts/lab seed --patients 1000 --seed 12345 --run baseline-aws --generate-only
 ```
+
+Set `LAB_SEED_LOADER_CMD` to replace the default loader with another command that accepts the same loader CLI flags.
 
 ### Benchmark
 
