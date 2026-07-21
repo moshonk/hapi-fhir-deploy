@@ -19,6 +19,7 @@ PROFILE=""
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
+GENERATE_ONLY=false
 TF_VARS=()
 ANSIBLE_EXTRA_VARS=()
 
@@ -27,7 +28,7 @@ usage() {
 Usage:
   scripts/lab up --cloud aws|azure|gcp --name NAME [--auto-approve] [--var key=value]
   scripts/lab deploy --cloud aws|azure|gcp --name NAME [--extra-vars key=value]
-  scripts/lab seed --patients N --seed S [--run RUN_ID]
+  scripts/lab seed --patients N --seed S [--run RUN_ID] [--generate-only]
   scripts/lab benchmark --profile smoke|baseline|load|stress [--run RUN_ID]
   scripts/lab report --run RUN_ID
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
@@ -47,7 +48,8 @@ Environment:
   ANSIBLE_GALAXY_BIN      ansible-galaxy executable; defaults to ansible-galaxy.
   LAB_KUBECONFIG          Explicit kubeconfig path for deploy; otherwise uses generated lab kubeconfig.
   SYNTHEA_CMD             Synthea executable path; otherwise synthea or $SYNTHEA_HOME/run_synthea.
-  LAB_SEED_LOADER_CMD     Optional loader command invoked as: CMD DATASET_DIR FHIR_BASE_URL.
+  SYNTHEA_CONFIG          Synthea properties file; defaults to benchmarks/synthea/synthea.properties.
+  LAB_SEED_LOADER_CMD     Loader command; defaults to scripts/synthea_loader.rb.
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
@@ -131,6 +133,10 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN=true
+        shift
+        ;;
+      --generate-only)
+        GENERATE_ONLY=true
         shift
         ;;
       --var|--terraform-var)
@@ -344,6 +350,10 @@ find_synthea() {
   fi
 }
 
+seed_loader_bin() {
+  printf '%s' "${LAB_SEED_LOADER_CMD:-$ROOT_DIR/scripts/synthea_loader.rb}"
+}
+
 cmd_seed() {
   [[ -n "$PATIENTS" ]] || die "--patients is required"
   [[ "$PATIENTS" =~ ^[0-9]+$ ]] || die "--patients must be a positive integer"
@@ -361,6 +371,17 @@ cmd_seed() {
   local dataset_dir="$dir/synthea"
   mkdir -p "$dataset_dir"
 
+  local metadata_file="$dir/dataset-metadata.json"
+  local loader_cmd
+  loader_cmd="$(seed_loader_bin)"
+  need_command_unless_dry_run "$loader_cmd"
+
+  if [[ "$GENERATE_ONLY" != true && "$DRY_RUN" != true ]]; then
+    [[ -n "${FHIR_BASE_URL:-}" ]] || die "FHIR_BASE_URL is required unless --generate-only is set"
+  elif [[ "$GENERATE_ONLY" != true && -z "${FHIR_BASE_URL:-}" ]]; then
+    log "Dry run: FHIR_BASE_URL is not set and would be required for import"
+  fi
+
   local synthea_cmd
   if ! synthea_cmd="$(find_synthea)"; then
     if [[ "$DRY_RUN" == true ]]; then
@@ -371,33 +392,39 @@ cmd_seed() {
     fi
   fi
 
-  log "Generating Synthea dataset in $dataset_dir"
-  run "$synthea_cmd" \
-    -p "$PATIENTS" \
-    -s "$SEED" \
-    --exporter.fhir.export=true \
-    --exporter.fhir.transaction_bundle=true \
+  local synthea_config="${SYNTHEA_CONFIG:-$ROOT_DIR/benchmarks/synthea/synthea.properties}"
+  local synthea_args=()
+  if [[ -f "$synthea_config" ]]; then
+    synthea_args+=("-c" "$synthea_config")
+  fi
+  synthea_args+=(
+    -p "$PATIENTS"
+    -s "$SEED"
+    --exporter.fhir.export=true
+    --exporter.fhir.transaction_bundle=true
     --exporter.baseDirectory="$dataset_dir"
+  )
 
-  if [[ "$DRY_RUN" != true ]]; then
-    cat >"$dir/dataset-metadata.json" <<JSON
-{
-  "run_id": "$RUN_ID",
-  "patients": $PATIENTS,
-  "seed": $SEED,
-  "dataset_dir": "$dataset_dir",
-  "created_at_utc": "$(date -u +%FT%TZ)"
-}
-JSON
-  fi
+  log "Generating Synthea dataset in $dataset_dir"
+  run "$synthea_cmd" "${synthea_args[@]}"
 
-  if [[ -n "${LAB_SEED_LOADER_CMD:-}" ]]; then
-    [[ -n "${FHIR_BASE_URL:-}" ]] || die "FHIR_BASE_URL is required when LAB_SEED_LOADER_CMD is set"
-    log "Loading generated bundles into $FHIR_BASE_URL"
-    run "$LAB_SEED_LOADER_CMD" "$dataset_dir" "$FHIR_BASE_URL"
+  local loader_args=(
+    --input "$dataset_dir"
+    --metadata "$metadata_file"
+    --patients "$PATIENTS"
+    --seed "$SEED"
+    --run-id "$RUN_ID"
+  )
+  if [[ "$GENERATE_ONLY" == true ]]; then
+    loader_args+=(--metadata-only)
+  elif [[ -n "${FHIR_BASE_URL:-}" ]]; then
+    loader_args+=(--fhir-base-url "$FHIR_BASE_URL")
   else
-    log "No LAB_SEED_LOADER_CMD set; generated data only. Issue #22 will add the default loader."
+    loader_args+=(--fhir-base-url "http://example.invalid/fhir")
   fi
+
+  log "Recording dataset metadata and loading transaction bundles"
+  run "$loader_cmd" "${loader_args[@]}"
 }
 
 cmd_benchmark() {
