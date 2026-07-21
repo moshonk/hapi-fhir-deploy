@@ -262,6 +262,8 @@ begin
     slug(profile)
   ].join("-")
   result_dir = File.join(options[:results_root], result_dir_name)
+  raise PublishError, "result directory already exists: #{result_dir}" if File.exist?(result_dir)
+
   raw_dir = File.join(result_dir, "raw")
   FileUtils.mkdir_p(raw_dir)
 
@@ -335,5 +337,8 @@ begin
   puts result_dir
 rescue PublishError => e
   warn "scripts/publish_results.rb: #{e.message}"
+  exit 1
+rescue StandardError => e
+  warn "scripts/publish_results.rb: #{e.class}: #{e.message}"
   exit 1
 end

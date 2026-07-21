@@ -507,8 +507,17 @@ cmd_report() {
     return 0
   fi
 
-  local publisher="${LAB_RESULT_PUBLISHER_CMD:-$ROOT_DIR/scripts/publish_results.rb}"
-  need_command_unless_dry_run "$publisher"
+  local publisher_cmd=()
+  if [[ -n "${LAB_RESULT_PUBLISHER_CMD:-}" ]]; then
+    need_command_unless_dry_run "$LAB_RESULT_PUBLISHER_CMD"
+    publisher_cmd=("$LAB_RESULT_PUBLISHER_CMD")
+  else
+    local ruby_bin="${RUBY_BIN:-ruby}"
+    local default_publisher="$ROOT_DIR/scripts/publish_results.rb"
+    need_command_unless_dry_run "$ruby_bin"
+    [[ -f "$default_publisher" ]] || die "default result publisher not found: $default_publisher"
+    publisher_cmd=("$ruby_bin" "$default_publisher")
+  fi
 
   local publisher_args=(
     --run-dir "$dir"
@@ -540,7 +549,7 @@ cmd_report() {
   fi
 
   log "Publishing benchmark results under $RESULT_ROOT"
-  run "$publisher" "${publisher_args[@]}"
+  run "${publisher_cmd[@]}" "${publisher_args[@]}"
 }
 
 confirm_destroy() {

@@ -132,7 +132,7 @@ class PublishResultsTest < Minitest::Test
       assert_equal 100, environment.dig("synthea", "patients")
       assert_equal 12_345, environment.dig("synthea", "seed")
       assert_equal "smoke", environment.dig("benchmark", "profile")
-      assert_includes environment.dig("chart", "hapi_image"), "hapiproject/hapi:v8.10.0-2@sha256:"
+      assert_match(%r{\Adocker\.io/hapiproject/hapi:[^@]+@sha256:[0-9a-f]{64}\z}, environment.dig("chart", "hapi_image"))
 
       report = File.read(File.join(result_dir, "report.md"))
       assert_includes report, "# HAPI FHIR Benchmark Report"
@@ -146,6 +146,35 @@ class PublishResultsTest < Minitest::Test
       snapshots = JSON.parse(File.read(File.join(result_dir, "prometheus-snapshots.json")))
       assert_equal true, snapshots.fetch("available")
       assert_equal "raw/prometheus-after.json", snapshots.fetch("source")
+    end
+  end
+
+  def test_fails_when_result_directory_already_exists
+    Dir.mktmpdir do |tmp|
+      run_dir = File.join(tmp, "runs", "smoke-aws")
+      results_root = File.join(tmp, "results")
+      existing_result_dir = File.join(results_root, "20260721-010203-aws-smoke")
+      FileUtils.mkdir_p(run_dir)
+      FileUtils.mkdir_p(existing_result_dir)
+      write_json(
+        File.join(run_dir, "benchmark-metadata.json"),
+        "run_id" => "smoke-aws",
+        "profile" => "smoke",
+        "created_at_utc" => "2026-07-21T01:02:03Z"
+      )
+
+      stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby,
+        PUBLISHER,
+        "--run-dir", run_dir,
+        "--run-id", "smoke-aws",
+        "--results-root", results_root,
+        "--cloud", "aws",
+        "--profile", "smoke"
+      )
+
+      refute status.success?, stdout
+      assert_includes stderr, "result directory already exists: #{existing_result_dir}"
     end
   end
 
