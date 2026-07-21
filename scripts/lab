@@ -53,6 +53,7 @@ Environment:
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
+  PROMETHEUS_BASE_URL     Required by baseline profile gates for pod restart and Hikari checks.
   LAB_REPORT_CMD          Optional report command invoked as: CMD RUN_DIR REPORT_PATH.
 USAGE
 }
@@ -454,6 +455,7 @@ cmd_benchmark() {
   run "$k6_bin" run \
     -e "FHIR_BASE_URL=$FHIR_BASE_URL" \
     -e "PROFILE=$PROFILE" \
+    -e "K6_FHIR_SUMMARY_PATH=$dir/k6-fhir-summary.json" \
     --summary-export "$dir/k6-summary.json" \
     "$script"
 }
@@ -486,6 +488,9 @@ cmd_report() {
     fi
     if [[ -f "$dir/k6-summary.json" ]]; then
       printf '- k6 summary: `%s`\n' "$dir/k6-summary.json"
+    fi
+    if [[ -f "$dir/k6-fhir-summary.json" ]]; then
+      printf '- FHIR k6 summary: `%s`\n' "$dir/k6-fhir-summary.json"
     fi
     printf '\n## Notes\n\n'
     printf 'This fallback report records local artifacts only. Use `LAB_REPORT_CMD` to plug in a richer report generator.\n'

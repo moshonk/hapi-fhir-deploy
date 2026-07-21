@@ -79,6 +79,47 @@ jobs:
           ruby -rjson -e 'm = JSON.parse(File.read("/tmp/synthea-loader-metadata.json")); abort "patient count mismatch" unless m.dig("synthea", "patients") == 1; abort "seed mismatch" unless m.dig("synthea", "seed") == 123; abort "Patient count mismatch" unless m.dig("synthea", "resource_counts", "Patient") == 1; abort "Observation count mismatch" unless m.dig("synthea", "resource_counts", "Observation") == 1; abort "unexpected import errors" unless m.dig("import", "error_count") == 0'
           ruby test/synthea_loader_http_test.rb
 
+      - name: Check k6 benchmark profiles
+        run: |
+          FHIR_BASE_URL=http://example.invalid/fhir scripts/lab benchmark --profile smoke --run ci-benchmark --dry-run >/tmp/lab-benchmark-dry-run.txt
+          node --check benchmarks/k6/lib/fhir_benchmark.js
+          for profile in smoke baseline load stress; do
+            node --check "benchmarks/k6/${profile}.js"
+          done
+          ruby <<'RUBY'
+          expected_profiles = %w[smoke baseline load stress]
+          missing = expected_profiles.reject { |profile| File.file?("benchmarks/k6/#{profile}.js") }
+          abort "missing k6 profiles: #{missing.join(", ")}" unless missing.empty?
+
+          common = File.read("benchmarks/k6/lib/fhir_benchmark.js")
+          [
+            "capability_statement",
+            "patient_search",
+            "patient_read",
+            "observation_search",
+            "encounter_search",
+            "condition_search",
+            "bulk_export",
+            "p(50)",
+            "p(95)",
+            "p(99)",
+            "http_req_failed",
+            "fhir_health_success",
+            "fhir_no_pod_restarts",
+            "fhir_hikari_connection_headroom",
+            "hikaricp_connections_active",
+            "/$export"
+          ].each do |expected|
+            abort "k6 benchmark common module missing #{expected}" unless common.include?(expected)
+          end
+
+          expected_profiles.each do |profile|
+            body = File.read("benchmarks/k6/#{profile}.js")
+            abort "#{profile} profile does not export options" unless body.include?("profileOptions")
+            abort "#{profile} profile does not run shared workload" unless body.include?("runFhirWorkload")
+          end
+          RUBY
+
       - name: Syntax-check Ansible playbooks
         run: ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml --syntax-check
 

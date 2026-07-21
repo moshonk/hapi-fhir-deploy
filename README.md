@@ -70,6 +70,7 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml`: strategic merge patch for lifecycle fields the upstream chart does not expose.
 - `ansible/`: provider-neutral lab orchestration for add-ons, runtime Secret creation, Helm deployment, readiness waits, and metadata collection.
 - `infra/terraform/`: multi-cloud benchmark lab infrastructure modules for AWS, Azure, and GCP.
+- `benchmarks/k6/`: k6 FHIR benchmark profiles for smoke, baseline, load, and stress workloads.
 - `benchmarks/synthea/`: Synthea configuration for deterministic FHIR R4 transaction-bundle seed data.
 - `scripts/lab`: ephemeral benchmark lab wrapper for provision, deploy, seed, benchmark, report, and destroy workflows.
 - `scripts/synthea_loader.rb`: FHIR R4 transaction-bundle loader and dataset metadata writer.
