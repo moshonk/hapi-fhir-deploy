@@ -73,7 +73,7 @@
         kind: CustomResourceDefinition
         name: servicemonitors.monitoring.coreos.com
       register: servicemonitor_crd
-      until: servicemonitor_crd.resources | length == 1
+      until: servicemonitor_crd.resources | default([]) | length == 1
       retries: 30
       delay: 10
       when: install_prometheus_stack | bool
@@ -84,7 +84,7 @@
         kind: CustomResourceDefinition
         name: scaledobjects.keda.sh
       register: scaledobject_crd
-      until: scaledobject_crd.resources | length == 1
+      until: scaledobject_crd.resources | default([]) | length == 1
       retries: 30
       delay: 10
       when: install_keda | bool

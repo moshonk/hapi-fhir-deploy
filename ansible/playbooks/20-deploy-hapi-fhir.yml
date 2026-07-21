@@ -86,8 +86,7 @@
               app.kubernetes.io/name: hapi-fhir-postgres
               app.kubernetes.io/part-of: hapi-fhir
           type: Opaque
-          stringData:
-            "{{ hapi_database_secret_key }}": "{{ lab_database_password }}"
+          stringData: "{{ {hapi_database_secret_key: lab_database_password} }}"
       no_log: true
 
     - name: Render runtime Helm values without secret material

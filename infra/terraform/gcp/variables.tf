@@ -29,7 +29,7 @@ variable "zone" {
 variable "kubernetes_version" {
   description = "GKE Kubernetes version."
   type        = string
-  default     = "1.30"
+  default     = "1.35.6-gke.1258000"
 }
 
 variable "cluster_node_count" {
@@ -76,6 +76,17 @@ variable "db_sku" {
   description = "Cloud SQL machine tier."
   type        = string
   default     = "db-custom-2-7680"
+}
+
+variable "db_edition" {
+  description = "Cloud SQL edition. Use ENTERPRISE for custom tiers or ENTERPRISE_PLUS for db-perf-optimized tiers."
+  type        = string
+  default     = "ENTERPRISE"
+
+  validation {
+    condition     = contains(["ENTERPRISE", "ENTERPRISE_PLUS"], var.db_edition)
+    error_message = "db_edition must be ENTERPRISE or ENTERPRISE_PLUS."
+  }
 }
 
 variable "db_disk_size_gb" {

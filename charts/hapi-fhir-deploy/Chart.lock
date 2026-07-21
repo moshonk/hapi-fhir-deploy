@@ -1,0 +1,9 @@
+dependencies:
+- name: hapi-fhir-jpaserver
+  repository: https://hapifhir.github.io/hapi-fhir-jpaserver-starter/
+  version: 0.23.0
+- name: fhir-server-exporter
+  repository: https://chgl.github.io/charts
+  version: 1.2.35
+digest: sha256:b6abdc882554855fdbd1c3160ee13c9c93e446e5e51477b813b84fa010bd1da8
+generated: "2026-07-21T09:56:10.070661+03:00"

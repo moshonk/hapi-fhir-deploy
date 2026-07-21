@@ -81,6 +81,11 @@ output "db_sku" {
   value       = var.db_sku
 }
 
+output "db_edition" {
+  description = "Cloud SQL edition."
+  value       = var.db_edition
+}
+
 output "resource_labels" {
   description = "Labels applied to supported GCP resources."
   value       = local.labels
@@ -97,6 +102,7 @@ output "ansible_metadata" {
     database_name       = google_sql_database.fhir.name
     database_username   = google_sql_user.fhir.name
     postgres_version    = var.postgres_version
+    db_edition          = var.db_edition
     node_size           = var.node_size
     cluster_node_count  = var.cluster_node_count
     database_secret     = "hapi-fhir-postgres"

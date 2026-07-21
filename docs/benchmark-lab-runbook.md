@@ -55,6 +55,8 @@ Common Terraform overrides:
 - `node_size`: worker node size.
 - `postgres_version`: PostgreSQL `16` or `17`.
 - `db_sku`: managed PostgreSQL SKU.
+- `db_edition`: managed PostgreSQL edition, such as `ENTERPRISE` for custom tiers or `ENTERPRISE_PLUS` for performance-optimized tiers.
+- `kubernetes_version`: pinned GKE Kubernetes version.
 - `ttl_hours`: expected lab lifetime tag or label for cleanup automation.
 
 Provider-specific notes:
@@ -104,6 +106,88 @@ scripts/lab benchmark --profile baseline --run "$RUN_ID"
 ```
 
 If the rendered Prometheus service name differs, find it with `kubectl -n monitoring get svc`.
+
+### GCP 1000-Concurrent-User Benchmark
+
+Use the dedicated `benchmarks/k6/load_1000.js` script for a 1000-concurrent-user run against a 1,000,000-patient Synthea dataset. This script keeps the normal `load` profile unchanged, then ramps to 250, 500, and 1000 VUs, holds 1000 VUs for 30 minutes, and records the concurrency and patient-load targets in `k6-fhir-summary.json`.
+
+Start with a unique lab name and a short TTL:
+
+```sh
+export CLOUD=gcp
+export LAB_NAME=hapi-gcp-1000
+export RUN_ID=gcp-load-1000-1m-001
+export PATIENTS=1000000
+export SYNTHEA_SEED=12345
+```
+
+Provision enough headroom for the experiment, while keeping the runtime bounded by the committed HAPI replica and Hikari connection-budget settings. The example below uses the GCP shape attempted on July 21, 2026 in project `ohs-player-499913`; the project quota only allowed three `c3-standard-8` nodes, so raise the C3 regional CPU quota before using the six-to-twelve-node plan.
+
+```sh
+scripts/lab up --cloud "$CLOUD" --name "$LAB_NAME" --auto-approve \
+  --var project_id=PROJECT_ID \
+  --var region=us-central1 \
+  --var zone=us-central1-a \
+  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var node_size=c3-standard-8 \
+  --var cluster_node_count=6 \
+  --var cluster_min_nodes=6 \
+  --var cluster_max_nodes=12 \
+  --var db_edition=ENTERPRISE_PLUS \
+  --var db_sku=db-perf-optimized-N-16 \
+  --var db_disk_size_gb=1024 \
+  --var ttl_hours=4
+```
+
+If quota is still limited to 24 C3 CPUs in `us-central1`, use this constrained shape to validate deployability only; it is not enough evidence for the full 1000-concurrent-user target:
+
+```sh
+scripts/lab up --cloud "$CLOUD" --name "$LAB_NAME" --auto-approve \
+  --var project_id=PROJECT_ID \
+  --var region=us-central1 \
+  --var zone=us-central1-a \
+  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var node_size=c3-standard-8 \
+  --var cluster_node_count=3 \
+  --var cluster_min_nodes=3 \
+  --var cluster_max_nodes=3 \
+  --var db_edition=ENTERPRISE_PLUS \
+  --var db_sku=db-perf-optimized-N-16 \
+  --var db_disk_size_gb=1024 \
+  --var ttl_hours=4
+```
+
+After deploy, keep the FHIR port-forward open in a dedicated terminal:
+
+```sh
+export KUBECONFIG="ansible/artifacts/lab/$CLOUD/$LAB_NAME/kubeconfig"
+kubectl -n fhir port-forward svc/hapi-fhir-hapi-fhir-jpaserver 8080:8080
+```
+
+Seed and run the 1000-user workload:
+
+```sh
+FHIR_BASE_URL=http://localhost:8080/fhir \
+scripts/lab seed --patients "$PATIENTS" --seed "$SYNTHEA_SEED" --run "$RUN_ID"
+
+FHIR_BASE_URL=http://localhost:8080/fhir \
+K6_SCRIPT=benchmarks/k6/load_1000.js \
+scripts/lab benchmark --profile load --run "$RUN_ID"
+
+scripts/lab report --run "$RUN_ID" --cloud "$CLOUD" --name "$LAB_NAME" --profile load
+```
+
+Generating and importing 1,000,000 full Synthea patients from a local workstation can dominate the lab TTL and disk budget before the benchmark starts. Validate generation throughput with `--generate-only` first, or pre-stage a reusable dataset and import from infrastructure close to the cluster before opening the 1000-VU test window.
+
+Always destroy the lab after the report is published:
+
+```sh
+scripts/lab down --cloud "$CLOUD" --name "$LAB_NAME" --yes \
+  --var project_id=PROJECT_ID \
+  --var region=us-central1 \
+  --var zone=us-central1-a \
+  --var kubernetes_version=1.35.6-gke.1258000
+```
 
 ## Synthea Usage
 

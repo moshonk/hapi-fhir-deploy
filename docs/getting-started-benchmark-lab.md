@@ -84,7 +84,7 @@ The helper initializes Terraform, selects or creates a workspace named after `LA
 - `ansible/artifacts/lab/$CLOUD/$LAB_NAME/terraform-output.json`
 - `ansible/artifacts/lab/$CLOUD/$LAB_NAME/kubeconfig`
 
-Common sizing overrides are `region`, `cluster_node_count`, `cluster_min_nodes`, `cluster_max_nodes`, `node_size`, `postgres_version`, `db_sku`, and `ttl_hours`.
+Common sizing overrides are `region`, `cluster_node_count`, `cluster_min_nodes`, `cluster_max_nodes`, `node_size`, `postgres_version`, `db_sku`, `db_edition`, `kubernetes_version`, and `ttl_hours`.
 
 Provider examples:
 
@@ -109,7 +109,9 @@ scripts/lab up --cloud gcp --name "$LAB_NAME" --auto-approve \
   --var project_id=PROJECT_ID \
   --var region=us-central1 \
   --var zone=us-central1-a \
+  --var kubernetes_version=1.35.6-gke.1258000 \
   --var node_size=e2-standard-4 \
+  --var db_edition=ENTERPRISE \
   --var db_sku=db-custom-2-7680 \
   --var ttl_hours=4
 ```
