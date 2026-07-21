@@ -11,6 +11,7 @@ class SyntheaLoaderHttpTest < Minitest::Test
   ROOT_DIR = File.expand_path("..", __dir__)
   LOADER = File.join(ROOT_DIR, "scripts", "synthea_loader.rb")
   FIXTURE_DIR = File.join(ROOT_DIR, "test", "fixtures", "synthea")
+  ACCEPT_TIMEOUT_SECONDS = 2
 
   def test_imports_successful_transaction_response
     body = JSON.generate(
@@ -21,7 +22,7 @@ class SyntheaLoaderHttpTest < Minitest::Test
         { "response" => { "status" => "200 OK" } }
       ]
     )
-    port, server_thread = one_shot_server(body)
+    port, server, server_thread = one_shot_server(body)
 
     Dir.mktmpdir do |dir|
       metadata_path = File.join(dir, "metadata.json")
@@ -34,7 +35,7 @@ class SyntheaLoaderHttpTest < Minitest::Test
       assert_equal({ "200" => 1 }, metadata.dig("import", "http_status_counts"))
     end
   ensure
-    server_thread&.join(5)
+    stop_server(server, server_thread)
   end
 
   def test_fails_on_partial_transaction_response
@@ -45,7 +46,7 @@ class SyntheaLoaderHttpTest < Minitest::Test
         { "response" => { "status" => "201 Created" } }
       ]
     )
-    port, server_thread = one_shot_server(body)
+    port, server, server_thread = one_shot_server(body)
 
     Dir.mktmpdir do |dir|
       metadata_path = File.join(dir, "metadata.json")
@@ -57,7 +58,7 @@ class SyntheaLoaderHttpTest < Minitest::Test
       assert_match(/partial transaction response/, metadata.dig("import", "errors", 0, "message"))
     end
   ensure
-    server_thread&.join(5)
+    stop_server(server, server_thread)
   end
 
   private
@@ -80,6 +81,10 @@ class SyntheaLoaderHttpTest < Minitest::Test
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
     thread = Thread.new do
+      socket = nil
+      ready = IO.select([server], nil, nil, ACCEPT_TIMEOUT_SECONDS)
+      raise "timed out waiting for loader connection" unless ready
+
       socket = server.accept
       headers = []
       while (line = socket.gets)
@@ -100,11 +105,21 @@ class SyntheaLoaderHttpTest < Minitest::Test
       socket.write "Connection: close\r\n"
       socket.write "\r\n"
       socket.write body
-      socket.close
     ensure
-      server.close
+      socket&.close unless socket&.closed?
+      server.close unless server.closed?
     end
 
-    [port, thread]
+    [port, server, thread]
+  end
+
+  def stop_server(server, thread)
+    server&.close unless server.nil? || server.closed?
+    return unless thread
+
+    thread.join(ACCEPT_TIMEOUT_SECONDS + 1)
+    raise "test server thread did not stop" if thread.alive?
+
+    thread.value
   end
 end
