@@ -181,7 +181,7 @@ export function runBaselineGates(data) {
     return;
   }
 
-  noPodRestarts.add(after.podRestarts <= data.prometheusBefore.podRestarts);
+  noPodRestarts.add(after.podRestarts === data.prometheusBefore.podRestarts);
   hikariConnectionHeadroom.add(after.hikariHeadroomOk === true);
 }
 
@@ -479,12 +479,12 @@ function defaultPodRestartsQuery() {
 
 function defaultHikariActiveQuery() {
   const namespace = __ENV.HAPI_NAMESPACE || "fhir";
-  return `max(hikaricp_connections_active{namespace="${namespace}"})`;
+  return `sum(hikaricp_connections_active{namespace="${namespace}"})`;
 }
 
 function defaultHikariMaxQuery() {
   const namespace = __ENV.HAPI_NAMESPACE || "fhir";
-  return `max(hikaricp_connections_max{namespace="${namespace}"})`;
+  return `sum(hikaricp_connections_max{namespace="${namespace}"})`;
 }
 
 function trendSummary(metric) {

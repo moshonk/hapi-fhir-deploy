@@ -82,9 +82,15 @@ jobs:
       - name: Check k6 benchmark profiles
         run: |
           FHIR_BASE_URL=http://example.invalid/fhir scripts/lab benchmark --profile smoke --run ci-benchmark --dry-run >/tmp/lab-benchmark-dry-run.txt
-          node --check benchmarks/k6/lib/fhir_benchmark.js
+          mkdir -p /tmp/k6-profile-check/lib
+          cp benchmarks/k6/lib/fhir_benchmark.js /tmp/k6-profile-check/lib/fhir_benchmark.mjs
+          sed 's#./lib/fhir_benchmark.js#./lib/fhir_benchmark.mjs#' benchmarks/k6/smoke.js > /tmp/k6-profile-check/smoke.mjs
+          sed 's#./lib/fhir_benchmark.js#./lib/fhir_benchmark.mjs#' benchmarks/k6/baseline.js > /tmp/k6-profile-check/baseline.mjs
+          sed 's#./lib/fhir_benchmark.js#./lib/fhir_benchmark.mjs#' benchmarks/k6/load.js > /tmp/k6-profile-check/load.mjs
+          sed 's#./lib/fhir_benchmark.js#./lib/fhir_benchmark.mjs#' benchmarks/k6/stress.js > /tmp/k6-profile-check/stress.mjs
+          node --check /tmp/k6-profile-check/lib/fhir_benchmark.mjs
           for profile in smoke baseline load stress; do
-            node --check "benchmarks/k6/${profile}.js"
+            node --check "/tmp/k6-profile-check/${profile}.mjs"
           done
           ruby <<'RUBY'
           expected_profiles = %w[smoke baseline load stress]
