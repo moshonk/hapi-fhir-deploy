@@ -68,7 +68,28 @@ Set `LAB_SEED_LOADER_CMD` to replace the default loader with another command tha
 FHIR_BASE_URL=https://example/fhir scripts/lab benchmark --profile smoke|baseline|load|stress --run RUN_ID
 ```
 
-`benchmark` calls k6 and writes `k6-summary.json` to the run directory. By default it expects `benchmarks/k6/<profile>.js`; set `K6_SCRIPT` to use a temporary or external k6 script until issue #23 adds the committed benchmark profiles.
+`benchmark` calls k6 and writes `k6-summary.json` plus `k6-fhir-summary.json` to the run directory. By default it uses `benchmarks/k6/<profile>.js`; set `K6_SCRIPT` to use an external k6 script.
+
+`k6-fhir-summary.json` reports p50, p95, and p99 HTTP latency, request throughput, HTTP failure rate, FHIR operation mix, and baseline gate rates.
+
+Committed profiles are:
+
+- `smoke`: short single-VU validation of FHIR reachability and operation shape.
+- `baseline`: steady workload with health, HTTP error, pod restart, and Hikari headroom gates.
+- `load`: ramping workload for expected load exploration.
+- `stress`: higher ramping workload for saturation and failure-mode exploration.
+
+The workload uses standard FHIR R4 HTTP APIs: `GET /metadata`, `Patient` read/search, `Observation` search by patient/date, `Encounter` search, `Condition` search, and optional HL7 Bulk Data `$export` when `BULK_EXPORT_ENABLED=true`. It does not call HAPI-only endpoints.
+
+The baseline profile requires Prometheus for the pod-restart and Hikari gates:
+
+```sh
+FHIR_BASE_URL=https://example/fhir \
+PROMETHEUS_BASE_URL=http://localhost:9090 \
+scripts/lab benchmark --profile baseline --run baseline-aws
+```
+
+Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-jpaserver-.*`, Hikari pool size `10`, two replicas, and maximum Hikari utilization `0.8`. Override with `HAPI_NAMESPACE`, `HAPI_POD_REGEX`, `HIKARI_MAX_POOL_SIZE`, `HAPI_REPLICAS`, `HIKARI_MAX_UTILIZATION`, `POD_RESTARTS_QUERY`, `HIKARI_ACTIVE_QUERY`, or `HIKARI_MAX_QUERY` when the target environment differs.
 
 ### Report
 
