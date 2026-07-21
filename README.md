@@ -77,6 +77,7 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `scripts/synthea_loader.rb`: FHIR R4 transaction-bundle loader and dataset metadata writer.
 - `results/`: ignored local benchmark report publications; do not commit generated result artifacts.
 - `docs/benchmark-lab-epic.md`: issue #18 acceptance mapping for the full benchmark lab workflow.
+- `docs/getting-started-benchmark-lab.md`: first-run guide for provisioning a lab instance and running benchmarks with the helper scripts.
 - `docs/benchmark-lab-runbook.md`: benchmark lab smoke-run, safety, methodology, interpretation, and teardown runbook.
 - `docs/external-postgres.md`: database contract, Secret shape, environment overrides, and connection budget.
 - `docs/lab-cli.md`: lab wrapper usage, artifact handling, and teardown procedure.
@@ -174,18 +175,7 @@ ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml \
 
 See [ansible/README.md](ansible/README.md) for provider-neutral runtime inputs and artifact handling. Do not commit generated kubeconfigs, Terraform output JSON, runtime values, metadata output, or real database passwords.
 
-The lab wrapper runs the provision, deploy, seed, benchmark, report, and destroy stages consistently:
-
-```sh
-scripts/lab up --cloud aws --name hapi-bench --auto-approve
-scripts/lab deploy --cloud aws --name hapi-bench
-FHIR_BASE_URL=http://localhost:8080/fhir scripts/lab seed --patients 1000 --seed 12345 --run smoke-aws
-FHIR_BASE_URL=http://localhost:8080/fhir scripts/lab benchmark --profile smoke --run smoke-aws
-scripts/lab report --run smoke-aws
-scripts/lab down --cloud aws --name hapi-bench --yes
-```
-
-Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` promptly after each lab run to destroy cloud resources and control cost. See [docs/lab-cli.md](docs/lab-cli.md) for wrapper options and [docs/benchmark-lab-runbook.md](docs/benchmark-lab-runbook.md) for the smoke benchmark path, safety checklist, methodology, result interpretation, and teardown details.
+The `scripts/lab` wrapper runs the provision, deploy, seed, benchmark, report, and destroy stages consistently. Start with [docs/getting-started-benchmark-lab.md](docs/getting-started-benchmark-lab.md) for the full first-run command sequence and prerequisites, then use [docs/lab-cli.md](docs/lab-cli.md) for wrapper options and [docs/benchmark-lab-runbook.md](docs/benchmark-lab-runbook.md) for the safety checklist, methodology, and result interpretation. Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` promptly after each lab run to destroy cloud resources and control cost.
 
 ## Rollout Verification
 

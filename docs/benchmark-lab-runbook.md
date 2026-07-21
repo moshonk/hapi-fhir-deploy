@@ -6,25 +6,7 @@ The lab creates billable cloud resources. Run `scripts/lab down --cloud aws|azur
 
 ## Quick Smoke Benchmark
 
-Use this path for a first run or for validating a new engineer workstation. Replace `aws` and `hapi-smoke` if you are using another provider or lab name.
-
-Prerequisites:
-
-- Terraform `1.9.x`.
-- Python `3` with the pinned Ansible dependencies from `ansible/requirements.txt`.
-- Ansible collections from `ansible/requirements.yml`.
-- Helm `3.x`, `kubectl`, k6, Ruby, and Java `17` or newer for Synthea.
-- Synthea available through `SYNTHEA_CMD`, a `synthea` executable on `PATH`, or `$SYNTHEA_HOME/run_synthea`.
-- Cloud CLI credentials for exactly one target provider.
-
-Install local orchestration dependencies:
-
-```sh
-python3 -m pip install -r ansible/requirements.txt
-ansible-galaxy collection install -r ansible/requirements.yml
-```
-
-Set run variables:
+For the first-run path (prerequisites, provisioning, deploying, seeding, running a smoke benchmark, publishing results, and teardown) see [getting-started-benchmark-lab.md](getting-started-benchmark-lab.md). The rest of this runbook assumes that walkthrough is complete and these variables are still exported in your shell:
 
 ```sh
 export CLOUD=aws
@@ -32,40 +14,6 @@ export LAB_NAME=hapi-smoke
 export RUN_ID=smoke-aws-001
 export PATIENTS=25
 export SYNTHEA_SEED=12345
-```
-
-Create, deploy, seed, benchmark, report, and destroy:
-
-```sh
-scripts/lab up --cloud "$CLOUD" --name "$LAB_NAME" --auto-approve \
-  --var ttl_hours=4
-
-scripts/lab deploy --cloud "$CLOUD" --name "$LAB_NAME"
-
-export KUBECONFIG="ansible/artifacts/lab/$CLOUD/$LAB_NAME/kubeconfig"
-kubectl -n fhir port-forward svc/hapi-fhir-hapi-fhir-jpaserver 8080:8080
-```
-
-Keep the port-forward running in that terminal. In a second terminal from the repository root:
-
-```sh
-export CLOUD=aws
-export LAB_NAME=hapi-smoke
-export RUN_ID=smoke-aws-001
-export PATIENTS=25
-export SYNTHEA_SEED=12345
-export FHIR_BASE_URL=http://localhost:8080/fhir
-
-scripts/lab seed --patients "$PATIENTS" --seed "$SYNTHEA_SEED" --run "$RUN_ID"
-scripts/lab benchmark --profile smoke --run "$RUN_ID"
-scripts/lab report --run "$RUN_ID" --cloud "$CLOUD" --name "$LAB_NAME" --profile smoke
-scripts/lab down --cloud "$CLOUD" --name "$LAB_NAME" --yes
-```
-
-If any command fails after `up`, still run:
-
-```sh
-scripts/lab down --cloud "$CLOUD" --name "$LAB_NAME" --yes
 ```
 
 ## Cloud Credentials
@@ -149,11 +97,13 @@ The k6 workloads use standard FHIR R4 HTTP APIs: `GET /metadata`, Patient read/s
 For `baseline`, expose Prometheus and pass `PROMETHEUS_BASE_URL` so k6 can evaluate pod restart and Hikari connection headroom gates:
 
 ```sh
-kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090
 PROMETHEUS_BASE_URL=http://localhost:9090 \
 FHIR_BASE_URL=http://localhost:8080/fhir \
 scripts/lab benchmark --profile baseline --run "$RUN_ID"
 ```
+
+If the rendered Prometheus service name differs, find it with `kubectl -n monitoring get svc`.
 
 ## Synthea Usage
 
