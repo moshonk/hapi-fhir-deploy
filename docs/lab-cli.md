@@ -11,6 +11,8 @@ scripts/lab report --run smoke-aws
 scripts/lab down --cloud aws --name hapi-bench --yes
 ```
 
+For an end-to-end smoke benchmark path, cloud credential checklist, methodology, result interpretation guidance, and safety teardown procedure, use [benchmark-lab-runbook.md](benchmark-lab-runbook.md).
+
 ## Cost Safety
 
 Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` as soon as a benchmark run is complete. The `down` command runs Terraform destroy for the named lab workspace, and the wrapper asks for confirmation unless `--yes` is supplied.
