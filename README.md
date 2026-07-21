@@ -76,6 +76,7 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `scripts/publish_results.rb`: local benchmark result publisher for ignored `results/YYYYMMDD-HHMMSS-provider-profile/` artifacts.
 - `scripts/synthea_loader.rb`: FHIR R4 transaction-bundle loader and dataset metadata writer.
 - `results/`: ignored local benchmark report publications; do not commit generated result artifacts.
+- `docs/benchmark-lab-epic.md`: issue #18 acceptance mapping for the full benchmark lab workflow.
 - `docs/benchmark-lab-runbook.md`: benchmark lab smoke-run, safety, methodology, interpretation, and teardown runbook.
 - `docs/external-postgres.md`: database contract, Secret shape, environment overrides, and connection budget.
 - `docs/lab-cli.md`: lab wrapper usage, artifact handling, and teardown procedure.

@@ -131,6 +131,9 @@ jobs:
       - name: Check result publisher
         run: ruby test/publish_results_test.rb
 
+      - name: Check benchmark lab epic acceptance
+        run: ruby test/lab_epic_acceptance_test.rb
+
       - name: Syntax-check Ansible playbooks
         run: ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml --syntax-check
 
