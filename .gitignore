@@ -23,3 +23,6 @@ override.tf.json
 .ansible/
 ansible/artifacts/*
 !ansible/artifacts/.gitkeep
+
+# Local benchmark result publications
+results/

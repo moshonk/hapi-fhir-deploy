@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_ROOT="${LAB_ARTIFACTS_DIR:-$ROOT_DIR/ansible/artifacts/lab}"
 RUN_ROOT="${LAB_RUNS_DIR:-$ARTIFACT_ROOT/runs}"
+RESULT_ROOT="${LAB_RESULTS_DIR:-$ROOT_DIR/results}"
 
 COMMAND="${1:-}"
 if [[ -n "$COMMAND" ]]; then
@@ -30,7 +31,7 @@ Usage:
   scripts/lab deploy --cloud aws|azure|gcp --name NAME [--extra-vars key=value]
   scripts/lab seed --patients N --seed S [--run RUN_ID] [--generate-only]
   scripts/lab benchmark --profile smoke|baseline|load|stress [--run RUN_ID]
-  scripts/lab report --run RUN_ID
+  scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
 
 Commands:
@@ -38,7 +39,7 @@ Commands:
   deploy     Run the provider-neutral Ansible deployment workflow.
   seed       Generate deterministic Synthea FHIR data and optionally invoke a loader.
   benchmark  Run a k6 FHIR benchmark profile.
-  report     Generate a local Markdown report from a run directory.
+  report     Publish local benchmark result artifacts from a run directory.
   down       Destroy cloud infrastructure. Use this promptly to control cloud cost.
 
 Environment:
@@ -54,7 +55,9 @@ Environment:
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
   PROMETHEUS_BASE_URL     Required by baseline profile gates for pod restart and Hikari checks.
-  LAB_REPORT_CMD          Optional report command invoked as: CMD RUN_DIR REPORT_PATH.
+  LAB_RESULTS_DIR         Published result root; defaults to results/.
+  LAB_RESULT_PUBLISHER_CMD Optional publisher command; defaults to scripts/publish_results.rb.
+  LAB_REPORT_CMD          Legacy report command invoked as: CMD RUN_DIR REPORT_PATH.
 USAGE
 }
 
@@ -439,6 +442,8 @@ cmd_benchmark() {
 
   local k6_bin="${K6_BIN:-k6}"
   need_command_unless_dry_run "$k6_bin"
+  local ruby_bin="${RUBY_BIN:-ruby}"
+  need_command_unless_dry_run "$ruby_bin"
 
   local script="${K6_SCRIPT:-$ROOT_DIR/benchmarks/k6/$PROFILE.js}"
   if [[ "$DRY_RUN" == true ]]; then
@@ -450,18 +455,46 @@ cmd_benchmark() {
   local dir
   dir="$(run_dir)"
   mkdir -p "$dir"
+  local metadata_file="$dir/benchmark-metadata.json"
+  local prometheus_present=false
+  if [[ -n "${PROMETHEUS_BASE_URL:-}" ]]; then
+    prometheus_present=true
+  fi
 
   log "Running k6 $PROFILE benchmark against $FHIR_BASE_URL"
+  run "$ruby_bin" -rjson -e '
+    path, run_id, profile, fhir_base_url, bulk_export_enabled, prometheus_present, created_at, cloud = ARGV
+    data = {
+      "run_id" => run_id,
+      "profile" => profile,
+      "fhir_base_url" => fhir_base_url,
+      "bulk_export_enabled" => bulk_export_enabled == "true",
+      "prometheus_base_url_present" => prometheus_present == "true",
+      "created_at_utc" => created_at
+    }
+    data["cloud"] = cloud unless cloud.to_s.empty?
+    File.write(path, "#{JSON.pretty_generate(data)}\n")
+  ' "$metadata_file" "$RUN_ID" "$PROFILE" "$FHIR_BASE_URL" "${BULK_EXPORT_ENABLED:-false}" "$prometheus_present" "$(date -u +%FT%TZ)" "$CLOUD"
   run "$k6_bin" run \
     -e "FHIR_BASE_URL=$FHIR_BASE_URL" \
     -e "PROFILE=$PROFILE" \
     -e "K6_FHIR_SUMMARY_PATH=$dir/k6-fhir-summary.json" \
+    --out "json=$dir/k6-raw.jsonl" \
     --summary-export "$dir/k6-summary.json" \
     "$script"
 }
 
 cmd_report() {
   require_run
+  if [[ -n "$CLOUD" ]]; then
+    require_cloud
+  fi
+  if [[ -n "$NAME" ]]; then
+    require_name
+  fi
+  if [[ -n "$PROFILE" ]]; then
+    require_profile
+  fi
 
   local dir
   dir="$(run_dir)"
@@ -474,27 +507,49 @@ cmd_report() {
     return 0
   fi
 
-  log "Generating Markdown report at $report_path"
-  if [[ "$DRY_RUN" == true ]]; then
-    return 0
+  local publisher_cmd=()
+  if [[ -n "${LAB_RESULT_PUBLISHER_CMD:-}" ]]; then
+    need_command_unless_dry_run "$LAB_RESULT_PUBLISHER_CMD"
+    publisher_cmd=("$LAB_RESULT_PUBLISHER_CMD")
+  else
+    local ruby_bin="${RUBY_BIN:-ruby}"
+    local default_publisher="$ROOT_DIR/scripts/publish_results.rb"
+    need_command_unless_dry_run "$ruby_bin"
+    [[ -f "$default_publisher" ]] || die "default result publisher not found: $default_publisher"
+    publisher_cmd=("$ruby_bin" "$default_publisher")
   fi
 
-  {
-    printf '# HAPI FHIR Benchmark Run %s\n\n' "$RUN_ID"
-    printf '- Run directory: `%s`\n' "$dir"
-    printf '- Generated at UTC: `%s`\n' "$(date -u +%FT%TZ)"
-    if [[ -f "$dir/dataset-metadata.json" ]]; then
-      printf '- Dataset metadata: `%s`\n' "$dir/dataset-metadata.json"
-    fi
-    if [[ -f "$dir/k6-summary.json" ]]; then
-      printf '- k6 summary: `%s`\n' "$dir/k6-summary.json"
-    fi
-    if [[ -f "$dir/k6-fhir-summary.json" ]]; then
-      printf '- FHIR k6 summary: `%s`\n' "$dir/k6-fhir-summary.json"
-    fi
-    printf '\n## Notes\n\n'
-    printf 'This fallback report records local artifacts only. Use `LAB_REPORT_CMD` to plug in a richer report generator.\n'
-  } >"$report_path"
+  local publisher_args=(
+    --run-dir "$dir"
+    --run-id "$RUN_ID"
+    --results-root "$RESULT_ROOT"
+  )
+  if [[ -n "$CLOUD" ]]; then
+    publisher_args+=(--cloud "$CLOUD")
+  fi
+  if [[ -n "$PROFILE" ]]; then
+    publisher_args+=(--profile "$PROFILE")
+  fi
+
+  local terraform_output_file="${TERRAFORM_OUTPUT_FILE:-}"
+  if [[ -z "$terraform_output_file" && -n "$CLOUD" && -n "$NAME" ]]; then
+    terraform_output_file="$(state_dir)/terraform-output.json"
+  fi
+  if [[ -n "$terraform_output_file" && -f "$terraform_output_file" ]]; then
+    publisher_args+=(--terraform-output "$terraform_output_file")
+  elif [[ "$DRY_RUN" == true && -n "$terraform_output_file" ]]; then
+    log "Dry run: Terraform output file is not present yet: $terraform_output_file"
+  fi
+
+  local deployment_metadata_file="${DEPLOYMENT_METADATA_FILE:-$ROOT_DIR/ansible/artifacts/deployment-metadata.json}"
+  if [[ -f "$deployment_metadata_file" ]]; then
+    publisher_args+=(--deployment-metadata "$deployment_metadata_file")
+  elif [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: deployment metadata file is not present yet: $deployment_metadata_file"
+  fi
+
+  log "Publishing benchmark results under $RESULT_ROOT"
+  run "${publisher_cmd[@]}" "${publisher_args[@]}"
 }
 
 confirm_destroy() {

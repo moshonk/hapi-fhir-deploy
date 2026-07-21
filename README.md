@@ -73,7 +73,9 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `benchmarks/k6/`: k6 FHIR benchmark profiles for smoke, baseline, load, and stress workloads.
 - `benchmarks/synthea/`: Synthea configuration for deterministic FHIR R4 transaction-bundle seed data.
 - `scripts/lab`: ephemeral benchmark lab wrapper for provision, deploy, seed, benchmark, report, and destroy workflows.
+- `scripts/publish_results.rb`: local benchmark result publisher for ignored `results/YYYYMMDD-HHMMSS-provider-profile/` artifacts.
 - `scripts/synthea_loader.rb`: FHIR R4 transaction-bundle loader and dataset metadata writer.
+- `results/`: ignored local benchmark report publications; do not commit generated result artifacts.
 - `docs/external-postgres.md`: database contract, Secret shape, environment overrides, and connection budget.
 - `docs/lab-cli.md`: lab wrapper usage, artifact handling, and teardown procedure.
 - `docs/observability.md`: Actuator, Prometheus, exporter, rollout, and rollback checks.
@@ -181,7 +183,7 @@ scripts/lab report --run smoke-aws
 scripts/lab down --cloud aws --name hapi-bench --yes
 ```
 
-Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` promptly after each lab run to destroy cloud resources and control cost. See [docs/lab-cli.md](docs/lab-cli.md) for wrapper options, ignored artifact paths, Synthea/k6 integration points, and teardown details.
+Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` promptly after each lab run to destroy cloud resources and control cost. See [docs/lab-cli.md](docs/lab-cli.md) for wrapper options, ignored artifact paths, Synthea/k6 integration points, local `results/` publications, and teardown details.
 
 ## Rollout Verification
 
