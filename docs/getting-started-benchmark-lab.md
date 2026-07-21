@@ -23,7 +23,7 @@ Generated Terraform outputs, kubeconfigs, Synthea bundles, benchmark raw data, a
 
 Install these locally:
 
-- Terraform `1.9.x`.
+- Terraform `>= 1.9.0, < 2.0.0`.
 - Python `3`.
 - Helm `3.x`.
 - `kubectl`.
@@ -146,9 +146,9 @@ H2 fallback is not acceptable for this baseline; the deployment should use the m
 
 Run this in a dedicated terminal and keep it open during seed and benchmark commands:
 
+Assuming the earlier `CLOUD` and `LAB_NAME` exports are still set:
+
 ```sh
-export CLOUD=aws
-export LAB_NAME=hapi-smoke
 export KUBECONFIG="ansible/artifacts/lab/$CLOUD/$LAB_NAME/kubeconfig"
 kubectl -n fhir port-forward svc/hapi-fhir-hapi-fhir-jpaserver 8080:8080
 ```
