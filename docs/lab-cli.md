@@ -15,7 +15,7 @@ scripts/lab down --cloud aws --name hapi-bench --yes
 
 Run `scripts/lab down --cloud aws|azure|gcp --name NAME --yes` as soon as a benchmark run is complete. The `down` command runs Terraform destroy for the named lab workspace, and the wrapper asks for confirmation unless `--yes` is supplied.
 
-Generated Terraform outputs, kubeconfigs, Synthea datasets, benchmark summaries, and reports are written under ignored `ansible/artifacts/lab/` paths by default. These local files can contain kubeconfig or database secret material, so do not move them into tracked documentation or source files.
+Generated Terraform outputs, kubeconfigs, Synthea datasets, and benchmark run artifacts are written under ignored `ansible/artifacts/lab/` paths by default. Published benchmark reports are written under ignored `results/` paths by default. These local files can contain kubeconfig, database secret material, endpoint names, or benchmark data, so do not move them into tracked documentation or source files.
 
 ## Commands
 
@@ -68,7 +68,7 @@ Set `LAB_SEED_LOADER_CMD` to replace the default loader with another command tha
 FHIR_BASE_URL=https://example/fhir scripts/lab benchmark --profile smoke|baseline|load|stress --run RUN_ID
 ```
 
-`benchmark` calls k6 and writes `k6-summary.json` plus `k6-fhir-summary.json` to the run directory. By default it uses `benchmarks/k6/<profile>.js`; set `K6_SCRIPT` to use an external k6 script.
+`benchmark` calls k6 and writes `k6-summary.json`, `k6-fhir-summary.json`, `k6-raw.jsonl`, and `benchmark-metadata.json` to the run directory. By default it uses `benchmarks/k6/<profile>.js`; set `K6_SCRIPT` to use an external k6 script.
 
 `k6-fhir-summary.json` reports p50, p95, and p99 HTTP latency, request throughput, HTTP failure rate, FHIR operation mix, and baseline gate rates.
 
@@ -94,10 +94,21 @@ Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-j
 ### Report
 
 ```sh
-scripts/lab report --run RUN_ID
+scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
 ```
 
-`report` writes `report.md` in the run directory. Set `LAB_REPORT_CMD` to replace the fallback Markdown report generator with a richer implementation.
+`report` publishes a result directory named `results/YYYYMMDD-HHMMSS-provider-profile/` by default. Pass `--cloud`, `--name`, and `--profile` when available so the report can include provider context and safely derive non-sensitive fields from `ansible/artifacts/lab/<cloud>/<name>/terraform-output.json`.
+
+Each published result directory contains:
+
+- `raw/`: copied raw benchmark artifacts such as k6 summary JSON, k6 raw JSONL, FHIR operation summary, dataset metadata, benchmark metadata, deployment metadata, and Prometheus snapshots when present.
+- `environment.json`: cloud, region, node size, DB SKU, replicas, Hikari pool, chart/image pins, Synthea population/seed, and benchmark profile metadata.
+- `summary.csv`: latency, throughput, HTTP failure, operation mix, and environment summary values for later analysis.
+- `report.md`: Markdown report readable without external services.
+- `index.html`: optional static HTML view of the Markdown report.
+- `prometheus-snapshots.json`: captured Prometheus snapshots when available, or k6 gate-rate context when snapshots were not captured.
+
+Raw Terraform output JSON is not copied into `results/raw/` because it can include kubeconfig and database credentials. Set `LAB_RESULTS_DIR` to publish somewhere other than `results/`, or set `LAB_RESULT_PUBLISHER_CMD` to replace the default `scripts/publish_results.rb` publisher. `LAB_REPORT_CMD` remains available as a legacy override that receives `RUN_DIR REPORT_PATH`.
 
 ### Destroy
 

@@ -65,6 +65,7 @@ jobs:
           bash -n scripts/lab
           scripts/lab --help >/tmp/lab-help.txt
           scripts/lab seed --patients 1 --seed 123 --run ci-seed --dry-run >/tmp/lab-seed-dry-run.txt
+          ruby -c scripts/publish_results.rb
 
       - name: Check Synthea loader
         run: |
@@ -82,6 +83,7 @@ jobs:
       - name: Check k6 benchmark profiles
         run: |
           FHIR_BASE_URL=http://example.invalid/fhir scripts/lab benchmark --profile smoke --run ci-benchmark --dry-run >/tmp/lab-benchmark-dry-run.txt
+          scripts/lab report --run ci-benchmark --cloud aws --profile smoke --dry-run >/tmp/lab-report-dry-run.txt
           mkdir -p /tmp/k6-profile-check/lib
           cp benchmarks/k6/lib/fhir_benchmark.js /tmp/k6-profile-check/lib/fhir_benchmark.mjs
           sed 's#./lib/fhir_benchmark.js#./lib/fhir_benchmark.mjs#' benchmarks/k6/smoke.js > /tmp/k6-profile-check/smoke.mjs
@@ -125,6 +127,9 @@ jobs:
             abort "#{profile} profile does not run shared workload" unless body.include?("runFhirWorkload")
           end
           RUBY
+
+      - name: Check result publisher
+        run: ruby test/publish_results_test.rb
 
       - name: Syntax-check Ansible playbooks
         run: ansible-playbook -i ansible/inventory.ini ansible/playbooks/lab.yml --syntax-check
