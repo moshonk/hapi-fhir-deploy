@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "open3"
 require "yaml"
 
 class LabEpicAcceptanceTest < Minitest::Test
@@ -8,7 +9,8 @@ class LabEpicAcceptanceTest < Minitest::Test
 
   def test_lab_wrapper_exposes_full_epic_workflow
     lab = read("scripts/lab")
-    help = `#{File.join(ROOT_DIR, "scripts/lab")} --help`
+    help, stderr, status = Open3.capture3(File.join(ROOT_DIR, "scripts/lab"), "--help")
+    assert status.success?, stderr
 
     %w[up deploy seed benchmark report down].each do |command|
       assert_includes help, "scripts/lab #{command}", "missing #{command} usage"

@@ -8,7 +8,7 @@ This document maps the ephemeral multi-cloud HAPI FHIR benchmark lab epic to the
 | --- | --- |
 | Can run provision -> deploy -> seed -> benchmark -> report -> destroy. | `scripts/lab` exposes `up`, `deploy`, `seed`, `benchmark`, `report`, and `down`; [benchmark-lab-runbook.md](benchmark-lab-runbook.md) documents the smoke path end to end. |
 | Supports AWS, Azure, and GCP. | `infra/terraform/aws`, `infra/terraform/azure`, and `infra/terraform/gcp` provision provider-native Kubernetes and managed PostgreSQL, and `scripts/lab --cloud aws|azure|gcp` routes to each provider. |
-| Produces analyzable local benchmark artifacts. | `scripts/lab seed` writes dataset metadata, `scripts/lab benchmark` writes k6 summaries/raw JSONL, and `scripts/lab report` publishes ignored `results/YYYYMMDD-HHMMSS-provider-profile/` directories with raw artifacts, `summary.csv`, `environment.json`, `report.md`, optional `index.html`, and Prometheus context. |
+| Produces analyzable local benchmark artifacts. | `scripts/lab seed` writes dataset metadata, `scripts/lab benchmark` writes k6 summaries/raw JSONL, and `scripts/lab report` publishes ignored `results/YYYYMMDD-HHMMSS-provider-profile/` directories with raw artifacts, `summary.csv`, `environment.json`, `report.md`, `index.html`, and Prometheus context. |
 | Keeps secrets out of the repo. | Terraform state, kubeconfigs, tfvars, Ansible artifacts, and `results/` are ignored; Terraform kubeconfig and database password outputs are sensitive; the result publisher derives non-sensitive environment fields without copying raw Terraform output JSON. |
 
 ## Workstream Inventory
