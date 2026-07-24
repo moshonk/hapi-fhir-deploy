@@ -204,22 +204,6 @@ resource "aws_db_subnet_group" "postgres" {
   tags = local.tags
 }
 
-resource "aws_db_parameter_group" "postgres" {
-  name   = "${local.name}-postgres"
-  family = "postgres${split(".", var.postgres_version)[0]}"
-
-  # Enforces the value docs/autoscaling.md's connection-budget formulas
-  # assume, rather than leaving it as an unenforced default
-  # (specs/007-pgbouncer-connection-pooling).
-  parameter {
-    name         = "max_connections"
-    value        = tostring(var.db_max_connections)
-    apply_method = "pending-reboot"
-  }
-
-  tags = local.tags
-}
-
 resource "aws_db_instance" "postgres" {
   identifier              = "${local.name}-postgres"
   allocated_storage       = var.db_allocated_storage_gb
@@ -231,7 +215,6 @@ resource "aws_db_instance" "postgres" {
   password                = random_password.postgres.result
   port                    = 5432
   db_subnet_group_name    = aws_db_subnet_group.postgres.name
-  parameter_group_name    = aws_db_parameter_group.postgres.name
   vpc_security_group_ids  = [aws_security_group.postgres.id]
   publicly_accessible     = false
   skip_final_snapshot     = true

@@ -50,34 +50,3 @@ keda_operator_deployment_name: keda-operator
 
 helm_wait_timeout: 10m
 rollout_timeout: 600s
-
-# PgBouncer pooled connection tier (spec 007-pgbouncer-connection-pooling).
-# Opt-in and disabled by default: when enable_pgbouncer is false, deployment
-# behavior is unchanged from the native tier (spec 003).
-enable_pgbouncer: false
-pgbouncer_configmap_path: "{{ repo_root }}/manifests/pgbouncer/configmap.yaml"
-pgbouncer_service_path: "{{ repo_root }}/manifests/pgbouncer/service.yaml"
-pgbouncer_pdb_path: "{{ repo_root }}/manifests/pgbouncer/poddisruptionbudget.yaml"
-pgbouncer_deployment_template: ../templates/pgbouncer-deployment.runtime.yaml.j2
-pgbouncer_deployment_output_path: "{{ repo_root }}/ansible/artifacts/generated/pgbouncer-deployment.runtime.yaml"
-pgbouncer_scaledobject_path: "{{ repo_root }}/manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml"
-pgbouncer_values_path: "{{ chart_path }}/values-pgbouncer-tier.yaml"
-
-pgbouncer_deployment_name: hapi-fhir-pgbouncer
-pgbouncer_service_name: hapi-fhir-pgbouncer
-pgbouncer_configmap_name: hapi-fhir-pgbouncer
-pgbouncer_scaledobject_name: hapi-fhir-pgbouncer
-
-# Pinned per Constitution Principle III (no `latest`). >= 1.21 for
-# MAX_PREPARED_STATEMENTS / protocol-level prepared-statement pooling
-# support in transaction mode (research.md Decision 3).
-pgbouncer_image: "docker.io/edoburu/pgbouncer:v1.25.2-p0@sha256:68969403ee54dbf98601b49a1e92db644a9fdeed5c40969f7f0adce5193ac5b8"
-pgbouncer_listen_port: 5432
-
-# Pooled connection-budget inputs (contracts/connection-budget-formula.md).
-# pgbouncer_server_connections = default_pool_size * replica_count
-#                               = 20 * 2 = 40 <= (postgres_max_connections=100 - reserved_connections=50)
-pgbouncer_replica_count: 2
-pgbouncer_default_pool_size: 20
-pgbouncer_max_client_conn: 1000
-pgbouncer_max_prepared_statements: 200

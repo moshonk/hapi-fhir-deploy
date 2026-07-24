@@ -68,18 +68,6 @@
         state: directory
         mode: "0700"
 
-    - name: Resolve Helm values file order
-      ansible.builtin.set_fact:
-        # values.yaml (base, never modified by spec 007) -> values-pgbouncer-tier.yaml
-        # (additive, only when enabled) -> runtime_values_path (always last: it
-        # supplies the per-lab datasource wiring, including which host wins).
-        hapi_values_files: >-
-          {{
-            [values_path]
-            + ([pgbouncer_values_path] if (enable_pgbouncer | default(false) | bool) else [])
-            + [runtime_values_path]
-          }}
-
     - name: Apply HAPI namespace manifest
       kubernetes.core.k8s:
         state: present
@@ -118,7 +106,9 @@
         name: "{{ hapi_release_name }}"
         chart_ref: "{{ chart_path }}"
         release_namespace: "{{ hapi_namespace }}"
-        values_files: "{{ hapi_values_files }}"
+        values_files:
+          - "{{ values_path }}"
+          - "{{ runtime_values_path }}"
         wait: true
         wait_timeout: "{{ helm_wait_timeout }}"
 
@@ -140,14 +130,8 @@
             } | combine(lookup('file', runtime_rollout_patch_path) | from_yaml, recursive=True)
           }}
 
-    - name: Apply HAPI FHIR KEDA autoscaler (native connection-budget ceiling)
+    - name: Apply HAPI FHIR KEDA autoscaler
       kubernetes.core.k8s:
         state: present
         src: "{{ autoscaling_manifest_path }}"
-      when: (apply_autoscaling | bool) and not (enable_pgbouncer | default(false) | bool)
-
-    - name: Apply HAPI FHIR KEDA autoscaler (pooled connection-budget ceiling)
-      kubernetes.core.k8s:
-        state: present
-        src: "{{ pgbouncer_scaledobject_path }}"
-      when: (apply_autoscaling | bool) and (enable_pgbouncer | default(false) | bool)
+      when: apply_autoscaling | bool

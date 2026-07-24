@@ -1,20 +1,7 @@
-{% if enable_pgbouncer | default(false) | bool %}
-{% set datasource_host = pgbouncer_service_name + '.' + hapi_namespace + '.svc.cluster.local' %}
-{% set datasource_port = pgbouncer_listen_port %}
-{% else %}
-{% set datasource_host = lab_database_endpoint %}
-{% set datasource_port = lab_database_port %}
-{% endif %}
 hapi-fhir-jpaserver:
-  # When enable_pgbouncer is true, HAPI's datasource points at the
-  # PgBouncer Service (specs/007-pgbouncer-connection-pooling) instead of
-  # the raw PostgreSQL endpoint; PgBouncer itself connects upstream to
-  # lab_database_endpoint (see pgbouncer-deployment.runtime.yaml.j2).
-  # Disabled (the default), this block is byte-for-byte what it was before
-  # spec 007: the native tier is unaffected.
   externalDatabase:
-    host: "{{ datasource_host }}"
-    port: {{ datasource_port }}
+    host: "{{ lab_database_endpoint }}"
+    port: {{ lab_database_port }}
     user: "{{ lab_database_username }}"
     database: "{{ lab_database_name }}"
     existingSecret: "{{ hapi_database_secret_name }}"
@@ -26,7 +13,7 @@ hapi-fhir-jpaserver:
     - name: SERVER_SHUTDOWN
       value: graceful
     - name: HAPI_FHIR_POSTGRES_JDBC_URL
-      value: "jdbc:postgresql://{{ datasource_host }}:{{ datasource_port }}/{{ lab_database_name }}"
+      value: "jdbc:postgresql://{{ lab_database_endpoint }}:{{ lab_database_port }}/{{ lab_database_name }}"
     - name: HAPI_FHIR_POSTGRES_USERNAME
       value: "{{ lab_database_username }}"
     - name: HAPI_FHIR_POSTGRES_PASSWORD

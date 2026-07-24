@@ -121,9 +121,3 @@ resource "azurerm_postgresql_flexible_server_database" "fhir" {
   charset   = "UTF8"
   collation = "en_US.utf8"
 }
-
-resource "azurerm_postgresql_flexible_server_configuration" "max_connections" {
-  name      = "max_connections"
-  server_id = azurerm_postgresql_flexible_server.postgres.id
-  value     = tostring(var.db_max_connections)
-}
