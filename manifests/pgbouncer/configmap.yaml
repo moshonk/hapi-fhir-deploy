@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hapi-fhir-pgbouncer
+  namespace: fhir
+  labels:
+    app.kubernetes.io/name: hapi-fhir-pgbouncer
+    app.kubernetes.io/part-of: hapi-fhir
+data:
+  # Pool-sizing configuration only. Connection endpoint values (DB_HOST,
+  # DB_PORT, DB_NAME) are supplied per-lab at deploy time by
+  # ansible/templates/pgbouncer-deployment.runtime.yaml.j2 since they vary
+  # by cloud/Terraform run; everything here is stable across lab runs.
+  #
+  # See specs/007-pgbouncer-connection-pooling/contracts/connection-budget-formula.md
+  # for how these values feed the pooled-tier ceiling formula.
+  POOL_MODE: "transaction"
+  DEFAULT_POOL_SIZE: "20"
+  MAX_CLIENT_CONN: "1000"
+  MAX_DB_CONNECTIONS: "20"
+  ADMIN_USERS: "hapi_fhir"
+  STATS_USERS: "hapi_fhir"
+  # Enables PgBouncer's protocol-level prepared-statement pooling in
+  # transaction mode (requires PgBouncer >= 1.21; research.md Decision 3).
+  MAX_PREPARED_STATEMENTS: "200"

@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hapi-fhir-pgbouncer
+  namespace: fhir
+  labels:
+    app.kubernetes.io/name: hapi-fhir-pgbouncer
+    app.kubernetes.io/part-of: hapi-fhir
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hapi-fhir-pgbouncer
+      app.kubernetes.io/part-of: hapi-fhir

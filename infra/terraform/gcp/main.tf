@@ -141,6 +141,11 @@ resource "google_sql_database_instance" "postgres" {
     backup_configuration {
       enabled = true
     }
+
+    database_flags {
+      name  = "max_connections"
+      value = tostring(var.db_max_connections)
+    }
   }
 
   deletion_protection = false
