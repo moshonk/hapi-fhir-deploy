@@ -64,6 +64,7 @@ class LabEpicAcceptanceTest < Minitest::Test
     assert_equal(
       %w[
         00-install-addons.yml
+        15-deploy-pgbouncer.yml
         20-deploy-hapi-fhir.yml
         30-wait-readiness.yml
         40-collect-metadata.yml
