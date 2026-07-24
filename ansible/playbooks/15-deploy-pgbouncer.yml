@@ -1,12 +1,12 @@
 ---
-- name: Deploy HAPI FHIR Helm baseline
+- name: Deploy PgBouncer pooled connection tier
   hosts: lab
   gather_facts: false
   vars_files:
     - ../group_vars/lab.yml
   environment: "{{ {'KUBECONFIG': lab_kubeconfig} if (lab_kubeconfig | length > 0) else {} }}"
   pre_tasks:
-    - name: Require kubeconfig for HAPI deployment
+    - name: Require kubeconfig for PgBouncer deployment
       ansible.builtin.assert:
         that:
           - lab_kubeconfig | length > 0
@@ -42,6 +42,11 @@
       no_log: true
       when: terraform_output_file | length > 0
 
+    # PgBouncer resolves the same database connection inputs as
+    # 20-deploy-hapi-fhir.yml. Facts set in one imported playbook do not
+    # carry over to another (no fact caching is configured in this repo),
+    # so this block is intentionally duplicated rather than shared, to
+    # keep each numbered playbook self-contained per existing convention.
     - name: Resolve database connection inputs
       ansible.builtin.set_fact:
         lab_database_endpoint: "{{ hapi_database_host | default(terraform_outputs.database_endpoint.value | default(''), true) }}"
@@ -64,90 +69,39 @@
   tasks:
     - name: Ensure local generated artifact directory exists
       ansible.builtin.file:
-        path: "{{ runtime_values_path | dirname }}"
+        path: "{{ pgbouncer_deployment_output_path | dirname }}"
         state: directory
         mode: "0700"
-
-    - name: Resolve Helm values file order
-      ansible.builtin.set_fact:
-        # values.yaml (base, never modified by spec 007) -> values-pgbouncer-tier.yaml
-        # (additive, only when enabled) -> runtime_values_path (always last: it
-        # supplies the per-lab datasource wiring, including which host wins).
-        hapi_values_files: >-
-          {{
-            [values_path]
-            + ([pgbouncer_values_path] if (enable_pgbouncer | default(false) | bool) else [])
-            + [runtime_values_path]
-          }}
 
     - name: Apply HAPI namespace manifest
       kubernetes.core.k8s:
         state: present
         src: "{{ namespace_manifest_path }}"
 
-    - name: Create runtime PostgreSQL Secret
+    - name: Apply PgBouncer ConfigMap
       kubernetes.core.k8s:
         state: present
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: "{{ hapi_database_secret_name }}"
-            namespace: "{{ hapi_namespace }}"
-            labels:
-              app.kubernetes.io/name: hapi-fhir-postgres
-              app.kubernetes.io/part-of: hapi-fhir
-          type: Opaque
-          stringData: "{{ {hapi_database_secret_key: lab_database_password} }}"
-      no_log: true
+        src: "{{ pgbouncer_configmap_path }}"
 
-    - name: Render runtime Helm values without secret material
+    - name: Render PgBouncer Deployment (reuses the existing hapi-fhir-postgres Secret for its DB_PASSWORD)
       ansible.builtin.template:
-        src: ../templates/hapi-fhir-values.runtime.yaml.j2
-        dest: "{{ runtime_values_path }}"
+        src: "{{ pgbouncer_deployment_template }}"
+        dest: "{{ pgbouncer_deployment_output_path }}"
         mode: "0600"
 
-    - name: Build HAPI FHIR Helm dependencies
-      ansible.builtin.command:
-        cmd: helm dependency build charts/hapi-fhir-deploy
-        chdir: "{{ repo_root }}"
-      changed_when: false
-
-    - name: Install or upgrade HAPI FHIR Helm release
-      kubernetes.core.helm:
-        name: "{{ hapi_release_name }}"
-        chart_ref: "{{ chart_path }}"
-        release_namespace: "{{ hapi_namespace }}"
-        values_files: "{{ hapi_values_files }}"
+    - name: Apply PgBouncer Deployment
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ pgbouncer_deployment_output_path }}"
         wait: true
-        wait_timeout: "{{ helm_wait_timeout }}"
+        wait_timeout: 300
 
-    - name: Apply runtime rollout patch
-      kubernetes.core.k8s:
-        state: patched
-        namespace: "{{ hapi_namespace }}"
-        merge_type:
-          - strategic-merge
-        definition: >-
-          {{
-            {
-              'apiVersion': 'apps/v1',
-              'kind': 'Deployment',
-              'metadata': {
-                'name': hapi_deployment_name,
-                'namespace': hapi_namespace
-              }
-            } | combine(lookup('file', runtime_rollout_patch_path) | from_yaml, recursive=True)
-          }}
-
-    - name: Apply HAPI FHIR KEDA autoscaler (native connection-budget ceiling)
+    - name: Apply PgBouncer Service
       kubernetes.core.k8s:
         state: present
-        src: "{{ autoscaling_manifest_path }}"
-      when: (apply_autoscaling | bool) and not (enable_pgbouncer | default(false) | bool)
+        src: "{{ pgbouncer_service_path }}"
 
-    - name: Apply HAPI FHIR KEDA autoscaler (pooled connection-budget ceiling)
+    - name: Apply PgBouncer PodDisruptionBudget
       kubernetes.core.k8s:
         state: present
-        src: "{{ pgbouncer_scaledobject_path }}"
-      when: (apply_autoscaling | bool) and (enable_pgbouncer | default(false) | bool)
+        src: "{{ pgbouncer_pdb_path }}"

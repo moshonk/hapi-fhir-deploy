@@ -45,6 +45,8 @@ Keep `externalDatabase` and the `extraEnv` datasource values aligned. The chart 
 
 ## Connection Budget
 
+`postgres_max_connections` is now Terraform-enforced, not just a documentation assumption: `infra/terraform/{aws,azure,gcp}` each expose a `db_max_connections` variable (default `100`, matching the value below), wired to `google_sql_database_instance.settings.database_flags` (GCP), a dedicated `aws_db_parameter_group` (AWS), and `azurerm_postgresql_flexible_server_configuration` (Azure). See `specs/007-pgbouncer-connection-pooling/contracts/terraform-max-connections.md`.
+
 The baseline sets `spring.datasource.hikari.maximumPoolSize` to `10` and starts with `replicaCount: 2`, so the steady-state HAPI application budget is:
 
 ```text

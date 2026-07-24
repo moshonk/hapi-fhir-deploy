@@ -96,3 +96,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "db_max_connections" {
+  description = "PostgreSQL max_connections enforced on the Flexible Server. Must match the value documented in docs/autoscaling.md's connection-budget formulas (specs/007-pgbouncer-connection-pooling)."
+  type        = number
+  default     = 100
+}
