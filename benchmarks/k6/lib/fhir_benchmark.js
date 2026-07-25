@@ -122,10 +122,11 @@ export function profileOptions(profile) {
   };
 }
 
-export function benchmarkSetup(profile) {
+export function benchmarkSetup(profile, workload = "generic") {
   const baseUrl = requiredEnv("FHIR_BASE_URL");
   const config = profileConfig(profile);
   const normalizedBaseUrl = trimTrailingSlash(baseUrl);
+  workloadFor(workload); // fail fast on an unknown workload name
 
   const patientIds = discoverPatientIds(normalizedBaseUrl);
   const prometheusBefore = config.requirePrometheusGates
@@ -134,6 +135,7 @@ export function benchmarkSetup(profile) {
 
   return {
     profile,
+    workload,
     baseUrl: normalizedBaseUrl,
     patientIds,
     bulkExportEnabled: envBool("BULK_EXPORT_ENABLED", false),
@@ -148,7 +150,8 @@ export function runFhirWorkload(data) {
     healthCheck(data);
   }
 
-  const operation = chooseOperation(data.bulkExportEnabled);
+  const workloadConfig = workloadFor(data.workload);
+  const operation = chooseOperation(workloadConfig, data.bulkExportEnabled);
 
   if (operation === "mixed_search") {
     group("mixed read/search traffic", () => {
@@ -157,7 +160,11 @@ export function runFhirWorkload(data) {
       observationSearch(data);
     });
   } else {
-    operationHandlers[operation](data);
+    const handler = workloadConfig.handlers[operation];
+    if (typeof handler !== "function") {
+      throw new Error(`No handler registered for operation "${operation}" in workload "${data.workload}"`);
+    }
+    handler(data);
   }
 
   sleep(data.sleepSeconds);
@@ -279,20 +286,28 @@ function discoverPatientIds(baseUrl) {
     .map((resource) => resource.id);
 }
 
-function chooseOperation(bulkExportEnabled) {
-  const weights = bulkExportEnabled
-    ? OPERATION_WEIGHTS.concat([["bulk_export", 1]])
-    : OPERATION_WEIGHTS;
-  const total = weights.reduce((sum, entry) => sum + entry[1], 0);
+function chooseOperation(workload, bulkExportEnabled) {
+  // Only offer bulk_export if the workload actually registers a handler for
+  // it (today only `generic` does) -- otherwise a workload with no
+  // bulk_export handler (e.g. the `echis` placeholder) could have it drawn
+  // and then crash on a missing handler instead of failing clearly.
+  const canBulkExport = bulkExportEnabled && typeof workload.handlers.bulk_export === "function";
+  const effectiveWeights = canBulkExport
+    ? workload.operationWeights.concat([["bulk_export", 1]])
+    : workload.operationWeights;
+  if (effectiveWeights.length === 0) {
+    throw new Error("No operations configured for this workload");
+  }
+  const total = effectiveWeights.reduce((sum, entry) => sum + entry[1], 0);
   let draw = Math.random() * total;
 
-  for (const entry of weights) {
+  for (const entry of effectiveWeights) {
     draw -= entry[1];
     if (draw <= 0) {
       return entry[0];
     }
   }
-  return weights[weights.length - 1][0];
+  return effectiveWeights[effectiveWeights.length - 1][0];
 }
 
 const operationHandlers = {
@@ -304,6 +319,30 @@ const operationHandlers = {
   condition_search: conditionSearch,
   bulk_export: bulkExport
 };
+
+// Generalizes the operation-weight/handler set so `generic` (today's
+// unchanged behavior) and `echis` (specs/008-echis-workload-benchmark,
+// populated by that spec's US3) can coexist. See
+// specs/008-echis-workload-benchmark/contracts/workloads-registry.md.
+const WORKLOADS = {
+  generic: {
+    operationWeights: OPERATION_WEIGHTS,
+    handlers: operationHandlers
+  },
+  echis: {
+    // Populated by specs/008-echis-workload-benchmark tasks T018-T025.
+    operationWeights: [],
+    handlers: {}
+  }
+};
+
+function workloadFor(name) {
+  const workload = WORKLOADS[name];
+  if (!workload) {
+    throw new Error(`Unsupported k6 workload: ${name}`);
+  }
+  return workload;
+}
 
 function capabilityStatement(data) {
   requestOperation(data, "capability_statement", "/metadata", (response) => (
@@ -381,6 +420,26 @@ function requestOperation(data, operation, path, successful, headers) {
     tags: { fhir_operation: operation }
   });
 
+  return finishOperation(operation, response, successful);
+}
+
+// POST/PUT counterpart to requestOperation, for write-heavy workloads
+// (specs/008-echis-workload-benchmark). Added alongside, not in place of,
+// requestOperation so every existing GET-only call site is unaffected.
+function requestWriteOperation(data, operation, method, path, body, successful, headers) {
+  if (method !== "POST" && method !== "PUT") {
+    throw new Error(`Unsupported write method "${method}" for operation "${operation}"; expected POST or PUT`);
+  }
+  const requestFn = method === "PUT" ? http.put : http.post;
+  const response = requestFn(`${data.baseUrl}${path}`, JSON.stringify(body), {
+    headers: Object.assign({ "Content-Type": "application/fhir+json" }, DEFAULT_HEADERS, headers || {}),
+    tags: { fhir_operation: operation }
+  });
+
+  return finishOperation(operation, response, successful);
+}
+
+function finishOperation(operation, response, successful) {
   recordOperation(operation, response);
   check(response, {
     [`${operation} successful`]: successful

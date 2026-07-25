@@ -25,8 +25,8 @@ Benchmark/load-testing tooling repository, not an application — paths below ar
 
 ## Phase 1: Setup
 
-- [ ] T001 [P] Choose and pin container images for the new Job manifests (Ruby generator image, k6 image) — no `latest`, per Constitution Principle III; record references for reuse
-- [ ] T002 [P] Create the `manifests/seed-job/` and `manifests/k6-shard-job/` directories
+- [X] T001 [P] Choose and pin container images for the new Job manifests (Ruby generator image, k6 image) — no `latest`, per Constitution Principle III; record references for reuse. Pinned via live registry lookup: `docker.io/library/ruby:3.3.12-alpine3.24@sha256:c162e46df6458be2bc169956f207225abd4b017adc0f0a6f7ad50640b93fcf82` (matches CI's Ruby 3.3) and `docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629`.
+- [X] T002 [P] Create the `manifests/seed-job/` and `manifests/k6-shard-job/` directories — each with a `README.md` recording the T001 pinned image and pointing to the future T026/T027 manifests.
 
 **Checkpoint**: Pinned images and directories available for Phase 6.
 
@@ -36,8 +36,8 @@ Benchmark/load-testing tooling repository, not an application — paths below ar
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T003 Extend `benchmarks/k6/lib/fhir_benchmark.js`'s request helper to support POST/PUT with a JSON body, preserving all existing GET-only call sites unchanged (`contracts/workloads-registry.md` invariant 3)
-- [ ] T004 Introduce the `WORKLOADS` registry skeleton in `benchmarks/k6/lib/fhir_benchmark.js` — `generic` wraps today's `OPERATION_WEIGHTS`/handlers byte-for-byte unchanged, `echis` starts as an empty placeholder — and thread `workload` through `benchmarkSetup(profile, workload = "generic")` (`contracts/workloads-registry.md` invariants 1-2) (depends on T003)
+- [X] T003 Extend `benchmarks/k6/lib/fhir_benchmark.js`'s request helper to support POST/PUT with a JSON body, preserving all existing GET-only call sites unchanged (`contracts/workloads-registry.md` invariant 3). Implemented as a new sibling function `requestWriteOperation` (POST/PUT + JSON body) alongside the existing, untouched `requestOperation` (GET-only) — both share a small extracted `finishOperation` helper for the check/record logic, so `requestOperation`'s signature and behavior are byte-for-byte unchanged. `requestWriteOperation` validates `method` is exactly `"POST"` or `"PUT"` (review comment: an unsupported/mistyped method used to silently fall back to POST).
+- [X] T004 Introduce the `WORKLOADS` registry skeleton in `benchmarks/k6/lib/fhir_benchmark.js` — `generic` wraps today's `OPERATION_WEIGHTS`/handlers byte-for-byte unchanged, `echis` starts as an empty placeholder — and thread `workload` through `benchmarkSetup(profile, workload = "generic")` (`contracts/workloads-registry.md` invariants 1-2) (depends on T003). `chooseOperation` now takes the workload object (not just its weights) so it can only offer `bulk_export` when the workload actually registers a handler for it, and `runFhirWorkload` checks handler existence before dispatch — both fixed per review comment (previously, `echis` + `BULK_EXPORT_ENABLED=true` could select `bulk_export` and then crash on a missing handler instead of failing clearly). Verified: `node --check` on the lib + all four existing profiles + `load_100.js`/`load_1000.js` (untouched, still call `benchmarkSetup(PROFILE)` with one arg); the existing CI Ruby assertion script for this file passes unmodified; a standalone runtime test of `chooseOperation`/`workloadFor`/handler-dispatch confirms the weighted distribution, the two review-flagged edge cases, and generic-workload behavior are all correct.
 
 **Checkpoint**: Shared library ready for both the new tier scripts (US1) and the new operation handlers (US3).
 
