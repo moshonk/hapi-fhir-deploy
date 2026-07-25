@@ -21,8 +21,8 @@ options = {
 }
 
 OptionParser.new do |opts|
-  opts.banner = "Usage: scripts/echis_seed.rb --households N --seed S --run-id RUN_ID --metadata FILE --fhir-base-url URL"
-  opts.on("--households N", Integer, "Number of households to create (or this shard's slice of a larger target).") { |v| options[:households] = v }
+  opts.banner = "Usage: scripts/echis_seed.rb --households N --seed S --run-id RUN_ID --metadata FILE [--fhir-base-url URL | --metadata-only]"
+  opts.on("--households N", Integer, "Total household count across all shards (not this shard's own slice) -- combined with --shard-index/--shard-count to compute this invocation's [start_index, end_index) range.") { |v| options[:households] = v }
   opts.on("--individuals-per-household N", Integer, "Average individuals per household; default 3.") { |v| options[:individuals_per_household] = v }
   opts.on("--seed S", Integer, "Deterministic seed recorded in metadata.") { |v| options[:seed] = v }
   opts.on("--run-id RUN_ID", "Run identifier.") { |v| options[:run_id] = v }
@@ -280,10 +280,12 @@ def questionnaire_response_resource(individual_index, patient_id)
   }
 end
 
-# Not every individual has an open Task -- one in three, deterministically,
-# matching benchmarks/k6/lib/fhir_benchmark.js's worklist_read expecting
-# status=requested (kept consistent so a load-test run against a
-# echis_seed.rb-loaded dataset finds real worklist entries).
+# Not every individual has an open Task -- one in three, deterministically.
+# Status is "requested" to align with the worklist_read handler's planned
+# status=requested query (specs/008-echis-workload-benchmark tasks.md T019,
+# contracts/workloads-registry.md), tracked in #53 -- kept consistent so a
+# load-test run against an echis_seed.rb-loaded dataset finds real worklist
+# entries once that handler lands.
 def task_resource(individual_index, patient_id, chw_index)
   {
     "resourceType" => "Task",
