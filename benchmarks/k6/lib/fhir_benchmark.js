@@ -151,7 +151,28 @@ export function runFhirWorkload(data) {
   }
 
   const workloadConfig = workloadFor(data.workload);
-  const operation = chooseOperation(workloadConfig, data.bulkExportEnabled);
+  dispatchOperation(data, workloadConfig.operationWeights, workloadConfig.handlers);
+
+  sleep(data.sleepSeconds);
+}
+
+// Runs the same dispatch as runFhirWorkload but with one or more operations excluded
+// from the weighted draw -- for tier scripts that run those operations on a separate
+// scenario/executor instead (see contracts/workloads-registry.md's Executor contract).
+export function runFhirWorkloadExcluding(data, ...excludedOperations) {
+  if (__ITER === 0) {
+    healthCheck(data);
+  }
+
+  const workloadConfig = workloadFor(data.workload);
+  const weights = workloadConfig.operationWeights.filter(([name]) => !excludedOperations.includes(name));
+  dispatchOperation(data, weights, workloadConfig.handlers);
+
+  sleep(data.sleepSeconds);
+}
+
+function dispatchOperation(data, operationWeights, handlers) {
+  const operation = chooseOperation({ operationWeights, handlers }, data.bulkExportEnabled);
 
   if (operation === "mixed_search") {
     group("mixed read/search traffic", () => {
@@ -160,14 +181,12 @@ export function runFhirWorkload(data) {
       observationSearch(data);
     });
   } else {
-    const handler = workloadConfig.handlers[operation];
+    const handler = handlers[operation];
     if (typeof handler !== "function") {
       throw new Error(`No handler registered for operation "${operation}" in workload "${data.workload}"`);
     }
     handler(data);
   }
-
-  sleep(data.sleepSeconds);
 }
 
 export function benchmarkTeardown() {}
