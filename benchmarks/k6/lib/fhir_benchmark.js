@@ -320,6 +320,26 @@ const operationHandlers = {
   bulk_export: bulkExport
 };
 
+// household_sync_write + registration_write MUST account for the majority
+// of traffic (spec 008 FR-005). supervisor_dashboard_read is deliberately
+// low-weight rather than gated to a VU subset -- see the comment on
+// supervisorDashboardRead() for why.
+const ECHIS_OPERATION_WEIGHTS = [
+  ["household_sync_write", 50],
+  ["registration_write", 10],
+  ["worklist_read", 20],
+  ["household_roster_read", 15],
+  ["supervisor_dashboard_read", 5]
+];
+
+const echisOperationHandlers = {
+  household_sync_write: householdSyncWrite,
+  worklist_read: worklistRead,
+  household_roster_read: householdRosterRead,
+  registration_write: registrationWrite,
+  supervisor_dashboard_read: supervisorDashboardRead
+};
+
 // Generalizes the operation-weight/handler set so `generic` (today's
 // unchanged behavior) and `echis` (specs/008-echis-workload-benchmark,
 // populated by that spec's US3) can coexist. See
@@ -330,9 +350,8 @@ const WORKLOADS = {
     handlers: operationHandlers
   },
   echis: {
-    // Populated by specs/008-echis-workload-benchmark tasks T018-T025.
-    operationWeights: [],
-    handlers: {}
+    operationWeights: ECHIS_OPERATION_WEIGHTS,
+    handlers: echisOperationHandlers
   }
 };
 
@@ -412,6 +431,254 @@ function bulkExport(data) {
     Accept: "application/fhir+json",
     Prefer: "respond-async"
   });
+}
+
+// --- echis workload (specs/008-echis-workload-benchmark, User Story 3) ---
+//
+// Resource IDs are derived from k6's __VU/__ITER globals rather than
+// requiring a pre-seeded dataset, so this workload is self-sufficient and
+// runnable against a server with no pre-existing data (spec Independent
+// Test for US3): each VU maintains one stable "assigned" household
+// (echis-hh-vu<VU>) that householdSyncWrite/householdRosterRead read and
+// revisit every iteration via idempotent PUT, while each call to
+// registrationWrite creates a genuinely new household
+// (echis-hh-vu<VU>-reg<ITER>), representing new registrations happening
+// over the course of the run.
+
+function householdSyncWrite(data) {
+  const vu = __VU;
+  const iter = __ITER;
+  const householdId = `echis-hh-vu${vu}`;
+  const patientId = `echis-p-vu${vu}`;
+  const chwId = `echis-chw-vu${vu}`;
+  const encounterId = `echis-enc-vu${vu}-${iter}`;
+  const observationId = `echis-obs-vu${vu}-${iter}`;
+  const conditionId = `echis-cond-vu${vu}-${iter}`;
+  const questionnaireResponseId = `echis-qr-vu${vu}-${iter}`;
+  const taskId = `echis-task-vu${vu}`;
+  const now = new Date().toISOString();
+
+  const bundle = echisTransactionBundle([
+    householdResource(householdId, [patientId]),
+    patientResource(patientId, vu),
+    encounterResource(encounterId, patientId, now),
+    observationResource(observationId, patientId, now, iter),
+    conditionResource(conditionId, patientId, vu),
+    questionnaireResponseResource(questionnaireResponseId, patientId, encounterId),
+    taskResource(taskId, patientId, chwId, "completed")
+  ]);
+
+  requestWriteOperation(data, "household_sync_write", "POST", "/", bundle, (response) => (
+    response.status === 200 && jsonResourceType(response) === "Bundle"
+  ));
+}
+
+function registrationWrite(data) {
+  const vu = __VU;
+  const iter = __ITER;
+  const householdId = `echis-hh-vu${vu}-reg${iter}`;
+  const headPatientId = `echis-p-vu${vu}-reg${iter}`;
+  const relatedPersonId = `echis-rp-vu${vu}-reg${iter}`;
+
+  const bundle = echisTransactionBundle([
+    householdResource(householdId, [headPatientId]),
+    patientResource(headPatientId, vu * 100000 + iter),
+    relatedPersonResource(relatedPersonId, headPatientId)
+  ]);
+
+  requestWriteOperation(data, "registration_write", "POST", "/", bundle, (response) => (
+    response.status === 200 && jsonResourceType(response) === "Bundle"
+  ));
+}
+
+function worklistRead(data) {
+  const chwId = `echis-chw-vu${__VU}`;
+  requestOperation(
+    data,
+    "worklist_read",
+    `/Task?owner=${encodeURIComponent(`PractitionerRole/${chwId}`)}&status=requested&_count=20`,
+    (response) => response.status === 200 && jsonResourceType(response) === "Bundle"
+  );
+}
+
+function householdRosterRead(data) {
+  const householdId = `echis-hh-vu${__VU}`;
+  // A _id search (not a direct instance GET) so this always returns a
+  // Bundle (200), even before householdSyncWrite/registrationWrite has run
+  // for this VU yet -- a direct `Group/{id}` read would 404 in that window.
+  requestOperation(
+    data,
+    "household_roster_read",
+    `/Group?_id=${encodeURIComponent(householdId)}&_include=Group:member&_count=20`,
+    (response) => response.status === 200 && jsonResourceType(response) === "Bundle"
+  );
+}
+
+function supervisorDashboardRead(data) {
+  // Spec calls for a "small, distinct VU subset representing supervisors."
+  // Implemented as a low weight (5 of 100, see ECHIS_OPERATION_WEIGHTS)
+  // shared across all VUs instead of gating by VU identity: it achieves the
+  // same low-volume traffic shape without adding a second selection
+  // dimension (which VUs vs. which operations) to chooseOperation.
+  requestOperation(
+    data,
+    "supervisor_dashboard_read",
+    "/Patient?_summary=count",
+    (response) => response.status === 200 && jsonResourceType(response) === "Bundle"
+  );
+}
+
+// Dedicated exec target for a k6 arrival-rate scenario, per research.md
+// Decision 7 / contracts/workloads-registry.md's executor contract. Not yet
+// wired into an options.scenarios object -- that happens in the
+// echis_load_*.js tier scripts (spec 008 US1, T006-T009), the earliest
+// point those scenarios are actually defined. operationWeightsExcluding()
+// is exported so those scripts can build a ramping-vus scenario's weights
+// with household_sync_write removed, avoiding double-counting it against
+// this dedicated scenario.
+export function runHouseholdSyncWrite(data) {
+  householdSyncWrite(data);
+  sleep(data.sleepSeconds);
+}
+
+export function operationWeightsExcluding(workloadName, ...excludedOperations) {
+  return workloadFor(workloadName).operationWeights.filter(([name]) => !excludedOperations.includes(name));
+}
+
+function echisTransactionBundle(resources) {
+  return {
+    resourceType: "Bundle",
+    type: "transaction",
+    entry: resources.map((resource) => ({
+      resource,
+      request: { method: "PUT", url: `${resource.resourceType}/${resource.id}` }
+    }))
+  };
+}
+
+function householdResource(id, memberPatientIds) {
+  return {
+    resourceType: "Group",
+    id,
+    type: "person",
+    actual: true,
+    quantity: memberPatientIds.length,
+    member: memberPatientIds.map((patientId) => ({ entity: { reference: `Patient/${patientId}` } }))
+  };
+}
+
+function patientResource(id, index) {
+  const birthYear = 1950 + (index % 60);
+  return {
+    resourceType: "Patient",
+    id,
+    identifier: [{ system: "urn:hapi-fhir-deploy:echis-benchmark", value: id }],
+    active: true,
+    name: [{ family: `EchisHousehold${index}`, given: [`Member${index}`] }],
+    gender: index % 2 === 0 ? "female" : "male",
+    birthDate: `${birthYear}-${String((index % 12) + 1).padStart(2, "0")}-${String((index % 28) + 1).padStart(2, "0")}`
+  };
+}
+
+function relatedPersonResource(id, headPatientId) {
+  return {
+    resourceType: "RelatedPerson",
+    id,
+    patient: { reference: `Patient/${headPatientId}` },
+    relationship: [{
+      coding: [{
+        system: "http://terminology.hl7.org/CodeSystem/v2-0131",
+        code: "C",
+        display: "Emergency Contact"
+      }]
+    }],
+    name: [{ family: "EchisDependent", given: ["Member"] }]
+  };
+}
+
+function encounterResource(id, patientId, timestamp) {
+  return {
+    resourceType: "Encounter",
+    id,
+    status: "finished",
+    class: {
+      system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+      code: "HH",
+      display: "home health"
+    },
+    subject: { reference: `Patient/${patientId}` },
+    period: { start: timestamp, end: timestamp }
+  };
+}
+
+const ECHIS_OBSERVATION_CODES = [
+  { code: "8867-4", display: "Heart rate", unit: "beats/minute", ucumCode: "/min", min: 60, range: 50 },
+  { code: "8302-2", display: "Body height", unit: "cm", ucumCode: "cm", min: 50, range: 130 },
+  { code: "29463-7", display: "Body weight", unit: "kg", ucumCode: "kg", min: 3, range: 80 }
+];
+
+function observationResource(id, patientId, timestamp, iter) {
+  const selected = ECHIS_OBSERVATION_CODES[iter % ECHIS_OBSERVATION_CODES.length];
+  return {
+    resourceType: "Observation",
+    id,
+    status: "final",
+    code: { coding: [{ system: "http://loinc.org", code: selected.code, display: selected.display }] },
+    subject: { reference: `Patient/${patientId}` },
+    effectiveDateTime: timestamp,
+    valueQuantity: {
+      value: selected.min + (iter % selected.range),
+      unit: selected.unit,
+      system: "http://unitsofmeasure.org",
+      code: selected.ucumCode
+    }
+  };
+}
+
+const ECHIS_CONDITION_CODES = [
+  { code: "38341003", display: "Hypertensive disorder, systemic arterial" },
+  { code: "73211009", display: "Diabetes mellitus" },
+  { code: "271737000", display: "Anemia" }
+];
+
+function conditionResource(id, patientId, vu) {
+  const selected = ECHIS_CONDITION_CODES[vu % ECHIS_CONDITION_CODES.length];
+  return {
+    resourceType: "Condition",
+    id,
+    clinicalStatus: {
+      coding: [{ system: "http://terminology.hl7.org/CodeSystem/condition-clinical", code: "active" }]
+    },
+    verificationStatus: {
+      coding: [{ system: "http://terminology.hl7.org/CodeSystem/condition-ver-status", code: "unconfirmed" }]
+    },
+    code: { coding: [{ system: "http://snomed.info/sct", code: selected.code, display: selected.display }] },
+    subject: { reference: `Patient/${patientId}` }
+  };
+}
+
+function questionnaireResponseResource(id, patientId, encounterId) {
+  return {
+    resourceType: "QuestionnaireResponse",
+    id,
+    status: "completed",
+    subject: { reference: `Patient/${patientId}` },
+    encounter: { reference: `Encounter/${encounterId}` },
+    item: [
+      { linkId: "danger-signs", text: "Any danger signs observed?", answer: [{ valueBoolean: false }] }
+    ]
+  };
+}
+
+function taskResource(id, patientId, chwId, status) {
+  return {
+    resourceType: "Task",
+    id,
+    status,
+    intent: "order",
+    for: { reference: `Patient/${patientId}` },
+    owner: { reference: `PractitionerRole/${chwId}` }
+  };
 }
 
 function requestOperation(data, operation, path, successful, headers) {
