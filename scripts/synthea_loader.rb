@@ -112,6 +112,7 @@ end
 started_at = Time.now.utc
 errors = []
 bundles = []
+skipped_bundles = []
 generated_counts = Hash.new(0)
 generated_entry_count = 0
 
@@ -120,9 +121,10 @@ transaction_bundle_files(input_dir).each do |path|
   next unless json["resourceType"] == "Bundle"
 
   if json["type"] != "transaction"
-    errors << {
+    skipped_bundles << {
       "file" => path,
-      "message" => "expected Bundle.type transaction, got #{json["type"].inspect}"
+      "type" => json["type"],
+      "reason" => "not a transaction bundle"
     }
     next
   end
@@ -203,9 +205,11 @@ metadata = {
     "seed" => seed,
     "input_dir" => input_dir,
     "transaction_bundle_count" => bundles.length,
+    "skipped_bundle_count" => skipped_bundles.length,
     "generated_entry_count" => generated_entry_count,
     "resource_counts" => generated_counts.sort.to_h,
-    "bundle_files" => bundles
+    "bundle_files" => bundles,
+    "skipped_bundle_files" => skipped_bundles
   },
   "import" => {
     "mode" => options[:metadata_only] ? "metadata-only" : "transaction-load",
