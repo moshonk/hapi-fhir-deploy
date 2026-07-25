@@ -151,7 +151,7 @@ export function runFhirWorkload(data) {
   }
 
   const workloadConfig = workloadFor(data.workload);
-  const operation = chooseOperation(workloadConfig.operationWeights, data.bulkExportEnabled);
+  const operation = chooseOperation(workloadConfig, data.bulkExportEnabled);
 
   if (operation === "mixed_search") {
     group("mixed read/search traffic", () => {
@@ -160,7 +160,11 @@ export function runFhirWorkload(data) {
       observationSearch(data);
     });
   } else {
-    workloadConfig.handlers[operation](data);
+    const handler = workloadConfig.handlers[operation];
+    if (typeof handler !== "function") {
+      throw new Error(`No handler registered for operation "${operation}" in workload "${data.workload}"`);
+    }
+    handler(data);
   }
 
   sleep(data.sleepSeconds);
@@ -282,10 +286,15 @@ function discoverPatientIds(baseUrl) {
     .map((resource) => resource.id);
 }
 
-function chooseOperation(weights, bulkExportEnabled) {
-  const effectiveWeights = bulkExportEnabled
-    ? weights.concat([["bulk_export", 1]])
-    : weights;
+function chooseOperation(workload, bulkExportEnabled) {
+  // Only offer bulk_export if the workload actually registers a handler for
+  // it (today only `generic` does) -- otherwise a workload with no
+  // bulk_export handler (e.g. the `echis` placeholder) could have it drawn
+  // and then crash on a missing handler instead of failing clearly.
+  const canBulkExport = bulkExportEnabled && typeof workload.handlers.bulk_export === "function";
+  const effectiveWeights = canBulkExport
+    ? workload.operationWeights.concat([["bulk_export", 1]])
+    : workload.operationWeights;
   if (effectiveWeights.length === 0) {
     throw new Error("No operations configured for this workload");
   }
@@ -418,6 +427,9 @@ function requestOperation(data, operation, path, successful, headers) {
 // (specs/008-echis-workload-benchmark). Added alongside, not in place of,
 // requestOperation so every existing GET-only call site is unaffected.
 function requestWriteOperation(data, operation, method, path, body, successful, headers) {
+  if (method !== "POST" && method !== "PUT") {
+    throw new Error(`Unsupported write method "${method}" for operation "${operation}"; expected POST or PUT`);
+  }
   const requestFn = method === "PUT" ? http.put : http.post;
   const response = requestFn(`${data.baseUrl}${path}`, JSON.stringify(body), {
     headers: Object.assign({ "Content-Type": "application/fhir+json" }, DEFAULT_HEADERS, headers || {}),
