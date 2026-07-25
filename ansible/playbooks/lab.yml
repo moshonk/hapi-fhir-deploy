@@ -2,6 +2,10 @@
 - name: Install benchmark lab add-ons
   import_playbook: 00-install-addons.yml
 
+- name: Deploy PgBouncer pooled connection tier
+  import_playbook: 15-deploy-pgbouncer.yml
+  when: enable_pgbouncer | default(false) | bool
+
 - name: Deploy HAPI FHIR
   import_playbook: 20-deploy-hapi-fhir.yml
 

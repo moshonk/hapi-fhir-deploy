@@ -58,6 +58,11 @@ All agents must apply `.specify/memory/constitution.md` before planning or imple
 - `005-indexing-strategy-memo`: issue #4 and D6.
 - `006-documentation-handoff`: issue #6 and PR #8/#10 documentation review deltas.
 
+The following specs are not Rev2 child workstreams (#2-#7); they belong to a new epic spanning the Rev2 connection-budget work (issue #5) and the benchmark-lab epic (issue #18):
+
+- `007-pgbouncer-connection-pooling`: amends issue #5 / `003-autoscaling-connection-budget` with an additive, opt-in pooled connection tier.
+- `008-echis-workload-benchmark`: extends issue #18's benchmark lab with a progressive eCHIS household/CHW workload benchmark; depends on `007-pgbouncer-connection-pooling` for its two highest tiers.
+
 ## Validation Expectations
 
 Run the existing checks when your environment allows it:

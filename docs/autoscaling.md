@@ -56,6 +56,8 @@ Replace `threshold: "5"` only after load testing identifies a sustained per-pod 
 
 ## Connection Budget
 
+`postgres_max_connections` is Terraform-enforced via each cloud module's `db_max_connections` variable (default `100`), not just an assumption — see `docs/external-postgres.md` and `specs/007-pgbouncer-connection-pooling/contracts/terraform-max-connections.md`.
+
 The committed starter environment assumes:
 
 ```text
@@ -93,6 +95,41 @@ PgBouncer transaction pooling is required before native PostgreSQL budget is exc
 - Required per-pod Hikari pool size would consume the reserved PostgreSQL connection budget.
 
 After adding PgBouncer, document the new pooler sizing, server connection cap, transaction pooling mode, health checks, rollback path, and how application session features are validated under transaction pooling.
+
+## PgBouncer-Pooled Connection Budget
+
+Implemented under `specs/007-pgbouncer-connection-pooling`, additive to the native connection budget above. The native formula and its guardrail are unchanged; this section documents the opt-in pooled tier, enabled with `enable_pgbouncer: true` (default `false`).
+
+PgBouncer runs as its own Deployment (`manifests/pgbouncer/`), not a sidecar, so adding HAPI FHIR replicas never adds real PostgreSQL backend connections beyond PgBouncer's own fixed pool size. It runs in `pool_mode = transaction`.
+
+The pooled formula:
+
+```text
+pgbouncer_server_connections = pgbouncer_default_pool_size * pgbouncer_replica_count
+pgbouncer_server_connections <= (postgres_max_connections - reserved_connections)
+
+maxReplicas_pooled <= floor(pgbouncer_max_client_conn / hikari_maximum_pool_size)
+```
+
+With the committed defaults (`ansible/group_vars/lab.yml`):
+
+```text
+pgbouncer_default_pool_size = 20
+pgbouncer_replica_count = 2
+pgbouncer_server_connections = 20 * 2 = 40 <= (100 - 50) = 50
+
+pgbouncer_max_client_conn = 1000
+hikari_maximum_pool_size (pooled tier, charts/hapi-fhir-deploy/values-pgbouncer-tier.yaml) = 20
+maxReplicas_pooled <= floor(1000 / 20) = 50
+```
+
+`manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml` sets `maxReplicaCount: 50`, a sibling to (never applied alongside) the native `hapi-fhir-scaledobject.yaml`; `ansible/playbooks/20-deploy-hapi-fhir.yml` applies exactly one of the two based on `enable_pgbouncer`.
+
+**This ceiling is provisional pending T4 load-test evidence** (the 10,000-concurrent-user tier of `specs/008-echis-workload-benchmark`), matching how the native tier's per-pod RPS threshold is already treated as provisional. Once pooled, connections stop being the binding constraint — cluster CPU/memory and PostgreSQL write IOPS become the real ceiling, so `maxReplicaCount: 50` must also be validated against real load, not just this arithmetic.
+
+**Prepared statements**: PgBouncer transaction-pooling mode has known friction with JDBC server-side prepared statements. The pinned image (`edoburu/pgbouncer:v1.25.2-p0`, PgBouncer >= 1.21) supports protocol-level prepared-statement pooling via `MAX_PREPARED_STATEMENTS` (set to `200` in `manifests/pgbouncer/configmap.yaml`). Full compatibility validation against HikariCP's prepared-statement caching is tracked as follow-up work (deferred Polish task in `specs/007-pgbouncer-connection-pooling/tasks.md`, T028) and must complete before the pooled tier is trusted above the T4 tier.
+
+**Bulk-load vs. steady-state serving**: this connection budget governs steady-state serving traffic. A one-time bulk data-load may temporarily run with a higher manual replica/pool count (autoscaling paused), then must return to the committed ceiling above before serving traffic begins. A fully documented operator procedure for this is deferred follow-up work (User Story 3 in `specs/007-pgbouncer-connection-pooling/tasks.md`, not yet implemented).
 
 ## Verification
 

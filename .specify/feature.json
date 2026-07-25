@@ -1,3 +1,3 @@
 {
-  "feature_directory": "specs/001-helm-postgres-baseline"
+  "feature_directory": "specs/007-pgbouncer-connection-pooling"
 }

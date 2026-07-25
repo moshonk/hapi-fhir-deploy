@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ pgbouncer_deployment_name }}
+  namespace: {{ hapi_namespace }}
+  labels:
+    app.kubernetes.io/name: hapi-fhir-pgbouncer
+    app.kubernetes.io/part-of: hapi-fhir
+spec:
+  replicas: {{ pgbouncer_replica_count }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hapi-fhir-pgbouncer
+      app.kubernetes.io/part-of: hapi-fhir
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hapi-fhir-pgbouncer
+        app.kubernetes.io/part-of: hapi-fhir
+    spec:
+      containers:
+        - name: pgbouncer
+          image: "{{ pgbouncer_image }}"
+          env:
+            - name: DB_USER
+              value: "{{ lab_database_username }}"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ hapi_database_secret_name }}"
+                  key: "{{ hapi_database_secret_key }}"
+            - name: DB_HOST
+              value: "{{ lab_database_endpoint }}"
+            - name: DB_PORT
+              value: "{{ lab_database_port }}"
+            - name: DB_NAME
+              value: "{{ lab_database_name }}"
+            - name: LISTEN_PORT
+              value: "{{ pgbouncer_listen_port }}"
+            # Templated from group_vars/lab.yml (and lab_database_username for
+            # the two admin/stats identities) so there is a single source of
+            # truth for pooled-tier settings -- no separate static ConfigMap
+            # that could drift from these values.
+            - name: POOL_MODE
+              value: "transaction"
+            - name: DEFAULT_POOL_SIZE
+              value: "{{ pgbouncer_default_pool_size }}"
+            - name: MAX_CLIENT_CONN
+              value: "{{ pgbouncer_max_client_conn }}"
+            - name: MAX_DB_CONNECTIONS
+              value: "{{ pgbouncer_default_pool_size }}"
+            - name: ADMIN_USERS
+              value: "{{ lab_database_username }}"
+            - name: STATS_USERS
+              value: "{{ lab_database_username }}"
+            # Enables PgBouncer's protocol-level prepared-statement pooling in
+            # transaction mode (requires PgBouncer >= 1.21; research.md Decision 3).
+            - name: MAX_PREPARED_STATEMENTS
+              value: "{{ pgbouncer_max_prepared_statements }}"
+          ports:
+            - name: postgres
+              containerPort: {{ pgbouncer_listen_port }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
