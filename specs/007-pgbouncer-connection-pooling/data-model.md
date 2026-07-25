@@ -6,7 +6,7 @@ This feature has no application data model — it is infrastructure/deployment c
 
 - **Represents**: The standalone connection-pooling component sitting between HAPI FHIR pods and external PostgreSQL.
 - **Key attributes**: replica count (>= 2, mirrors HAPI's own minimum per Constitution V), `pool_mode` (fixed: `transaction`), `default_pool_size`, `max_client_conn`, pinned container image digest.
-- **Relationships**: Reads database credentials from a new `hapi-fhir-pgbouncer-userlist` External Secret (mirrors the existing `hapi-fhir-postgres` External Secret). Is the upstream target of the HAPI FHIR datasource URL when pooling is enabled. Is fronted by its own Kubernetes Service.
+- **Relationships**: Reuses the existing `hapi-fhir-postgres` Secret's `DB_PASSWORD` for its upstream PostgreSQL connection; the pinned image (`edoburu/pgbouncer`) auto-derives its own client-auth list from `DB_USER`/`DB_PASSWORD` at startup, so no separate ExternalSecret is needed. Is the upstream target of the HAPI FHIR datasource URL when pooling is enabled. Is fronted by its own Kubernetes Service.
 - **Validation rules**: `pgbouncer_server_connections = default_pool_size * replica_count` MUST be `<= (postgres_max_connections - reserved_connections)` (see Connection Budget Formula below).
 - **State**: Not present at all when `enable_pgbouncer: false` (default) — this is a presence/absence toggle, not a runtime state machine.
 

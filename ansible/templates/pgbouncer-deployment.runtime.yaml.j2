@@ -21,9 +21,6 @@ spec:
       containers:
         - name: pgbouncer
           image: "{{ pgbouncer_image }}"
-          envFrom:
-            - configMapRef:
-                name: {{ pgbouncer_configmap_name }}
           env:
             - name: DB_USER
               value: "{{ lab_database_username }}"
@@ -40,6 +37,26 @@ spec:
               value: "{{ lab_database_name }}"
             - name: LISTEN_PORT
               value: "{{ pgbouncer_listen_port }}"
+            # Templated from group_vars/lab.yml (and lab_database_username for
+            # the two admin/stats identities) so there is a single source of
+            # truth for pooled-tier settings -- no separate static ConfigMap
+            # that could drift from these values.
+            - name: POOL_MODE
+              value: "transaction"
+            - name: DEFAULT_POOL_SIZE
+              value: "{{ pgbouncer_default_pool_size }}"
+            - name: MAX_CLIENT_CONN
+              value: "{{ pgbouncer_max_client_conn }}"
+            - name: MAX_DB_CONNECTIONS
+              value: "{{ pgbouncer_default_pool_size }}"
+            - name: ADMIN_USERS
+              value: "{{ lab_database_username }}"
+            - name: STATS_USERS
+              value: "{{ lab_database_username }}"
+            # Enables PgBouncer's protocol-level prepared-statement pooling in
+            # transaction mode (requires PgBouncer >= 1.21; research.md Decision 3).
+            - name: MAX_PREPARED_STATEMENTS
+              value: "{{ pgbouncer_max_prepared_statements }}"
           ports:
             - name: postgres
               containerPort: {{ pgbouncer_listen_port }}

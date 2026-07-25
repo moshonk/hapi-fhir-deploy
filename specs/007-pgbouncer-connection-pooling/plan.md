@@ -70,8 +70,11 @@ specs/007-pgbouncer-connection-pooling/
 This is a deployment-configuration repository (Helm charts + Kubernetes manifests + Terraform + Ansible), not an application — there is no `src/`/`tests/` split to choose between. New and changed files fit the repo's existing per-concern directory convention:
 
 ```text
-manifests/pgbouncer/                                  # NEW: standalone Deployment, Service, ConfigMap, PDB
-manifests/external-secrets/hapi-fhir-pgbouncer-userlist.yaml   # NEW: mirrors hapi-fhir-postgres.yaml pattern
+manifests/pgbouncer/                                  # NEW: standalone Service, PodDisruptionBudget
+ansible/templates/pgbouncer-deployment.runtime.yaml.j2 # NEW: Ansible-rendered Deployment (per-lab DB endpoint,
+                                                        #      pool-sizing env vars templated from group_vars/lab.yml
+                                                        #      and lab_database_username -- no separate ConfigMap,
+                                                        #      to avoid config drift between the two)
 manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml    # NEW: sibling ScaledObject for the pooled ceiling
 charts/hapi-fhir-deploy/values-pgbouncer-tier.yaml     # NEW: additive overlay, applied alongside values.yaml
 infra/terraform/{aws,azure,gcp}/{main,variables}.tf    # EXTENDED: new db_max_connections variable per module
@@ -82,6 +85,8 @@ ansible/templates/hapi-fhir-values.runtime.yaml.j2      # EXTENDED: point dataso
 docs/autoscaling.md                                    # EXTENDED: new "PgBouncer-Pooled Connection Budget" section
 .github/workflows/ci.yml                               # EXTENDED: new, separate "Check PgBouncer connection budget" step
 ```
+
+**Note (post-implementation)**: PgBouncer authenticates its upstream connection to PostgreSQL, and HAPI's connection to PgBouncer, using the *existing* `hapi-fhir-postgres` Secret's credentials — the pinned image (`edoburu/pgbouncer`) auto-derives its client-auth list from `DB_USER`/`DB_PASSWORD` at startup, so no separate `hapi-fhir-pgbouncer-userlist` ExternalSecret was needed (see `tasks.md` T004's scope-change note).
 
 **Structure Decision**: Follow the existing per-concern `manifests/<topic>/` convention already established by `manifests/autoscaling/` and `manifests/runtime-rollout/` for chart-external resources, and the existing three-cloud `infra/terraform/{aws,azure,gcp}` layout for provisioning changes. No new top-level directories are introduced.
 

@@ -8,7 +8,6 @@ An additive Helm values file. Applied as an *extra* `--values` entry after the b
 
 ```yaml
 hapi-fhir-jpaserver:
-  replicaCount: <int>        # MUST be <= maxReplicas_pooled from the connection-budget-formula contract
   extraConfig: |
     spring:
       datasource:
@@ -18,6 +17,8 @@ hapi-fhir-jpaserver:
                                      # hikari_maximum_pool_size input reads
 ```
 
+`hapi-fhir-jpaserver.replicaCount` is intentionally **not** set by this overlay: it inherits the base file's `replicaCount: 2`, which already matches the pooled ScaledObject's `minReplicaCount: 2` — KEDA's HPA takes over the actual replica count immediately after deploy (up to `maxReplicas_pooled` from the connection-budget-formula contract), so there is no separate "starting count" for the pooled tier to declare.
+
 ## Invariants
 
 1. This file MUST NOT redefine `hibernate.search.enabled`, `spring.jpa.properties.hibernate.dialect`, or any other key already asserted by the existing native-tier CI check (`.github/workflows/ci.yml:263-283`) unless the override is identical in effect — the pooled tier changes *scale*, not the JPA/Lucene/dialect decisions already made under specs 003/005.
@@ -26,5 +27,5 @@ hapi-fhir-jpaserver:
 
 ## Consumers
 
-- Ansible's `values_files` list in the deploy playbook (`ansible/playbooks/20-deploy-hapi-fhir.yml` and the new `ansible/playbooks/15-deploy-pgbouncer.yml`), gated by `enable_pgbouncer: true` in `ansible/group_vars/lab.yml`.
-- The new CI guardrail step (`contracts/connection-budget-formula.md`), which reads this file's `hikari.maximumPoolSize` and `replicaCount` as formula inputs.
+- Ansible's `values_files` list in the deploy playbook (`ansible/playbooks/20-deploy-hapi-fhir.yml`), inserted between the base `values.yaml` and the runtime-generated values file when `enable_pgbouncer: true` in `ansible/group_vars/lab.yml`.
+- The new CI guardrail step (`contracts/connection-budget-formula.md`), which reads this file's `hikari.maximumPoolSize` as a formula input (`pgbouncer_replica_count`/`pgbouncer_default_pool_size`/`pgbouncer_max_client_conn` come from `ansible/group_vars/lab.yml` instead, not from this overlay).

@@ -8,11 +8,13 @@ This is the interface the new CI guardrail step ("Check PgBouncer connection bud
 | --- | --- | --- |
 | `postgres_max_connections` | Terraform `db_max_connections` variable (`infra/terraform/{aws,azure,gcp}`), documented in `docs/autoscaling.md` | integer |
 | `reserved_connections` | Documented constant in `docs/autoscaling.md` (mirrors the native tier's existing `reserved_connections = 50`) | integer |
-| `pgbouncer_default_pool_size` | `manifests/pgbouncer/configmap.yaml` (`pgbouncer.ini` `default_pool_size`) | integer |
-| `pgbouncer_replica_count` | `manifests/pgbouncer/deployment.yaml` `spec.replicas` | integer |
-| `pgbouncer_max_client_conn` | `manifests/pgbouncer/configmap.yaml` (`pgbouncer.ini` `max_client_conn`) | integer |
+| `pgbouncer_default_pool_size` | `ansible/group_vars/lab.yml` (`pgbouncer_default_pool_size`) — the single source of truth, templated into the PgBouncer Deployment's `DEFAULT_POOL_SIZE`/`MAX_DB_CONNECTIONS` env vars by `ansible/templates/pgbouncer-deployment.runtime.yaml.j2` | integer |
+| `pgbouncer_replica_count` | `ansible/group_vars/lab.yml` (`pgbouncer_replica_count`) — templated into the same Deployment template's `spec.replicas` | integer |
+| `pgbouncer_max_client_conn` | `ansible/group_vars/lab.yml` (`pgbouncer_max_client_conn`) — templated into the Deployment's `MAX_CLIENT_CONN` env var | integer |
 | `hikari_maximum_pool_size` | `charts/hapi-fhir-deploy/values-pgbouncer-tier.yaml` `extraConfig` (`spring.datasource.hikari.maximumPoolSize`) | integer |
 | `maxReplicas_pooled` (declared) | `manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml` `spec.maxReplicaCount` | integer |
+
+Note: there is deliberately no static `manifests/pgbouncer/deployment.yaml` or `configmap.yaml` — the Deployment is rendered per-lab by Ansible (it needs the per-lab DB endpoint), and pool-sizing settings are templated directly from `ansible/group_vars/lab.yml` into that same Deployment to avoid a second, driftable source of truth. A future CI guardrail (T027, deferred) reads `pgbouncer_default_pool_size`/`pgbouncer_replica_count`/`pgbouncer_max_client_conn` from `ansible/group_vars/lab.yml` directly, not from a rendered manifest.
 
 ## Invariants (CI MUST fail the build if violated)
 

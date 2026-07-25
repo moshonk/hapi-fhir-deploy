@@ -78,11 +78,6 @@
         state: present
         src: "{{ namespace_manifest_path }}"
 
-    - name: Apply PgBouncer ConfigMap
-      kubernetes.core.k8s:
-        state: present
-        src: "{{ pgbouncer_configmap_path }}"
-
     - name: Render PgBouncer Deployment (reuses the existing hapi-fhir-postgres Secret for its DB_PASSWORD)
       ansible.builtin.template:
         src: "{{ pgbouncer_deployment_template }}"

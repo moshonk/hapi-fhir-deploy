@@ -33,13 +33,13 @@ scripts/lab deploy --cloud <gcp|aws|azure> --name <lab-name>
 ```
 
 Confirm:
-- `manifests/pgbouncer/deployment.yaml` pods are `Running` and pass readiness.
+- Pods from the Deployment rendered by `ansible/templates/pgbouncer-deployment.runtime.yaml.j2` (applied to `ansible/artifacts/generated/pgbouncer-deployment.runtime.yaml`, `kubectl -n fhir get deploy hapi-fhir-pgbouncer`) are `Running` and pass readiness.
 - HAPI FHIR pods' `spring.datasource.url` resolves to the PgBouncer Service, not the raw Postgres endpoint (`kubectl -n fhir exec` into a HAPI pod and inspect resolved config, or check `hapi-fhir-values.runtime.yaml.j2` render output).
 
 ## 4. Verify the pooled connection budget holds under load
 
 ```sh
-kubectl -n fhir exec deploy/pgbouncer -- psql -h 127.0.0.1 -p 6432 pgbouncer -c "SHOW POOLS;"
+kubectl -n fhir exec deploy/hapi-fhir-pgbouncer -- psql -h 127.0.0.1 -p 5432 pgbouncer -c "SHOW POOLS;"
 ```
 
 Run the `smoke` then `baseline` k6 profiles (`scripts/lab benchmark --profile smoke|baseline`) and confirm `SHOW POOLS`'s server-connection count never exceeds `pgbouncer_default_pool_size * pgbouncer_replica_count`, and that the real Postgres instance's active-connection count never exceeds `postgres_max_connections - reserved_connections`.
