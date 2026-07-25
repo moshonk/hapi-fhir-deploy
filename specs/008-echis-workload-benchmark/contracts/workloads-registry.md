@@ -39,7 +39,7 @@ export function benchmarkSetup(profile, workload = "generic") { /* ... */ }
 | --- | --- | --- | --- |
 | `household_sync_write` | POST (transaction Bundle) | FHIR base root | Bundles an `Encounter` + `Observation` + `Condition` (when applicable) + `QuestionnaireResponse` + a `Task` status update for one household visit. Highest weight — majority of simulated traffic per spec FR-005. |
 | `worklist_read` | GET | `Task?owner={chwId}&status=requested` | Simulates a CHW checking their worklist. |
-| `household_roster_read` | GET | `Group/{id}?_include=Group:member` | Simulates a CHW reviewing their assigned household's members. |
+| `household_roster_read` | GET | `Group?_id={id}&_include=Group:member` | Simulates a CHW reviewing their assigned household's members. A `_id` search, not a direct `Group/{id}` instance read — the latter would 404 before the household has been written yet for a given VU, since this workload is self-sufficient against a server with no pre-existing data (no dependency on `scripts/echis_seed.rb`). A search always returns a Bundle (200), empty or not. |
 | `registration_write` | POST (transaction Bundle) | FHIR base root | Bundles a new `Patient` + (if new household) `Group` + `RelatedPerson`. Lower weight than `household_sync_write`. |
 | `supervisor_dashboard_read` | GET | aggregate/`_summary=count` search | Small, distinct VU subset representing supervisors, not CHWs, per spec Acceptance Scenario US3.3. |
 

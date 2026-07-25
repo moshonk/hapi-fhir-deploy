@@ -465,7 +465,11 @@ function householdSyncWrite(data) {
     observationResource(observationId, patientId, now, iter),
     conditionResource(conditionId, patientId, vu),
     questionnaireResponseResource(questionnaireResponseId, patientId, encounterId),
-    taskResource(taskId, patientId, chwId, "completed")
+    // "requested", not "completed": worklistRead() searches status=requested,
+    // so the follow-up task this visit creates/refreshes must match that
+    // query -- otherwise a VU's own household_sync_write writes would never
+    // be findable by its own worklist_read (review comment).
+    taskResource(taskId, patientId, chwId, "requested")
   ]);
 
   requestWriteOperation(data, "household_sync_write", "POST", "/", bundle, (response) => (
