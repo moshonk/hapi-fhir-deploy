@@ -6,19 +6,19 @@ Two kinds of "entities" here: the synthetic FHIR resources `scripts/echis_seed.r
 
 ### Household (`Group`)
 
-- **Fields**: `id` (`echis-hh######`), `type: "person"`, `actual: true`, `member[]` (references to this household's `Patient` resources), `characteristic[]` (optional: catchment `Location` reference), `quantity` (member count).
+- **Fields**: `id` (`echis-hh%08d`, zero-padded global household index — 8 digits, since the T5 target of 10,000,000 households exceeds a 6-digit range), `type: "person"`, `actual: true`, `member[]` (references to this household's `Patient` resources), `quantity` (member count). No `characteristic[]`/catchment `Location` reference in the implemented generator (`scripts/echis_seed.rb`) — CHW catchment is derived purely from the household index (`household_index / 100`), not a separate `Location` resource.
 - **Relationships**: One household has 1..N individuals (default average 3, per spec Assumptions). Reachable from exactly one community health worker's catchment.
 - **Cardinality at peak (T5)**: 10,000,000.
 
 ### Individual (`Patient`)
 
-- **Fields**: same core fields as `scripts/minimal_fhir_seed.rb`'s `patient_resource` (`id`, `identifier`, `active`, `name`, `gender`, `birthDate`), plus a household-linkage extension or equivalent (either an `extension` referencing the owning `Group`, or relying solely on the `Group.member` back-reference — implementation detail for the tasks phase, not fixed here).
+- **Fields**: same core fields as `scripts/minimal_fhir_seed.rb`'s `patient_resource` (`id`, `identifier`, `active`, `name`, `gender`, `birthDate`), `id` = `echis-p%08d` (zero-padded global individual index). Household linkage relies solely on `Group.member` back-references — no household-referencing extension on `Patient` itself, in the implemented generator.
 - **Relationships**: Belongs to exactly one Household (`Group`). Subject of Visit/Assessment records below. May have a `RelatedPerson` if a dependent (not the household head).
 - **Cardinality at peak (T5)**: 30,000,000.
 
 ### Community Health Worker (`PractitionerRole` + `CareTeam`)
 
-- **Fields**: `PractitionerRole.id` (`echis-chw####`), `PractitionerRole.practitioner` reference, `CareTeam.id`, `CareTeam.subject` or `CareTeam.reasonReference` pointing at the assigned `Location`/catchment, `CareTeam.participant[]` referencing the `PractitionerRole`.
+- **Fields**: `PractitionerRole.id` (`echis-chw%06d`, zero-padded CHW index — 6 digits comfortably covers the ~100,000 CHWs at T5), `CareTeam.id` (`echis-ct%06d`, same index), `CareTeam.participant[]` referencing the `PractitionerRole`. No `PractitionerRole.practitioner`/`CareTeam.subject`/`reasonReference` in the implemented generator — catchment is derived purely from `household_index / 100`, not a separate `Practitioner` or `Location` resource (kept out of scope for this iteration).
 - **Relationships**: One CHW is responsible for a catchment of ~100 households (spec Assumptions). Is the `owner` of `Task` resources and the actor behind `household_sync_write`/`registration_write` operations in the k6 workload.
 - **Cardinality at peak (T5)**: ~100,000 (anchors the peak tier's concurrent-user count directly — one simulated k6 VU per CHW at T5).
 

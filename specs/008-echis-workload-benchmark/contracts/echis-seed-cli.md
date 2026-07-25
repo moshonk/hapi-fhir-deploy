@@ -39,8 +39,9 @@ Mirrors `scripts/minimal_fhir_seed.rb`'s CLI contract (`Usage: scripts/minimal_f
     "start_index": 0,
     "end_index": 10000,
     "transaction_bundle_count": 100,
+    "generated_entry_count": 200200,
     "resource_counts": {
-      "Group": 10000, "Patient": 30000, "PractitionerRole": 100, "CareTeam": 100,
+      "Group": 10000, "Patient": 30000, "RelatedPerson": 20000, "PractitionerRole": 100, "CareTeam": 100,
       "Encounter": 40000, "Observation": 40000, "Condition": 15000,
       "Task": 20000, "QuestionnaireResponse": 25000
     }
