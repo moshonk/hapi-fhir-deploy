@@ -77,10 +77,15 @@ export function teardown(data) {
 export function handleSummary(data) {
   const summary = benchmarkSummary(data, PROFILE);
   const parsed = JSON.parse(summary.stdout);
+  // individual count matches data-model.md's peak budget exactly (10,000,000
+  // households * 3 = 30,000,000). total_record_load_target (175,200,000) is what
+  // scripts/echis_seed.rb --households 10000000 actually produces, not
+  // data-model.md's illustrative 180,000,000 budget figure -- see
+  // docs/echis-benchmark-tiers.md for the derivation.
   parsed.concurrency_target = 100000;
   parsed.individual_load_target = 30000000;
   parsed.household_load_target = 10000000;
-  parsed.total_record_load_target = 180000000;
+  parsed.total_record_load_target = 175200000;
 
   const output = {
     stdout: `${JSON.stringify(parsed, null, 2)}\n`

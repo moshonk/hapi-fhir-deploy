@@ -133,7 +133,8 @@ parse_args() {
         shift 2
         ;;
       --echis-tier)
-        ECHIS_TIER="${2:-}"
+        [[ -n "${2:-}" ]] || die "--echis-tier requires a value (T2, T3, T4, or T5)"
+        ECHIS_TIER="$2"
         shift 2
         ;;
       --auto-approve)
@@ -454,14 +455,29 @@ echis_tier_progress_file() {
   printf '%s/echis-tier-progress.json' "$ARTIFACT_ROOT"
 }
 
+echis_tier_progress_has() {
+  local progress_file="$1"
+  local tier="$2"
+  "${RUBY_BIN:-ruby}" -rjson -e '
+    path, tier = ARGV
+    completed = JSON.parse(File.read(path))["completed_tiers"] || []
+    exit(completed.include?(tier) ? 0 : 1)
+  ' "$progress_file" "$tier" 2>/dev/null
+}
+
 require_echis_tier_sequence() {
   local tier="$1"
   local order
   order="$(echis_tier_order "$tier")"
 
   if [[ "$order" -ge 4 ]]; then
-    [[ "${LAB_ECHIS_POOLED_TIER_CONFIRMED:-}" == "true" ]] ||
-      die "tier $tier requires the PgBouncer pooled connection tier (spec 007) to be deployed and validated; set LAB_ECHIS_POOLED_TIER_CONFIRMED=true once enable_pgbouncer has been applied, per docs/echis-benchmark-tiers.md"
+    if [[ "${LAB_ECHIS_POOLED_TIER_CONFIRMED:-}" != "true" ]]; then
+      if [[ "$DRY_RUN" == true ]]; then
+        log "Dry run: LAB_ECHIS_POOLED_TIER_CONFIRMED is not set to true; tier $tier would be refused (requires the PgBouncer pooled connection tier from spec 007)"
+      else
+        die "tier $tier requires the PgBouncer pooled connection tier (spec 007) to be deployed and validated; set LAB_ECHIS_POOLED_TIER_CONFIRMED=true once enable_pgbouncer has been applied, per docs/echis-benchmark-tiers.md"
+      fi
+    fi
   fi
 
   if [[ "$order" -le 2 ]]; then
@@ -478,7 +494,7 @@ require_echis_tier_sequence() {
   fi
 
   [[ -f "$progress_file" ]] || die "tier $tier requires tier $prev_tier to have completed first; no progress recorded at $progress_file"
-  grep -q "\"$prev_tier\"" "$progress_file" ||
+  echis_tier_progress_has "$progress_file" "$prev_tier" ||
     die "tier $tier requires tier $prev_tier to have completed first; $prev_tier not found in $progress_file"
 }
 

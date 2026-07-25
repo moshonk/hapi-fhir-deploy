@@ -3,16 +3,32 @@
 Extends the existing `load_100.js` / `load_1000.js` 10x-per-tier convention (see
 `docs/benchmark-lab-runbook.md`) with the eCHIS household/CHW workload
 (`benchmarks/k6/lib/fhir_benchmark.js`'s `echis` workload, `scripts/echis_seed.rb`'s
-generated dataset). Household ratio is held constant at 3 individuals/household;
-T5's targets match `specs/008-echis-workload-benchmark/data-model.md`'s peak budget
-exactly (30,000,000 individuals / 10,000,000 households / 180,000,000 total records).
+generated dataset). Household ratio is held constant at 3 individuals/household.
+Household counts below are chosen so the resulting individual count is as close as
+possible to a round 100K/1M/10M/30M target; because 100K/1M/10M are not evenly
+divisible by 3, T2-T4's actual individual/total-record counts come out slightly
+below the round target (documented in the "Individuals"/"Total records" columns
+below, which are the *actual* `scripts/echis_seed.rb` output for the documented
+`--households` invocation, not the illustrative round numbers). T5's household and
+individual counts match `specs/008-echis-workload-benchmark/data-model.md`'s peak
+budget exactly (10,000,000 / 30,000,000); T5's total record count (175,200,000)
+differs from that document's illustrative 180,000,000 budget because the
+implemented generator's per-resource-type ratios (see `resources_for_household` in
+`scripts/echis_seed.rb`) don't match that document's illustrative Encounter/
+Observation/Task/QuestionnaireResponse split exactly -- 175,200,000 is what the
+generator actually produces at T5 scale, not a target to hit.
 
-| Tier | k6 script | VUs (concurrency target) | Individuals | Households | Total records | Dataset generator | Status |
+| Tier | k6 script | VUs (concurrency target) | Households (`--households`) | Individuals (actual) | Total records (actual) | Dataset generator | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| T2 | `benchmarks/k6/echis_load_100.js` | 100 | 100,000 | 33,333 | 600,000 | `scripts/echis_seed.rb --households 33333` | Runnable today, no spec 007 dependency |
-| T3 | `benchmarks/k6/echis_load_1000.js` | 1,000 | 1,000,000 | 333,333 | 6,000,000 | `scripts/echis_seed.rb --households 333333` | Runnable today, no spec 007 dependency |
-| T4 | `benchmarks/k6/echis_load_10000.js` | 10,000 | 10,000,000 | 3,333,333 | 60,000,000 | `scripts/echis_seed.rb --households 3333333` (sharded, see US4) | **Blocked** on `specs/007-pgbouncer-connection-pooling`'s pooled connection tier being deployed and load-tested |
-| T5 (peak) | `benchmarks/k6/echis_load_100000.js` | 100,000 | 30,000,000 | 10,000,000 | 180,000,000 | `scripts/echis_seed.rb --households 10000000` (sharded, see US4) | **Blocked** on the same spec 007 dependency, plus distributed k6 execution (see US4) |
+| T2 | `benchmarks/k6/echis_load_100.js` | 100 | 33,333 | 99,999 | 583,996 | `scripts/echis_seed.rb --households 33333` | Runnable today, no spec 007 dependency |
+| T3 | `benchmarks/k6/echis_load_1000.js` | 1,000 | 333,333 | 999,999 | 5,839,996 | `scripts/echis_seed.rb --households 333333` | Runnable today, no spec 007 dependency |
+| T4 | `benchmarks/k6/echis_load_10000.js` | 10,000 | 3,333,333 | 9,999,999 | 58,399,996 | `scripts/echis_seed.rb --households 3333333` (sharded, see US4) | **Blocked** on `specs/007-pgbouncer-connection-pooling`'s pooled connection tier being deployed and load-tested |
+| T5 (peak) | `benchmarks/k6/echis_load_100000.js` | 100,000 | 10,000,000 | 30,000,000 | 175,200,000 | `scripts/echis_seed.rb --households 10000000` (sharded, see US4) | **Blocked** on the same spec 007 dependency, plus distributed k6 execution (see US4) |
+
+Verified locally: `scripts/echis_seed.rb --households {33333,333333} --individuals-per-household 3 --metadata-only`
+produces `generated_entry_count` of 583,996 and 5,839,996 respectively (T4/T5's counts
+follow the same formula, confirmed by hand: `16*households + 2*ceil(households/100) +
+ceil(3*households/2)`, matching a `--households 10` control run producing 177 exactly).
 
 ## Required execution order
 

@@ -74,10 +74,14 @@ export function teardown(data) {
 export function handleSummary(data) {
   const summary = benchmarkSummary(data, PROFILE);
   const parsed = JSON.parse(summary.stdout);
+  // individual/total-record counts are what scripts/echis_seed.rb --households 3333333
+  // --individuals-per-household 3 would produce, derived (not run at this scale) via
+  // the formula confirmed against T2/T3's actual output -- see
+  // docs/echis-benchmark-tiers.md for the derivation.
   parsed.concurrency_target = 10000;
-  parsed.individual_load_target = 10000000;
+  parsed.individual_load_target = 9999999;
   parsed.household_load_target = 3333333;
-  parsed.total_record_load_target = 60000000;
+  parsed.total_record_load_target = 58399996;
 
   const output = {
     stdout: `${JSON.stringify(parsed, null, 2)}\n`
