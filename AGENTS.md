@@ -70,8 +70,9 @@ ruby -rpsych -e 'ARGV.each { |path| Psych.parse_stream(File.read(path)); puts "o
   manifests/namespace.yaml \
   manifests/external-secrets/hapi-fhir-postgres.yaml
 
-helm repo add hapifhir https://hapifhir.github.io/hapi-fhir-jpaserver-starter/
-helm repo add chgl https://chgl.github.io/charts
+helm repo add hapifhir https://hapifhir.github.io/hapi-fhir-jpaserver-starter/ --force-update
+helm repo add chgl https://chgl.github.io/charts --force-update
+helm repo update hapifhir chgl
 helm dependency build charts/hapi-fhir-deploy
 helm lint charts/hapi-fhir-deploy --values charts/hapi-fhir-deploy/values.yaml
 helm template hapi-fhir charts/hapi-fhir-deploy \

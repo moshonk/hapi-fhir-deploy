@@ -396,8 +396,8 @@ jobs:
 
       - name: Add Helm chart repositories
         run: |
-          helm repo add hapifhir https://hapifhir.github.io/hapi-fhir-jpaserver-starter/
-          helm repo add chgl https://chgl.github.io/charts
+          helm repo add hapifhir https://hapifhir.github.io/hapi-fhir-jpaserver-starter/ --force-update
+          helm repo add chgl https://chgl.github.io/charts --force-update
           helm repo update hapifhir chgl
 
       - name: Build Helm dependencies
