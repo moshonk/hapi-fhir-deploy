@@ -234,6 +234,12 @@ export function benchmarkSummary(data, profile) {
   // alone can't be summed or averaged across shards without distorting it.
   const totalRequests = metricValue(data.metrics.http_reqs, "count") || 0;
   const httpFailureRate = metricValue(data.metrics.http_req_failed, "rate") || 0;
+  // http_req_failed is a Rate metric, whose k6 summary values include an exact
+  // "fails" count alongside the rate -- prefer it over round(total * rate),
+  // which can drift from the true count and would make merge_k6_shards.rb
+  // recompute merged failure rates from already-inaccurate inputs.
+  const exactFailedRequests = metricValue(data.metrics.http_req_failed, "fails");
+  const failedRequests = exactFailedRequests !== null ? exactFailedRequests : Math.round(totalRequests * httpFailureRate);
   const durationSeconds =
     data.state && typeof data.state.testRunDurationMs === "number" ? data.state.testRunDurationMs / 1000 : null;
 
@@ -243,7 +249,7 @@ export function benchmarkSummary(data, profile) {
     throughput_reqs_per_sec: metricValue(data.metrics.http_reqs, "rate"),
     http_failure_rate: httpFailureRate,
     total_requests: totalRequests,
-    failed_requests: Math.round(totalRequests * httpFailureRate),
+    failed_requests: failedRequests,
     duration_seconds: durationSeconds,
     operation_mix: operationMix(data.metrics),
     gates: {
