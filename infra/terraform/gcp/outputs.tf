@@ -34,9 +34,10 @@ output "kubeconfig" {
     - name: ${google_container_cluster.lab.name}
       user:
         exec:
-          apiVersion: client.authentication.k8s.io/v1
+          apiVersion: client.authentication.k8s.io/v1beta1
           command: gke-gcloud-auth-plugin
           args: []
+          interactiveMode: IfAvailable
   YAML
 }
 
