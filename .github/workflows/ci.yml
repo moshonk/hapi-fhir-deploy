@@ -429,8 +429,25 @@ jobs:
             aliases: false
           )
           overlay_chart = pooled_values.fetch("hapi-fhir-jpaserver", {})
-          extra_config = overlay_chart["extraConfig"].to_s
-          parsed_extra_config = YAML.safe_load(extra_config, permitted_classes: [], permitted_symbols: [], aliases: false) || {}
+          extra_config = overlay_chart["extraConfig"]
+          unless extra_config.is_a?(String)
+            failures << "values-pgbouncer-tier.yaml hapi-fhir-jpaserver.extraConfig must be a YAML string"
+            extra_config = extra_config.to_s
+          end
+          parsed_extra_config = begin
+            parsed = YAML.safe_load(extra_config, permitted_classes: [], permitted_symbols: [], aliases: false)
+            if parsed.nil?
+              {}
+            elsif parsed.is_a?(Hash)
+              parsed
+            else
+              failures << "values-pgbouncer-tier.yaml extraConfig must parse as a YAML mapping"
+              {}
+            end
+          rescue Psych::SyntaxError => e
+            failures << "values-pgbouncer-tier.yaml extraConfig must be valid YAML: #{e.message.lines.first.strip}"
+            {}
+          end
           hikari_maximum_pool_size = parsed_extra_config.dig("spring", "datasource", "hikari", "maximumPoolSize").to_i
 
           pooled_scaledobject = YAML.safe_load(
@@ -452,8 +469,11 @@ jobs:
           end
 
           max_replicas_pooled_ceiling = hikari_maximum_pool_size.positive? ? (pgbouncer_max_client_conn / hikari_maximum_pool_size) : 0
+          unless pooled_spec.key?("maxReplicaCount") && pooled_spec["maxReplicaCount"].to_i.positive?
+            failures << "pooled ScaledObject maxReplicaCount must be set and greater than zero"
+          end
           declared_max_replicas = pooled_spec["maxReplicaCount"].to_i
-          if declared_max_replicas > max_replicas_pooled_ceiling
+          if declared_max_replicas.positive? && declared_max_replicas > max_replicas_pooled_ceiling
             failures << "pooled maxReplicaCount (#{declared_max_replicas}) must not exceed floor(pgbouncer_max_client_conn / hikari_maximum_pool_size) = #{max_replicas_pooled_ceiling}"
           end
 
