@@ -127,6 +127,16 @@ def multi_shard?(dataset, fhir_summary)
   (dataset && dataset["shard_count"].to_i > 1) || (fhir_summary && fhir_summary["shard_count"].to_i > 1)
 end
 
+# Distinguishes "no dataset/summary info at all" (nil, unknown) from
+# "info present but doesn't carry an explicit shard_count field" (defaults to
+# 1, a confirmed single shard) -- a bare `dataset&.dig("shard_count") || 1`
+# would misreport the former as the latter.
+def shard_count_for(source)
+  return nil unless source
+
+  source["shard_count"] || 1
+end
+
 def slug(value)
   candidate = value.to_s.downcase.gsub(/[^a-z0-9._-]+/, "-").gsub(/^-+|-+$/, "")
   candidate.empty? ? "unknown" : candidate
@@ -159,7 +169,7 @@ def csv_rows(environment, fhir_summary)
   rows << ["dataset_households", dataset&.dig("households")]
   rows << ["dataset_individuals", dataset&.dig("individuals")]
   rows << ["dataset_generated_entry_count", dataset&.dig("generated_entry_count")]
-  rows << ["dataset_shard_count", dataset&.dig("shard_count")]
+  rows << ["dataset_shard_count", shard_count_for(dataset)]
   rows << ["replicas", environment.dig("runtime", "replicas")]
   rows << ["hikari_pool", environment.dig("runtime", "hikari_pool")]
   rows << ["latency_p50_ms", metric_value(fhir_summary, "latency_ms", "p50")]
@@ -170,7 +180,7 @@ def csv_rows(environment, fhir_summary)
   rows << ["http_failure_rate", fhir_summary&.dig("http_failure_rate")]
   rows << ["total_requests", fhir_summary&.dig("total_requests")]
   rows << ["failed_requests", fhir_summary&.dig("failed_requests")]
-  rows << ["k6_shard_count", fhir_summary&.dig("shard_count")]
+  rows << ["k6_shard_count", shard_count_for(fhir_summary)]
   (fhir_summary&.dig("operation_mix") || {}).sort.each do |operation, count|
     rows << ["operation_#{operation}", count]
   end
@@ -190,7 +200,6 @@ def markdown_report(environment, fhir_summary, result_dir)
   gates = fhir_summary&.dig("gates") || {}
   dataset = environment["dataset"]
   sharded = multi_shard?(dataset, fhir_summary)
-  latency_from_prometheus = fhir_summary&.dig("latency_source") == "prometheus"
 
   lines = []
   lines << "# HAPI FHIR Benchmark Report"
@@ -210,13 +219,13 @@ def markdown_report(environment, fhir_summary, result_dir)
   lines << "| Dataset generator | `#{dataset&.dig("generator") || "unknown"}` |"
   lines << "| Dataset households | `#{dataset&.dig("households") || "unknown"}` |"
   lines << "| Dataset individuals | `#{dataset&.dig("individuals") || "unknown"}` |"
-  lines << "| Dataset shard count | `#{dataset&.dig("shard_count") || 1}` |"
+  lines << "| Dataset shard count | `#{shard_count_for(dataset) || "unknown"}` |"
   lines << ""
   lines << "## Latency And Throughput"
   lines << ""
   lines << "| Metric | Value |"
   lines << "| --- | --- |"
-  if latency_from_prometheus
+  if sharded
     lines << "| p50 latency ms | see Prometheus (multi-shard run) |"
     lines << "| p95 latency ms | see Prometheus (multi-shard run) |"
     lines << "| p99 latency ms | see Prometheus (multi-shard run) |"
