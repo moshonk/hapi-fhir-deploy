@@ -62,7 +62,13 @@ Environment:
   LAB_KUBECONFIG          Explicit kubeconfig path for deploy; otherwise uses generated lab kubeconfig.
   SYNTHEA_CMD             Synthea executable path; otherwise synthea or $SYNTHEA_HOME/run_synthea.
   SYNTHEA_CONFIG          Synthea properties file; defaults to benchmarks/synthea/synthea.properties.
-  LAB_SEED_LOADER_CMD     Loader command; defaults to scripts/synthea_loader.rb.
+  LAB_SEED_LOADER_CMD     Synthea-mode loader command; defaults to scripts/synthea_loader.rb.
+                          Only used when LAB_SEED_GENERATOR_MODE=synthea (the default).
+  LAB_ECHIS_SEED_CMD      Native-mode eCHIS generator command; defaults to
+                          scripts/echis_seed.rb. Only used when
+                          LAB_SEED_GENERATOR_MODE=native -- a distinct env var from
+                          LAB_SEED_LOADER_CMD so overriding one mode's command can't
+                          accidentally get invoked with the other mode's flags.
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
@@ -420,9 +426,20 @@ shard_output_pvc() {
 render_job_manifest() {
   local template="$1" rendered="$2"
   shift 2
+  (($# % 2 == 0)) || die "render_job_manifest requires an even number of token/value arguments"
+
   local sed_args=()
   while [[ $# -gt 0 ]]; do
-    sed_args+=(-e "s|$1|$2|g")
+    local token="$1" value="$2"
+    # Escape sed's replacement-side special characters (backslash first, so
+    # the escapes added for & and | aren't themselves re-escaped) and the
+    # s|...|...| delimiter itself, so a value containing any of these (e.g.
+    # a FHIR_BASE_URL with a query string) round-trips literally instead of
+    # corrupting the rendered manifest.
+    local escaped_value="${value//\\/\\\\}"
+    escaped_value="${escaped_value//&/\\&}"
+    escaped_value="${escaped_value//|/\\|}"
+    sed_args+=(-e "s|$token|$escaped_value|g")
     shift 2
   done
   sed "${sed_args[@]}" "$template" > "$rendered"
@@ -463,7 +480,7 @@ cmd_seed_native() {
   dir="$(run_dir)"
   mkdir -p "$dir"
   local metadata_file="$dir/dataset-metadata.json"
-  local loader_cmd="${LAB_SEED_LOADER_CMD:-$ROOT_DIR/scripts/echis_seed.rb}"
+  local loader_cmd="${LAB_ECHIS_SEED_CMD:-$ROOT_DIR/scripts/echis_seed.rb}"
   need_command_unless_dry_run "$loader_cmd"
 
   if [[ "$GENERATE_ONLY" != true && "$DRY_RUN" != true ]]; then
@@ -539,7 +556,7 @@ cmd_seed_native_in_cluster() {
   need_command_unless_dry_run "$kbin"
 
   log "Creating/updating ConfigMap $configmap_name from scripts/echis_seed.rb"
-  run bash -c "\"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
 
   log "Applying rendered seed Job: $rendered"
   run "$kbin" apply -f "$rendered"
@@ -727,6 +744,9 @@ cmd_benchmark_in_cluster() {
   pvc_name="$(shard_output_pvc)"
   local k6_script="$ROOT_DIR/benchmarks/k6/echis_load_100.js"
   [[ -f "$k6_script" ]] || die "k6 script not found: $k6_script"
+  if [[ -n "${K6_SCRIPT:-}" && "$K6_SCRIPT" != "$k6_script" ]]; then
+    die "K6_SCRIPT is set to '$K6_SCRIPT' but --in-cluster always targets $k6_script (the manifest's ConfigMap items are static, per manifests/k6-shard-job/README.md's sharding strategy); unset K6_SCRIPT, or retarget both the manifest and this command together"
+  fi
 
   log "Rendering $manifest_template for $shard_count shard(s)"
   render_job_manifest "$manifest_template" "$rendered" \
@@ -740,7 +760,7 @@ cmd_benchmark_in_cluster() {
   need_command_unless_dry_run "$kbin"
 
   log "Creating/updating ConfigMap $configmap_name from $k6_script"
-  run bash -c "\"$kbin\" create configmap \"$configmap_name\" --from-file=echis_load_100.js=\"$k6_script\" --from-file=fhir_benchmark.js=\"$ROOT_DIR/benchmarks/k6/lib/fhir_benchmark.js\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_load_100.js=\"$k6_script\" --from-file=fhir_benchmark.js=\"$ROOT_DIR/benchmarks/k6/lib/fhir_benchmark.js\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
 
   log "Applying rendered k6 shard Job: $rendered"
   run "$kbin" apply -f "$rendered"

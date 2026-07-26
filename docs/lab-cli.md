@@ -115,14 +115,21 @@ Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-j
 
 Use `K6_SCRIPT=benchmarks/k6/echis_load_100.js` (or another `echis_load_*.js`
 tier script) with `--echis-tier T2|T3|T4|T5` to run a progressive eCHIS tier
-under the sequencing/pooled-tier-attestation guard described in
-`docs/echis-benchmark-tiers.md`. Add `--in-cluster --parallel-shards N` to
-distribute k6 load generation across `N` Kubernetes Job pods
-(`manifests/k6-shard-job/echis-k6-shard-job.yaml`) instead of one local k6
-process — see `manifests/k6-shard-job/README.md` for the sharding strategy
-(aggregate concurrency is the target script's own VU count multiplied by
-shard count), the ConfigMap/PVC prerequisites, and the
-`scripts/merge_k6_shards.rb` follow-up step this leaves for the operator.
+locally, under the sequencing/pooled-tier-attestation guard described in
+`docs/echis-benchmark-tiers.md`.
+
+Add `--in-cluster --parallel-shards N` to distribute k6 load generation
+across `N` Kubernetes Job pods (`manifests/k6-shard-job/echis-k6-shard-job.yaml`)
+instead of one local k6 process. **`--in-cluster` does not honor `K6_SCRIPT`**
+— it always targets `benchmarks/k6/echis_load_100.js`, matching the
+manifest's own static ConfigMap item mapping (`scripts/lab` errors out if
+`K6_SCRIPT` is set to anything else, rather than silently ignoring it).
+Retargeting an in-cluster run at a different tier script requires updating
+the manifest's `args`/ConfigMap `items` and this command together — see
+`manifests/k6-shard-job/README.md` for the sharding strategy (aggregate
+concurrency is the target script's own VU count multiplied by shard count),
+the ConfigMap/PVC prerequisites, and the `scripts/merge_k6_shards.rb`
+follow-up step this leaves for the operator.
 
 ### Report
 
