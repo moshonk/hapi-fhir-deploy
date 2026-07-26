@@ -127,9 +127,40 @@ maxReplicas_pooled <= floor(1000 / 20) = 50
 
 **This ceiling is provisional pending T4 load-test evidence** (the 10,000-concurrent-user tier of `specs/008-echis-workload-benchmark`), matching how the native tier's per-pod RPS threshold is already treated as provisional. Once pooled, connections stop being the binding constraint — cluster CPU/memory and PostgreSQL write IOPS become the real ceiling, so `maxReplicaCount: 50` must also be validated against real load, not just this arithmetic.
 
-**Prepared statements**: PgBouncer transaction-pooling mode has known friction with JDBC server-side prepared statements. The pinned image (`edoburu/pgbouncer:v1.25.2-p0`, PgBouncer >= 1.21) supports protocol-level prepared-statement pooling via `MAX_PREPARED_STATEMENTS` (set to `200` in `manifests/pgbouncer/configmap.yaml`). Full compatibility validation against HikariCP's prepared-statement caching is tracked as follow-up work (deferred Polish task in `specs/007-pgbouncer-connection-pooling/tasks.md`, T028) and must complete before the pooled tier is trusted above the T4 tier.
+**Prepared statements**: PgBouncer transaction-pooling mode has known friction with JDBC server-side prepared statements. The pinned image (`edoburu/pgbouncer:v1.25.2-p0`, PgBouncer >= 1.21) supports protocol-level prepared-statement pooling via `MAX_PREPARED_STATEMENTS` (set to `200` in `ansible/templates/pgbouncer-deployment.runtime.yaml.j2`, templated from `ansible/group_vars/lab.yml`). Full compatibility validation against HikariCP's prepared-statement caching is tracked as follow-up work (deferred Polish task in `specs/007-pgbouncer-connection-pooling/tasks.md`, T028) and must complete before the pooled tier is trusted above the T4 tier.
 
-**Bulk-load vs. steady-state serving**: this connection budget governs steady-state serving traffic. A one-time bulk data-load may temporarily run with a higher manual replica/pool count (autoscaling paused), then must return to the committed ceiling above before serving traffic begins. A fully documented operator procedure for this is deferred follow-up work (User Story 3 in `specs/007-pgbouncer-connection-pooling/tasks.md`, not yet implemented).
+**Bulk-load vs. steady-state serving**: this connection budget governs steady-state serving traffic. A one-time bulk data-load may temporarily run with a higher manual replica/pool count (autoscaling paused), then must return to the committed ceiling above before serving traffic begins. See "Bulk Data-Load Window Procedure" below.
+
+## Bulk Data-Load Window Procedure
+
+Per `research.md` Decision 6 (spec 007 User Story 3): for this iteration, separating a one-time bulk data-load's temporary connection allowance from the committed steady-state serving ceiling is a documented, operator-run procedure, not new automation (`scripts/lab`'s existing `seed`/`benchmark` phase split already gives a natural point to apply it). Automating this fully is a reasonable follow-up if manual operation proves error-prone across the eCHIS T4/T5 tiers (`specs/008-echis-workload-benchmark`), not a blocker for this spec.
+
+**Before `scripts/lab seed`** (or an equivalent bulk data-load), pin the replica count for the load window via KEDA's `autoscaling.keda.sh/paused-replicas` annotation (not a `spec.paused` field -- the ScaledObject CRD has no such field; this annotation is the real KEDA v2 mechanism, and it sets the underlying HPA's min/max to the given value, overriding live-metric-driven scaling for as long as the annotation is present), staying within real PostgreSQL `max_connections`:
+
+```sh
+# Do the arithmetic against the connection-budget formulas above before picking a
+# number -- this pins the replica count, it doesn't just pause reconciliation.
+# The ScaledObject is named hapi-fhir-jpaserver whether the native or pooled tier
+# is applied (ansible/playbooks/20-deploy-hapi-fhir.yml applies exactly one, never
+# both, under this same name) -- one command covers either tier.
+kubectl -n fhir annotate scaledobject hapi-fhir-jpaserver \
+  autoscaling.keda.sh/paused-replicas="<bulk-load-replica-count>" --overwrite
+```
+
+`scripts/lab pause-autoscaling --replicas N` / `scripts/lab resume-autoscaling` wrap the annotate commands above; see `docs/lab-cli.md`.
+
+**After the bulk data-load, before `scripts/lab benchmark`**, remove the annotation so KEDA resumes live-metric-driven autoscaling within its normal `minReplicaCount`/`maxReplicaCount`:
+
+```sh
+kubectl -n fhir annotate scaledobject hapi-fhir-jpaserver autoscaling.keda.sh/paused-replicas-
+```
+
+Confirm the annotation is gone and the replica count is back at (or converging toward) the committed ceiling before starting serving traffic:
+
+```sh
+kubectl -n fhir get scaledobject hapi-fhir-jpaserver -o jsonpath='{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}'
+kubectl -n fhir get deploy hapi-fhir-hapi-fhir-jpaserver
+```
 
 ## Verification
 

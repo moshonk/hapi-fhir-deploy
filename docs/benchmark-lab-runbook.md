@@ -96,6 +96,15 @@ Use profiles in increasing order. Do not start with `load` or `stress` on a new 
 
 The k6 workloads use standard FHIR R4 HTTP APIs: `GET /metadata`, Patient read/search, Observation search by patient/date, Encounter search, Condition search, mixed read/search traffic, and optional HL7 Bulk Data `$export` when `BULK_EXPORT_ENABLED=true`. They intentionally avoid non-standard HAPI-only APIs.
 
+### Bulk Data-Load Window
+
+Before seeding a dataset large enough that the default replica/pool ceiling would make it slow (`load`/`stress` profiles, any eCHIS tier T3 and above), pin a temporarily higher replica count so the load finishes faster, then restore the committed serving ceiling before benchmarking — see `docs/autoscaling.md`'s "Bulk Data-Load Window Procedure" for the full KEDA annotation mechanism and connection-budget arithmetic. In short, for every tier run:
+
+1. **Before `scripts/lab seed`**: `scripts/lab pause-autoscaling --replicas <bulk-load-replica-count>` (or the raw `kubectl annotate scaledobject ... autoscaling.keda.sh/paused-replicas=...` command).
+2. Run `scripts/lab seed` (or `scripts/echis_seed.rb` directly).
+3. **Before `scripts/lab benchmark`**: `scripts/lab resume-autoscaling` to remove the pin and let KEDA resume live-metric-driven autoscaling within its committed `minReplicaCount`/`maxReplicaCount`.
+4. Confirm the replica count is back at (or converging toward) the committed ceiling — `kubectl -n "${HAPI_NAMESPACE:-fhir}" get deploy hapi-fhir-hapi-fhir-jpaserver` — before starting the benchmark, so serving traffic is measured against the real committed connection budget, not the temporarily-widened bulk-load one. Use the same `HAPI_NAMESPACE` value you passed to `pause-autoscaling`/`resume-autoscaling`, if any.
+
 For `baseline`, expose Prometheus and pass `PROMETHEUS_BASE_URL` so k6 can evaluate pod restart and Hikari connection headroom gates:
 
 ```sh

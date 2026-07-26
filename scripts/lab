@@ -22,6 +22,7 @@ HOUSEHOLDS=""
 INDIVIDUALS_PER_HOUSEHOLD=""
 PARALLEL_SHARDS=""
 IN_CLUSTER=false
+REPLICAS=""
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
@@ -45,14 +46,19 @@ Usage:
     as a distributed Kubernetes Indexed Job instead of a single local k6 process)
   scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
+  scripts/lab pause-autoscaling --replicas N
+  scripts/lab resume-autoscaling
 
 Commands:
-  up         Provision cloud infrastructure with Terraform and save ignored local outputs.
-  deploy     Run the provider-neutral Ansible deployment workflow.
-  seed       Generate deterministic Synthea FHIR data and optionally invoke a loader.
-  benchmark  Run a k6 FHIR benchmark profile.
-  report     Publish local benchmark result artifacts from a run directory.
-  down       Destroy cloud infrastructure. Use this promptly to control cloud cost.
+  up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
+  deploy               Run the provider-neutral Ansible deployment workflow.
+  seed                 Generate deterministic Synthea FHIR data and optionally invoke a loader.
+  benchmark            Run a k6 FHIR benchmark profile.
+  report               Publish local benchmark result artifacts from a run directory.
+  down                 Destroy cloud infrastructure. Use this promptly to control cloud cost.
+  pause-autoscaling    Pin the KEDA-managed replica count to N for a bulk data-load window
+                       (see docs/autoscaling.md's "Bulk Data-Load Window Procedure").
+  resume-autoscaling   Remove the pin so KEDA resumes live-metric-driven autoscaling.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -85,9 +91,12 @@ Environment:
                           (invokes scripts/echis_seed.rb directly with --households,
                           skipping Synthea entirely; requires --households not
                           --patients).
-  KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster.
+  KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster,
+                          pause-autoscaling, and resume-autoscaling.
   LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
                           defaults to echis-shard-output. Used by --in-cluster.
+  HAPI_NAMESPACE          Kubernetes namespace for the HAPI FHIR deployment; defaults
+                          to fhir. Used by pause-autoscaling and resume-autoscaling.
 USAGE
 }
 
@@ -180,6 +189,11 @@ parse_args() {
       --in-cluster)
         IN_CLUSTER=true
         shift
+        ;;
+      --replicas)
+        [[ -n "${2:-}" ]] || die "--replicas requires a value"
+        REPLICAS="$2"
+        shift 2
         ;;
       --auto-approve)
         AUTO_APPROVE=true
@@ -949,6 +963,48 @@ cmd_down() {
   log "Destroy completed for $CLOUD lab '$NAME'"
 }
 
+# The KEDA ScaledObject is named hapi-fhir-jpaserver whether the native or
+# pooled connection tier is applied -- ansible/playbooks/20-deploy-hapi-fhir.yml
+# applies exactly one of the two, never both, under this same name, so one
+# pair of commands covers both tiers.
+autoscaling_namespace() {
+  printf '%s' "${HAPI_NAMESPACE:-fhir}"
+}
+
+# Per docs/autoscaling.md's "Bulk Data-Load Window Procedure" (spec 007 US3,
+# research.md Decision 6): pins the replica count for a one-time bulk
+# data-load window via KEDA's autoscaling.keda.sh/paused-replicas annotation
+# (the real KEDA v2 mechanism -- there is no spec.paused field on the
+# ScaledObject CRD). This sets the underlying HPA's min/max to the given
+# value, overriding live-metric-driven scaling until resume-autoscaling
+# removes the annotation.
+cmd_pause_autoscaling() {
+  [[ -n "$REPLICAS" ]] || die "--replicas is required"
+  [[ "$REPLICAS" =~ ^[0-9]+$ ]] || die "--replicas must be a positive integer"
+  [[ "$REPLICAS" -gt 0 ]] || die "--replicas must be greater than zero"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+
+  local ns
+  ns="$(autoscaling_namespace)"
+  log "Pinning hapi-fhir-jpaserver to $REPLICAS replica(s) for a bulk data-load window (namespace $ns)"
+  run "$kbin" -n "$ns" annotate scaledobject hapi-fhir-jpaserver \
+    "autoscaling.keda.sh/paused-replicas=$REPLICAS" --overwrite
+}
+
+cmd_resume_autoscaling() {
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+
+  local ns
+  ns="$(autoscaling_namespace)"
+  log "Removing the replica pin so KEDA resumes live-metric-driven autoscaling (namespace $ns)"
+  run "$kbin" -n "$ns" annotate scaledobject hapi-fhir-jpaserver "autoscaling.keda.sh/paused-replicas-"
+}
+
 if [[ -z "$COMMAND" || "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
   usage
   exit 0
@@ -963,6 +1019,8 @@ case "$COMMAND" in
   benchmark) cmd_benchmark ;;
   report) cmd_report ;;
   down) cmd_down ;;
+  pause-autoscaling) cmd_pause_autoscaling ;;
+  resume-autoscaling) cmd_resume_autoscaling ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

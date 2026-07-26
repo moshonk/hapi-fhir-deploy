@@ -100,11 +100,9 @@ This is a deployment-configuration repository (Helm chart + Kubernetes manifests
 
 ### Implementation for User Story 3
 
-**DEFERRED — not implemented in this pass** (scoped out by explicit user decision to implement MVP scope only: Setup + Foundational + US1 + US2). Follow-up work.
-
-- [ ] T024 [US3] Add a bulk-load-vs-serving procedure subsection to `docs/autoscaling.md`, per `research.md` Decision 6 (pause autoscaling / manually raise replica+pool counts for the load window, then restore the committed ceiling)
-- [ ] T025 [US3] Add a "Bulk Data-Load Window" step to `docs/benchmark-lab-runbook.md`'s tier-run procedure, cross-referencing T024 and instructing operators to apply it before `scripts/lab seed` and revert it before `scripts/lab benchmark` (depends on T024)
-- [ ] T026 [US3] Add `--pause-autoscaling` / `--resume-autoscaling` convenience flags to `scripts/lab` so the procedure from T024/T025 isn't purely manual `kubectl` (depends on T003, T011)
+- [X] T024 [US3] Add a bulk-load-vs-serving procedure subsection to `docs/autoscaling.md`, per `research.md` Decision 6 (pause autoscaling / manually raise replica+pool counts for the load window, then restore the committed ceiling). Uses KEDA's real `autoscaling.keda.sh/paused-replicas` annotation (there is no `spec.paused` field on the ScaledObject CRD, contrary to an initial draft of this section — corrected before commit). One procedure covers both the native and pooled tier since the ScaledObject is named `hapi-fhir-jpaserver` regardless of which is applied. Also fixed a real pre-existing stale reference in this same doc section: `manifests/pgbouncer/configmap.yaml`, mentioned for `MAX_PREPARED_STATEMENTS`, was deleted in T005's scope-change review fix; corrected to point at `ansible/templates/pgbouncer-deployment.runtime.yaml.j2`.
+- [X] T025 [US3] Add a "Bulk Data-Load Window" step to `docs/benchmark-lab-runbook.md`'s tier-run procedure, cross-referencing T024 and instructing operators to apply it before `scripts/lab seed` and revert it before `scripts/lab benchmark` (depends on T024)
+- [X] T026 [US3] Add `--pause-autoscaling` / `--resume-autoscaling` convenience flags to `scripts/lab` so the procedure from T024/T025 isn't purely manual `kubectl` (depends on T003, T011). Implemented as new commands `scripts/lab pause-autoscaling --replicas N` / `scripts/lab resume-autoscaling` (this script's existing CLI is verb-command-based, not flag-based, so commands fit its established pattern better than bare flags with no command word). Verified locally via `--dry-run`: correct validation errors for missing/zero `--replicas`, correct `kubectl annotate` invocations for both commands, `--help` lists them, and the full pre-existing CI dry-run suite plus `test/lab_epic_acceptance_test.rb` remain unaffected.
 
 **Checkpoint**: User Story 3 is documented and tooled; most useful once US1 exists, but its documentation tasks don't require US1 to be complete first.
 

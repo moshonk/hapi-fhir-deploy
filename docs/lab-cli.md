@@ -157,3 +157,12 @@ scripts/lab down --cloud aws|azure|gcp --name NAME --yes
 ```
 
 `down` selects the Terraform workspace for `NAME` and runs destroy with the same `lab_name` value used by `up`. Run this command even after failed deploy, seed, or benchmark steps so cloud resources do not continue to accrue cost.
+
+### Autoscaling (bulk data-load window)
+
+```sh
+scripts/lab pause-autoscaling --replicas N
+scripts/lab resume-autoscaling
+```
+
+Convenience wrappers around KEDA's `autoscaling.keda.sh/paused-replicas` annotation on the `hapi-fhir-jpaserver` ScaledObject (the same object name whether the native or pooled connection tier is applied), per `docs/autoscaling.md`'s "Bulk Data-Load Window Procedure". `pause-autoscaling --replicas N` pins the replica count for a one-time bulk data-load window — do the connection-budget arithmetic in `docs/autoscaling.md` before picking `N`. `resume-autoscaling` removes the pin so KEDA resumes live-metric-driven autoscaling within its normal `minReplicaCount`/`maxReplicaCount`. Apply `pause-autoscaling` before `scripts/lab seed` and `resume-autoscaling` before `scripts/lab benchmark`, so serving traffic is always measured against the committed ceiling, not the temporarily-widened bulk-load one. Uses `KUBECTL_BIN` (defaults to `kubectl`) and `HAPI_NAMESPACE` (defaults to `fhir`).
