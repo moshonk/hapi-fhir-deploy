@@ -3,12 +3,12 @@
 `echis-seed-job.yaml`: a Kubernetes Indexed Job that runs distributed eCHIS
 dataset generation across `parallelism` parallel shards, per
 `specs/008-echis-workload-benchmark/contracts/shard-job.md`
-(`specs/008-echis-workload-benchmark/tasks.md` task T026, User Story 4).
-Currently targets `scripts/minimal_fhir_seed.rb` for de-risking — see the
-comment header in the manifest for why shard ID overlap is expected and safe
-at this stage. Task T031 retargets it at `scripts/echis_seed.rb`, whose
-`--shard-index`/`--shard-count` flags give each shard a genuinely disjoint ID
-range.
+(`specs/008-echis-workload-benchmark/tasks.md` tasks T026/T031, User Story 4).
+Targets `scripts/echis_seed.rb`, whose `--shard-index`/`--shard-count` flags
+give each shard a genuinely disjoint household index range. (It started out
+pointed at `scripts/minimal_fhir_seed.rb` for de-risking the Job mechanism
+itself, before US2/US3 existed — see git history and tasks.md T026's note for
+why shard ID overlap was expected and safe at that stage.)
 
 ## Before `kubectl apply`
 
@@ -18,10 +18,11 @@ T038, not yet implemented):
 
 | Token | Meaning |
 | --- | --- |
-| `<SHARD_COUNT>` | Number of parallel shards (`parallelism`/`completions`). |
-| `<PATIENTS_PER_SHARD>` | Patient count each shard generates. |
+| `<SHARD_COUNT>` | Number of parallel shards (`parallelism`/`completions`, and `echis_seed.rb --shard-count`). |
+| `<HOUSEHOLDS_TOTAL>` | Total household count **across all shards**, not any one shard's slice — `echis_seed.rb` derives each shard's own `[start_index, end_index)` range from this and `--shard-index`/`--shard-count`. |
+| `<INDIVIDUALS_PER_HOUSEHOLD>` | Average individuals per household (`echis_seed.rb` default: 3). |
 | `<SEED>` | Deterministic seed recorded in each shard's metadata. |
-| `<RUN_ID>` | Run identifier; each shard appends its own index. |
+| `<RUN_ID>` | Run identifier, shared by every shard (each shard's own index is recorded in its metadata's `shard_index` field, not appended to `run_id`). |
 | `<FHIR_BASE_URL>` | Target FHIR server base URL. |
 | `<SEED_SCRIPTS_CONFIGMAP>` | Name of a pre-created ConfigMap containing the seed script(s) — see below. |
 | `<SHARD_OUTPUT_PVC>` | Name of a pre-created `ReadWriteMany` PVC mounted at `/shard-output`, so every shard's `dataset-metadata.json` is addressable by its index and `scripts/merge_seed_shards.rb` can read them all. |

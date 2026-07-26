@@ -3,9 +3,20 @@
 `echis-k6-shard-job.yaml`: a Kubernetes Indexed Job that runs distributed k6
 load generation across `parallelism` parallel shard pods, per
 `specs/008-echis-workload-benchmark/contracts/shard-job.md`
-(`specs/008-echis-workload-benchmark/tasks.md` task T027, User Story 4).
-Currently targets `benchmarks/k6/smoke.js` for de-risking. Task T031
-retargets it at an `echis_load_*.js` tier script.
+(`specs/008-echis-workload-benchmark/tasks.md` tasks T027/T031, User Story 4).
+Targets `benchmarks/k6/echis_load_100.js`. (It started out pointed at
+`benchmarks/k6/smoke.js` for de-risking the Job mechanism itself, before
+US2/US3 existed — see git history and tasks.md T027's note.)
+
+**Sharding strategy**: each shard pod runs the SAME, unmodified tier script
+in full — the `echis_load_*.js` scripts hardcode their own VU stage targets,
+they are not parametrized per-shard. Aggregate concurrency is the chosen
+script's own VU target multiplied by `SHARD_COUNT` (e.g. `SHARD_COUNT=10`
+with `echis_load_100.js` approximates ~1,000 aggregate VUs, a distributed
+stand-in for T3; `SHARD_COUNT=1000` approximates ~100,000, i.e. T5). Pick
+whichever committed `echis_load_*.js` script gets you closest to the target
+concurrency you want, and swap the script filename in this manifest's
+`args`/ConfigMap `items` accordingly.
 
 ## Before `kubectl apply`
 
@@ -24,12 +35,13 @@ Create the scripts ConfigMap before applying (name must match
 `<K6_SCRIPTS_CONFIGMAP>`). k6 scripts import `./lib/fhir_benchmark.js` by
 relative path, so the shared library key is mapped onto a `lib/` subdirectory
 via the manifest's `volumes[].configMap.items` — if you retarget the manifest
-at a different script (e.g. for task T031), add that script's file to this
-ConfigMap and to the `items` list alongside `smoke.js`:
+at a different script (per the sharding strategy above), add that script's
+file to this ConfigMap and to the `items` list alongside
+`echis_load_100.js`:
 
 ```sh
 kubectl create configmap echis-k6-shard-job-scripts \
-  --from-file=smoke.js=benchmarks/k6/smoke.js \
+  --from-file=echis_load_100.js=benchmarks/k6/echis_load_100.js \
   --from-file=fhir_benchmark.js=benchmarks/k6/lib/fhir_benchmark.js \
   -n fhir
 ```

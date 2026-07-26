@@ -7,16 +7,12 @@
 # manifests/seed-job/README.md for the required substitutions and the
 # ConfigMap/PVC this manifest expects to already exist.
 #
-# De-risking stage (tasks.md T026): targets scripts/minimal_fhir_seed.rb,
-# which has no shard-aware ID partitioning (no --shard-index flag) -- shards
-# intentionally generate overlapping Patient/Encounter/Condition/Observation
-# IDs here, which is safe because every write is an idempotent
-# `PUT {Type}/{id}`. This validates the Job mechanism itself (indexed
-# completion, per-shard output addressing, merge-script summation and
-# missing-shard detection via scripts/merge_seed_shards.rb), not ID-space
-# partitioning -- that is a property scripts/echis_seed.rb's
-# --shard-index/--shard-count flags provide once tasks.md T031 swaps this
-# manifest to target it instead.
+# Targets scripts/echis_seed.rb (tasks.md T031), whose --shard-index/
+# --shard-count flags give each shard a genuinely disjoint household index
+# range -- unlike the scripts/minimal_fhir_seed.rb de-risking stage this
+# manifest started from (see git history), shards here do NOT overlap IDs,
+# except for the documented, idempotent-safe CHW catchment redundancy at
+# shard boundaries (scripts/echis_seed.rb's own header comment).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -43,18 +39,24 @@ spec:
       containers:
         - name: seed
           image: docker.io/library/ruby:3.3.12-alpine3.24@sha256:c162e46df6458be2bc169956f207225abd4b017adc0f0a6f7ad50640b93fcf82
-          command: ["ruby", "/scripts/minimal_fhir_seed.rb"]
+          command: ["ruby", "/scripts/echis_seed.rb"]
           args:
-            - "--patients"
-            - "<PATIENTS_PER_SHARD>"
+            - "--households"
+            - "<HOUSEHOLDS_TOTAL>"
+            - "--individuals-per-household"
+            - "<INDIVIDUALS_PER_HOUSEHOLD>"
             - "--seed"
             - "<SEED>"
             - "--run-id"
-            - "<RUN_ID>-shard-$(SHARD_INDEX)"
+            - "<RUN_ID>"
             - "--metadata"
             - "/shard-output/shard-$(SHARD_INDEX)-dataset-metadata.json"
             - "--fhir-base-url"
             - "<FHIR_BASE_URL>"
+            - "--shard-index"
+            - "$(SHARD_INDEX)"
+            - "--shard-count"
+            - "<SHARD_COUNT>"
           env:
             - name: SHARD_INDEX
               valueFrom:
