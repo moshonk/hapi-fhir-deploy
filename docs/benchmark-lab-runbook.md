@@ -103,7 +103,7 @@ Before seeding a dataset large enough that the default replica/pool ceiling woul
 1. **Before `scripts/lab seed`**: `scripts/lab pause-autoscaling --replicas <bulk-load-replica-count>` (or the raw `kubectl annotate scaledobject ... autoscaling.keda.sh/paused-replicas=...` command).
 2. Run `scripts/lab seed` (or `scripts/echis_seed.rb` directly).
 3. **Before `scripts/lab benchmark`**: `scripts/lab resume-autoscaling` to remove the pin and let KEDA resume live-metric-driven autoscaling within its committed `minReplicaCount`/`maxReplicaCount`.
-4. Confirm the replica count is back at (or converging toward) the committed ceiling — `kubectl -n fhir get deploy hapi-fhir-hapi-fhir-jpaserver` — before starting the benchmark, so serving traffic is measured against the real committed connection budget, not the temporarily-widened bulk-load one.
+4. Confirm the replica count is back at (or converging toward) the committed ceiling — `kubectl -n "${HAPI_NAMESPACE:-fhir}" get deploy hapi-fhir-hapi-fhir-jpaserver` — before starting the benchmark, so serving traffic is measured against the real committed connection budget, not the temporarily-widened bulk-load one. Use the same `HAPI_NAMESPACE` value you passed to `pause-autoscaling`/`resume-autoscaling`, if any.
 
 For `baseline`, expose Prometheus and pass `PROMETHEUS_BASE_URL` so k6 can evaluate pod restart and Hikari connection headroom gates:
 
