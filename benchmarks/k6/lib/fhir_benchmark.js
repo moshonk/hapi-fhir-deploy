@@ -151,7 +151,33 @@ export function runFhirWorkload(data) {
   }
 
   const workloadConfig = workloadFor(data.workload);
-  const operation = chooseOperation(workloadConfig, data.bulkExportEnabled);
+  dispatchOperation(data, workloadConfig.operationWeights, workloadConfig.handlers, data.bulkExportEnabled);
+
+  sleep(data.sleepSeconds);
+}
+
+// Runs the same dispatch as runFhirWorkload but with one or more operations excluded
+// from the weighted draw -- for tier scripts that run those operations on a separate
+// scenario/executor instead (see
+// specs/008-echis-workload-benchmark/contracts/workloads-registry.md's Executor contract).
+export function runFhirWorkloadExcluding(data, ...excludedOperations) {
+  if (__ITER === 0) {
+    healthCheck(data);
+  }
+
+  const workloadConfig = workloadFor(data.workload);
+  const weights = workloadConfig.operationWeights.filter(([name]) => !excludedOperations.includes(name));
+  // chooseOperation() re-adds bulk_export on its own whenever bulkExportEnabled is true
+  // and a handler exists, regardless of what's in the filtered weights -- so excluding
+  // "bulk_export" here must also suppress it via bulkExportEnabled, not just the weights.
+  const bulkExportEnabled = data.bulkExportEnabled && !excludedOperations.includes("bulk_export");
+  dispatchOperation(data, weights, workloadConfig.handlers, bulkExportEnabled);
+
+  sleep(data.sleepSeconds);
+}
+
+function dispatchOperation(data, operationWeights, handlers, bulkExportEnabled) {
+  const operation = chooseOperation({ operationWeights, handlers }, bulkExportEnabled);
 
   if (operation === "mixed_search") {
     group("mixed read/search traffic", () => {
@@ -160,14 +186,12 @@ export function runFhirWorkload(data) {
       observationSearch(data);
     });
   } else {
-    const handler = workloadConfig.handlers[operation];
+    const handler = handlers[operation];
     if (typeof handler !== "function") {
       throw new Error(`No handler registered for operation "${operation}" in workload "${data.workload}"`);
     }
     handler(data);
   }
-
-  sleep(data.sleepSeconds);
 }
 
 export function benchmarkTeardown() {}
@@ -533,20 +557,14 @@ function supervisorDashboardRead(data) {
 }
 
 // Dedicated exec target for a k6 arrival-rate scenario, per research.md
-// Decision 7 / contracts/workloads-registry.md's executor contract. Not yet
-// wired into an options.scenarios object -- that happens in the
-// echis_load_*.js tier scripts (spec 008 US1, T006-T009), the earliest
-// point those scenarios are actually defined. operationWeightsExcluding()
-// is exported so those scripts can build a ramping-vus scenario's weights
-// with household_sync_write removed, avoiding double-counting it against
-// this dedicated scenario.
+// Decision 7 / specs/008-echis-workload-benchmark/contracts/workloads-registry.md's
+// executor contract. Wired into an options.scenarios object in the
+// echis_load_*.js tier scripts (spec 008 US1) alongside a ramping-vus scenario
+// running runFhirWorkloadExcluding(data, "household_sync_write"), which avoids
+// double-counting household_sync_write against this dedicated scenario.
 export function runHouseholdSyncWrite(data) {
   householdSyncWrite(data);
   sleep(data.sleepSeconds);
-}
-
-export function operationWeightsExcluding(workloadName, ...excludedOperations) {
-  return workloadFor(workloadName).operationWeights.filter(([name]) => !excludedOperations.includes(name));
 }
 
 function echisTransactionBundle(resources) {

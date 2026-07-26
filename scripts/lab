@@ -17,6 +17,7 @@ RUN_ID=""
 PATIENTS=""
 SEED=""
 PROFILE=""
+ECHIS_TIER=""
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
@@ -30,7 +31,7 @@ Usage:
   scripts/lab up --cloud aws|azure|gcp --name NAME [--auto-approve] [--var key=value]
   scripts/lab deploy --cloud aws|azure|gcp --name NAME [--extra-vars key=value]
   scripts/lab seed --patients N --seed S [--run RUN_ID] [--generate-only]
-  scripts/lab benchmark --profile smoke|baseline|load|stress [--run RUN_ID]
+  scripts/lab benchmark --profile smoke|baseline|load|stress [--echis-tier T2|T3|T4|T5] [--run RUN_ID]
   scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
 
@@ -58,6 +59,10 @@ Environment:
   LAB_RESULTS_DIR         Published result root; defaults to results/.
   LAB_RESULT_PUBLISHER_CMD Optional publisher command; defaults to scripts/publish_results.rb.
   LAB_REPORT_CMD          Legacy report command invoked as: CMD RUN_DIR REPORT_PATH.
+  LAB_ECHIS_POOLED_TIER_CONFIRMED
+                          Set to "true" to attest the PgBouncer pooled tier (spec 007,
+                          enable_pgbouncer: true) is deployed and validated; required by
+                          --echis-tier T4 or T5.
 USAGE
 }
 
@@ -125,6 +130,11 @@ parse_args() {
         ;;
       --profile)
         PROFILE="${2:-}"
+        shift 2
+        ;;
+      --echis-tier)
+        [[ -n "${2:-}" ]] || die "--echis-tier requires a value (T2, T3, T4, or T5)"
+        ECHIS_TIER="$2"
         shift 2
         ;;
       --auto-approve)
@@ -431,8 +441,87 @@ cmd_seed() {
   run "$loader_cmd" "${loader_args[@]}"
 }
 
+echis_tier_order() {
+  case "$1" in
+    T2) echo 2 ;;
+    T3) echo 3 ;;
+    T4) echo 4 ;;
+    T5) echo 5 ;;
+    *) die "unsupported --echis-tier '$1'; expected T2, T3, T4, or T5" ;;
+  esac
+}
+
+echis_tier_progress_file() {
+  printf '%s/echis-tier-progress.json' "$ARTIFACT_ROOT"
+}
+
+echis_tier_progress_has() {
+  local progress_file="$1"
+  local tier="$2"
+  "${RUBY_BIN:-ruby}" -rjson -e '
+    path, tier = ARGV
+    completed = JSON.parse(File.read(path))["completed_tiers"] || []
+    exit(completed.include?(tier) ? 0 : 1)
+  ' "$progress_file" "$tier" 2>/dev/null
+}
+
+require_echis_tier_sequence() {
+  local tier="$1"
+  local order
+  order="$(echis_tier_order "$tier")"
+
+  if [[ "$order" -ge 4 ]]; then
+    if [[ "${LAB_ECHIS_POOLED_TIER_CONFIRMED:-}" != "true" ]]; then
+      if [[ "$DRY_RUN" == true ]]; then
+        log "Dry run: LAB_ECHIS_POOLED_TIER_CONFIRMED is not set to true; tier $tier would be refused (requires the PgBouncer pooled connection tier from spec 007)"
+      else
+        die "tier $tier requires the PgBouncer pooled connection tier (spec 007) to be deployed and validated; set LAB_ECHIS_POOLED_TIER_CONFIRMED=true once enable_pgbouncer has been applied, per docs/echis-benchmark-tiers.md"
+      fi
+    fi
+  fi
+
+  if [[ "$order" -le 2 ]]; then
+    return 0
+  fi
+
+  local progress_file prev_tier
+  progress_file="$(echis_tier_progress_file)"
+  prev_tier="T$((order - 1))"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    [[ -f "$progress_file" ]] || log "Dry run: tier progress file not present yet: $progress_file (would require prior tier $prev_tier to be recorded)"
+    return 0
+  fi
+
+  [[ -f "$progress_file" ]] || die "tier $tier requires tier $prev_tier to have completed first; no progress recorded at $progress_file"
+  echis_tier_progress_has "$progress_file" "$prev_tier" ||
+    die "tier $tier requires tier $prev_tier to have completed first; $prev_tier not found in $progress_file"
+}
+
+record_echis_tier_progress() {
+  local tier="$1"
+  local progress_file
+  progress_file="$(echis_tier_progress_file)"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would record tier $tier completion in $progress_file"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$progress_file")"
+  "${RUBY_BIN:-ruby}" -rjson -e '
+    path, tier = ARGV
+    completed = File.exist?(path) ? (JSON.parse(File.read(path))["completed_tiers"] || []) : []
+    completed << tier unless completed.include?(tier)
+    File.write(path, "#{JSON.pretty_generate({"completed_tiers" => completed})}\n")
+  ' "$progress_file" "$tier"
+}
+
 cmd_benchmark() {
   require_profile
+  if [[ -n "$ECHIS_TIER" ]]; then
+    require_echis_tier_sequence "$ECHIS_TIER"
+  fi
 
   if [[ -z "$RUN_ID" ]]; then
     RUN_ID="$(timestamp)-${PROFILE}"
@@ -482,6 +571,10 @@ cmd_benchmark() {
     --out "json=$dir/k6-raw.jsonl" \
     --summary-export "$dir/k6-summary.json" \
     "$script"
+
+  if [[ -n "$ECHIS_TIER" ]]; then
+    record_echis_tier_progress "$ECHIS_TIER"
+  fi
 }
 
 cmd_report() {
