@@ -394,6 +394,131 @@ jobs:
           end
           RUBY
 
+      - name: Check PgBouncer connection budget
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          pooled_values_path = "charts/hapi-fhir-deploy/values-pgbouncer-tier.yaml"
+          pooled_scaledobject_path = "manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml"
+
+          unless File.exist?(pooled_values_path) && File.exist?(pooled_scaledobject_path)
+            puts "PgBouncer pooled-tier files not present; skipping pooled connection budget check"
+            exit 0
+          end
+
+          failures = []
+
+          lab_vars = YAML.safe_load(
+            File.read("ansible/group_vars/lab.yml", encoding: "UTF-8"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          pgbouncer_default_pool_size = lab_vars["pgbouncer_default_pool_size"].to_i
+          pgbouncer_replica_count = lab_vars["pgbouncer_replica_count"].to_i
+          pgbouncer_max_client_conn = lab_vars["pgbouncer_max_client_conn"].to_i
+
+          postgres_max_connections = 100
+          reserved_connections = 50
+
+          pooled_values = YAML.safe_load(
+            File.read(pooled_values_path, encoding: "UTF-8"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          overlay_chart = pooled_values.fetch("hapi-fhir-jpaserver", {})
+          extra_config = overlay_chart["extraConfig"]
+          unless extra_config.is_a?(String)
+            failures << "values-pgbouncer-tier.yaml hapi-fhir-jpaserver.extraConfig must be a YAML string"
+            extra_config = extra_config.to_s
+          end
+          parsed_extra_config = begin
+            parsed = YAML.safe_load(extra_config, permitted_classes: [], permitted_symbols: [], aliases: false)
+            if parsed.nil?
+              {}
+            elsif parsed.is_a?(Hash)
+              parsed
+            else
+              failures << "values-pgbouncer-tier.yaml extraConfig must parse as a YAML mapping"
+              {}
+            end
+          rescue Psych::SyntaxError => e
+            failures << "values-pgbouncer-tier.yaml extraConfig must be valid YAML: #{e.message.lines.first.strip}"
+            {}
+          end
+          hikari_maximum_pool_size = parsed_extra_config.dig("spring", "datasource", "hikari", "maximumPoolSize").to_i
+
+          pooled_scaledobject = YAML.safe_load(
+            File.read(pooled_scaledobject_path, encoding: "UTF-8"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          pooled_spec = pooled_scaledobject["spec"] || {}
+
+          failures << "pgbouncer_default_pool_size must be greater than zero" unless pgbouncer_default_pool_size.positive?
+          failures << "pgbouncer_replica_count must be greater than zero" unless pgbouncer_replica_count.positive?
+          failures << "hikari maximumPoolSize (pooled tier) must be greater than zero" unless hikari_maximum_pool_size.positive?
+
+          pgbouncer_server_connections = pgbouncer_default_pool_size * pgbouncer_replica_count
+          budget_ceiling = postgres_max_connections - reserved_connections
+          if pgbouncer_server_connections > budget_ceiling
+            failures << "pgbouncer_server_connections (#{pgbouncer_server_connections}) must not exceed postgres_max_connections - reserved_connections (#{budget_ceiling})"
+          end
+
+          max_replicas_pooled_ceiling = hikari_maximum_pool_size.positive? ? (pgbouncer_max_client_conn / hikari_maximum_pool_size) : 0
+          unless pooled_spec.key?("maxReplicaCount") && pooled_spec["maxReplicaCount"].to_i.positive?
+            failures << "pooled ScaledObject maxReplicaCount must be set and greater than zero"
+          end
+          declared_max_replicas = pooled_spec["maxReplicaCount"].to_i
+          if declared_max_replicas.positive? && declared_max_replicas > max_replicas_pooled_ceiling
+            failures << "pooled maxReplicaCount (#{declared_max_replicas}) must not exceed floor(pgbouncer_max_client_conn / hikari_maximum_pool_size) = #{max_replicas_pooled_ceiling}"
+          end
+
+          failures << "pooled ScaledObject minReplicaCount must be at least 2" unless pooled_spec["minReplicaCount"].to_i >= 2
+
+          native_scaledobject_path = "manifests/autoscaling/hapi-fhir-scaledobject.yaml"
+          native_scaledobject = YAML.safe_load(
+            File.read(native_scaledobject_path, encoding: "UTF-8"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          native_meta = native_scaledobject["metadata"] || {}
+          pooled_meta = pooled_scaledobject["metadata"] || {}
+          native_target = (native_scaledobject["spec"] || {})["scaleTargetRef"] || {}
+          pooled_target = pooled_spec["scaleTargetRef"] || {}
+
+          unless pooled_meta["name"] == native_meta["name"]
+            failures << "pooled and native ScaledObjects must share the same metadata.name so they can never coexist as separate objects targeting the same Deployment"
+          end
+          unless pooled_meta["namespace"] == native_meta["namespace"]
+            failures << "pooled and native ScaledObjects must share the same metadata.namespace"
+          end
+          unless pooled_target["name"] == native_target["name"] && pooled_target["kind"] == native_target["kind"]
+            failures << "pooled and native ScaledObjects must target the same Deployment"
+          end
+
+          autoscaling_docs = File.read("docs/autoscaling.md", encoding: "UTF-8").gsub(/\s+/, " ").strip
+          [
+            "pgbouncer_server_connections = pgbouncer_default_pool_size * pgbouncer_replica_count",
+            "maxReplicas_pooled <= floor(pgbouncer_max_client_conn / hikari_maximum_pool_size)",
+            "This ceiling is provisional pending T4 load-test evidence"
+          ].each do |expected|
+            normalized_expected = expected.gsub(/\s+/, " ").strip
+            failures << "autoscaling docs missing pooled-tier text: #{expected}" unless autoscaling_docs.include?(normalized_expected)
+          end
+
+          if failures.any?
+            warn failures.map { |failure| "- #{failure}" }.join("\n")
+            exit 1
+          end
+
+          puts "PgBouncer pooled connection budget check passed"
+          RUBY
+
       - name: Add Helm chart repositories
         run: |
           helm repo add hapifhir https://hapifhir.github.io/hapi-fhir-jpaserver-starter/ --force-update
