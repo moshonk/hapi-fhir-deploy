@@ -25,6 +25,24 @@ hapi-fhir-jpaserver:
         hikari:
           minimumIdle: 4
           maximumPoolSize: 20
+          data-source-properties:
+            # PgBouncer transaction-mode pooling has documented friction with
+            # JDBC server-side prepared statements (research.md Decision 3):
+            # a statement prepared on one backend connection may not exist on
+            # the next one a transaction is routed to. The pinned PgBouncer
+            # image (edoburu/pgbouncer:v1.25.2-p0, >= 1.21) supports
+            # protocol-level prepared-statement pooling via
+            # MAX_PREPARED_STATEMENTS (ansible/group_vars/lab.yml), which
+            # should make server-side prepare safe -- but this has not been
+            # validated end-to-end against a live PgBouncer+PostgreSQL+
+            # HikariCP stack (no live cluster available where this was
+            # implemented). Per Decision 3's own documented fallback,
+            # default to the guaranteed-safe prepareThreshold=0 (disables
+            # PgJDBC server-side prepare entirely) until that live
+            # validation happens; see docs/autoscaling.md's "Prepared
+            # statements" section for the follow-up validation plan and how
+            # to re-enable server-side prepare once confirmed safe.
+            prepareThreshold: 0
       jpa:
         properties:
           hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
