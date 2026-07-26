@@ -149,6 +149,137 @@ class PublishResultsTest < Minitest::Test
     end
   end
 
+  def test_publishes_merged_multi_shard_echis_result_with_prometheus_latency_note
+    Dir.mktmpdir do |tmp|
+      run_dir = File.join(tmp, "runs", "load-echis-merged")
+      results_root = File.join(tmp, "results")
+      FileUtils.mkdir_p(run_dir)
+
+      write_json(
+        File.join(run_dir, "dataset-metadata.json"),
+        "echis" => {
+          "generator" => "echis_seed",
+          "shard_count" => 3,
+          "shard_indices_present" => [0, 1, 2],
+          "generated_entry_count" => 5_839_996,
+          "resource_counts" => {
+            "Group" => 333_333,
+            "Patient" => 999_999,
+            "RelatedPerson" => 666_666
+          }
+        },
+        "import" => {
+          "error_count" => 0
+        }
+      )
+      write_json(
+        File.join(run_dir, "benchmark-metadata.json"),
+        "run_id" => "load-echis-merged",
+        "profile" => "load",
+        "created_at_utc" => "2026-07-26T01:02:03Z"
+      )
+      write_json(
+        File.join(run_dir, "k6-fhir-summary.json"),
+        "profile" => "load",
+        "latency_source" => "prometheus",
+        "throughput_reqs_per_sec" => 9.86,
+        "http_failure_rate" => 0.005,
+        "total_requests" => 2970,
+        "failed_requests" => 15,
+        "duration_seconds" => 301.2,
+        "operation_mix" => {
+          "household_sync_write" => 1490,
+          "worklist_read" => 900
+        },
+        "shard_count" => 3,
+        "shard_indices_present" => [0, 1, 2]
+      )
+
+      stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby,
+        PUBLISHER,
+        "--run-dir", run_dir,
+        "--run-id", "load-echis-merged",
+        "--results-root", results_root,
+        "--profile", "load",
+        "--created-at", "2026-07-26T01:02:03Z"
+      )
+
+      assert status.success?, "#{stdout}\n#{stderr}"
+      result_dir = File.join(results_root, "20260726-010203-unknown-load")
+
+      environment = JSON.parse(File.read(File.join(result_dir, "environment.json")))
+      assert_equal "echis_seed", environment.dig("dataset", "generator")
+      assert_equal 333_333, environment.dig("dataset", "households")
+      assert_equal 999_999, environment.dig("dataset", "individuals"), "individuals should fall back to resource_counts.Patient when no direct patients field is present"
+      assert_equal 3, environment.dig("dataset", "shard_count")
+
+      report = File.read(File.join(result_dir, "report.md"))
+      assert_includes report, "see Prometheus (multi-shard run)"
+      assert_includes report, "## Data Source"
+      assert_includes report, "combined 3 shards"
+      refute_includes report, "p95 latency ms | `unknown`", "a merged run should point at Prometheus, not just say latency is unknown"
+
+      csv = File.read(File.join(result_dir, "summary.csv"))
+      assert_includes csv, "dataset_generator,echis_seed"
+      assert_includes csv, "dataset_shard_count,3"
+      assert_includes csv, "total_requests,2970"
+      assert_includes csv, "failed_requests,15"
+    end
+  end
+
+  def test_environment_json_has_the_same_dataset_field_set_across_generators_and_shard_counts
+    Dir.mktmpdir do |tmp|
+      results_root = File.join(tmp, "results")
+
+      single_shard_run_dir = File.join(tmp, "runs", "single")
+      FileUtils.mkdir_p(single_shard_run_dir)
+      write_json(
+        File.join(single_shard_run_dir, "dataset-metadata.json"),
+        "synthea" => { "patients" => 100_000, "seed" => 1, "resource_counts" => { "Patient" => 100_000 } },
+        "import" => {}
+      )
+      write_json(
+        File.join(single_shard_run_dir, "benchmark-metadata.json"),
+        "run_id" => "single", "profile" => "load", "created_at_utc" => "2026-07-26T01:02:03Z"
+      )
+      write_json(File.join(single_shard_run_dir, "k6-fhir-summary.json"), "profile" => "load")
+
+      merged_run_dir = File.join(tmp, "runs", "merged")
+      FileUtils.mkdir_p(merged_run_dir)
+      write_json(
+        File.join(merged_run_dir, "dataset-metadata.json"),
+        "echis" => { "generator" => "echis_seed", "shard_count" => 3, "resource_counts" => { "Group" => 10, "Patient" => 30 } },
+        "import" => {}
+      )
+      write_json(
+        File.join(merged_run_dir, "benchmark-metadata.json"),
+        "run_id" => "merged", "profile" => "load", "created_at_utc" => "2026-07-26T04:05:06Z"
+      )
+      write_json(File.join(merged_run_dir, "k6-fhir-summary.json"), "profile" => "load", "latency_source" => "prometheus", "shard_count" => 3)
+
+      _, stderr_a, status_a = Open3.capture3(
+        RbConfig.ruby, PUBLISHER,
+        "--run-dir", single_shard_run_dir, "--run-id", "single", "--results-root", results_root,
+        "--profile", "load", "--created-at", "2026-07-26T01:02:03Z"
+      )
+      assert status_a.success?, stderr_a
+
+      _, stderr_b, status_b = Open3.capture3(
+        RbConfig.ruby, PUBLISHER,
+        "--run-dir", merged_run_dir, "--run-id", "merged", "--results-root", results_root,
+        "--profile", "load", "--created-at", "2026-07-26T04:05:06Z"
+      )
+      assert status_b.success?, stderr_b
+
+      env_a = JSON.parse(File.read(File.join(results_root, "20260726-010203-unknown-load", "environment.json")))
+      env_b = JSON.parse(File.read(File.join(results_root, "20260726-040506-unknown-load", "environment.json")))
+
+      assert_equal env_a.keys.sort, env_b.keys.sort, "top-level environment.json fields must be comparable across generators/shard counts"
+      assert_equal env_a["dataset"].keys.sort, env_b["dataset"].keys.sort, "dataset block fields must be comparable across generators/shard counts"
+    end
+  end
+
   def test_fails_when_result_directory_already_exists
     Dir.mktmpdir do |tmp|
       run_dir = File.join(tmp, "runs", "smoke-aws")

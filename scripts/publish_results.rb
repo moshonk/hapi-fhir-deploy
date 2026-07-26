@@ -93,6 +93,50 @@ def metric_value(hash, *keys)
   keys.reduce(hash) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
 end
 
+# Generator-agnostic view of dataset-metadata.json, whether it came from a
+# single-shard minimal_fhir_seed.rb/echis_seed.rb run or a merged multi-shard
+# run (scripts/merge_seed_shards.rb). Detects the generator-specific top-level
+# key ("synthea" or "echis") the same way merge_seed_shards.rb does, so a
+# report doesn't silently show blank dataset fields for eCHIS tiers -- the
+# prior "synthea"-only lookup never populated anything for eCHIS runs.
+# households/individuals fall back to resource_counts's Group/Patient totals
+# when a generator doesn't track them as a direct field (minimal_fhir_seed.rb,
+# and merged multi-shard output, which sums resource_counts but doesn't carry
+# a separate households/patients field of its own).
+def dataset_section(dataset_metadata)
+  return nil unless dataset_metadata.is_a?(Hash)
+
+  key = (dataset_metadata.keys - %w[run_id import created_at_utc completed_at_utc]).first
+  return nil unless key
+
+  section = dataset_metadata[key] || {}
+  resource_counts = section["resource_counts"] || {}
+  {
+    "generator" => section["generator"] || key,
+    "seed" => section["seed"],
+    "households" => section["households"] || resource_counts["Group"],
+    "individuals" => section["patients"] || resource_counts["Patient"],
+    "resource_counts" => resource_counts,
+    "generated_entry_count" => section["generated_entry_count"],
+    "shard_count" => section["shard_count"],
+    "shard_indices_present" => section["shard_indices_present"]
+  }
+end
+
+def multi_shard?(dataset, fhir_summary)
+  (dataset && dataset["shard_count"].to_i > 1) || (fhir_summary && fhir_summary["shard_count"].to_i > 1)
+end
+
+# Distinguishes "no dataset/summary info at all" (nil, unknown) from
+# "info present but doesn't carry an explicit shard_count field" (defaults to
+# 1, a confirmed single shard) -- a bare `dataset&.dig("shard_count") || 1`
+# would misreport the former as the latter.
+def shard_count_for(source)
+  return nil unless source
+
+  source["shard_count"] || 1
+end
+
 def slug(value)
   candidate = value.to_s.downcase.gsub(/[^a-z0-9._-]+/, "-").gsub(/^-+|-+$/, "")
   candidate.empty? ? "unknown" : candidate
@@ -111,6 +155,7 @@ def write_json(path, data)
 end
 
 def csv_rows(environment, fhir_summary)
+  dataset = environment["dataset"]
   rows = []
   rows << ["run_id", environment.dig("benchmark", "run_id")]
   rows << ["cloud", environment.dig("cloud", "provider")]
@@ -120,13 +165,22 @@ def csv_rows(environment, fhir_summary)
   rows << ["profile", environment.dig("benchmark", "profile")]
   rows << ["synthea_patients", environment.dig("synthea", "patients")]
   rows << ["synthea_seed", environment.dig("synthea", "seed")]
+  rows << ["dataset_generator", dataset&.dig("generator")]
+  rows << ["dataset_households", dataset&.dig("households")]
+  rows << ["dataset_individuals", dataset&.dig("individuals")]
+  rows << ["dataset_generated_entry_count", dataset&.dig("generated_entry_count")]
+  rows << ["dataset_shard_count", shard_count_for(dataset)]
   rows << ["replicas", environment.dig("runtime", "replicas")]
   rows << ["hikari_pool", environment.dig("runtime", "hikari_pool")]
   rows << ["latency_p50_ms", metric_value(fhir_summary, "latency_ms", "p50")]
   rows << ["latency_p95_ms", metric_value(fhir_summary, "latency_ms", "p95")]
   rows << ["latency_p99_ms", metric_value(fhir_summary, "latency_ms", "p99")]
+  rows << ["latency_source", fhir_summary&.dig("latency_source") || "k6"]
   rows << ["throughput_reqs_per_sec", fhir_summary&.dig("throughput_reqs_per_sec")]
   rows << ["http_failure_rate", fhir_summary&.dig("http_failure_rate")]
+  rows << ["total_requests", fhir_summary&.dig("total_requests")]
+  rows << ["failed_requests", fhir_summary&.dig("failed_requests")]
+  rows << ["k6_shard_count", shard_count_for(fhir_summary)]
   (fhir_summary&.dig("operation_mix") || {}).sort.each do |operation, count|
     rows << ["operation_#{operation}", count]
   end
@@ -144,6 +198,8 @@ end
 def markdown_report(environment, fhir_summary, result_dir)
   operation_mix = fhir_summary&.dig("operation_mix") || {}
   gates = fhir_summary&.dig("gates") || {}
+  dataset = environment["dataset"]
+  sharded = multi_shard?(dataset, fhir_summary)
 
   lines = []
   lines << "# HAPI FHIR Benchmark Report"
@@ -160,17 +216,41 @@ def markdown_report(environment, fhir_summary, result_dir)
   lines << "| Hikari pool | `#{environment.dig("runtime", "hikari_pool") || "unknown"}` |"
   lines << "| Synthea patients | `#{environment.dig("synthea", "patients") || "unknown"}` |"
   lines << "| Synthea seed | `#{environment.dig("synthea", "seed") || "unknown"}` |"
+  lines << "| Dataset generator | `#{dataset&.dig("generator") || "unknown"}` |"
+  lines << "| Dataset households | `#{dataset&.dig("households") || "unknown"}` |"
+  lines << "| Dataset individuals | `#{dataset&.dig("individuals") || "unknown"}` |"
+  lines << "| Dataset shard count | `#{shard_count_for(dataset) || "unknown"}` |"
   lines << ""
   lines << "## Latency And Throughput"
   lines << ""
   lines << "| Metric | Value |"
   lines << "| --- | --- |"
-  lines << "| p50 latency ms | `#{metric_value(fhir_summary, "latency_ms", "p50") || "unknown"}` |"
-  lines << "| p95 latency ms | `#{metric_value(fhir_summary, "latency_ms", "p95") || "unknown"}` |"
-  lines << "| p99 latency ms | `#{metric_value(fhir_summary, "latency_ms", "p99") || "unknown"}` |"
+  if sharded
+    lines << "| p50 latency ms | see Prometheus (multi-shard run) |"
+    lines << "| p95 latency ms | see Prometheus (multi-shard run) |"
+    lines << "| p99 latency ms | see Prometheus (multi-shard run) |"
+  else
+    lines << "| p50 latency ms | `#{metric_value(fhir_summary, "latency_ms", "p50") || "unknown"}` |"
+    lines << "| p95 latency ms | `#{metric_value(fhir_summary, "latency_ms", "p95") || "unknown"}` |"
+    lines << "| p99 latency ms | `#{metric_value(fhir_summary, "latency_ms", "p99") || "unknown"}` |"
+  end
   lines << "| Throughput req/s | `#{fhir_summary&.dig("throughput_reqs_per_sec") || "unknown"}` |"
   lines << "| HTTP failure rate | `#{fhir_summary&.dig("http_failure_rate") || "unknown"}` |"
+  lines << "| Total requests | `#{fhir_summary&.dig("total_requests") || "unknown"}` |"
+  lines << "| Failed requests | `#{fhir_summary&.dig("failed_requests") || "unknown"}` |"
   lines << ""
+  if sharded
+    lines << "## Data Source"
+    lines << ""
+    lines << "This run combined #{fhir_summary&.dig("shard_count") || dataset&.dig("shard_count")} shards " \
+             "(`scripts/merge_seed_shards.rb`/`scripts/merge_k6_shards.rb`). Dataset totals, throughput, " \
+             "failure rate, and operation mix below are summed/recomputed from every shard's own output. " \
+             "Latency percentiles are **not** derived from shard data -- per `research.md` Decision 4, " \
+             "combining per-shard percentiles is not mathematically valid, so they must be read from " \
+             "Prometheus/Actuator histograms for the run window instead (see `docs/autoscaling.md` for the " \
+             "scrape configuration)."
+    lines << ""
+  end
   lines << "## FHIR Operation Mix"
   lines << ""
   lines << "| Operation | Count |"
@@ -293,6 +373,7 @@ begin
       "patients" => dataset_metadata&.dig("synthea", "patients"),
       "seed" => dataset_metadata&.dig("synthea", "seed")
     },
+    "dataset" => dataset_section(dataset_metadata),
     "benchmark" => {
       "run_id" => run_id,
       "profile" => profile,
