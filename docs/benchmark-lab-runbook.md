@@ -189,6 +189,33 @@ scripts/lab down --cloud "$CLOUD" --name "$LAB_NAME" --yes \
   --var kubernetes_version=1.35.6-gke.1258000
 ```
 
+### eCHIS Progressive Household/CHW Benchmark
+
+For the household/community-health-worker workload (spec 008), use the
+dedicated `echis_load_*.js` tier scripts and `scripts/echis_seed.rb` instead
+of Synthea — see `docs/echis-benchmark-tiers.md` for tier definitions
+(T2-T5), the `scripts/lab benchmark --echis-tier` sequencing guard, and the
+documented gap around per-user authentication, and `docs/echis-data-model.md`
+for the FHIR resource shapes the generator produces. Quick T2 example:
+
+```sh
+FHIR_BASE_URL=http://localhost:8080/fhir \
+LAB_SEED_GENERATOR_MODE=native \
+scripts/lab seed --households 33333 --individuals-per-household 3 --seed 12345 --run echis-t2
+
+FHIR_BASE_URL=http://localhost:8080/fhir \
+K6_SCRIPT=benchmarks/k6/echis_load_100.js \
+scripts/lab benchmark --profile load --echis-tier T2 --run echis-t2
+
+scripts/lab report --run echis-t2 --cloud "$CLOUD" --name "$LAB_NAME" --profile load
+```
+
+T4/T5 additionally require spec 007's PgBouncer pooled connection tier to be
+deployed and validated first, and distributed execution across multiple k6/
+seed-generation pods via `--in-cluster --parallel-shards N` (see
+`docs/lab-cli.md`) since a single machine cannot host tens of thousands of k6
+VUs.
+
 ## Synthea Usage
 
 The seed stage generates deterministic synthetic FHIR R4 transaction bundles:

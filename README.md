@@ -70,11 +70,13 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `manifests/runtime-rollout/hapi-fhir-deployment-rollout-patch.yaml`: strategic merge patch for lifecycle fields the upstream chart does not expose.
 - `ansible/`: provider-neutral lab orchestration for add-ons, runtime Secret creation, Helm deployment, readiness waits, and metadata collection.
 - `infra/terraform/`: multi-cloud benchmark lab infrastructure modules for AWS, Azure, and GCP.
-- `benchmarks/k6/`: k6 FHIR benchmark profiles for smoke, baseline, load, and stress workloads.
+- `benchmarks/k6/`: k6 FHIR benchmark profiles for smoke, baseline, load, and stress workloads, plus progressive eCHIS household/CHW tier scripts (`echis_load_*.js`, spec 008).
 - `benchmarks/synthea/`: Synthea configuration for deterministic FHIR R4 transaction-bundle seed data.
 - `scripts/lab`: ephemeral benchmark lab wrapper for provision, deploy, seed, benchmark, report, and destroy workflows.
 - `scripts/publish_results.rb`: local benchmark result publisher for ignored `results/YYYYMMDD-HHMMSS-provider-profile/` artifacts.
 - `scripts/synthea_loader.rb`: FHIR R4 transaction-bundle loader and dataset metadata writer.
+- `scripts/echis_seed.rb`: deterministic, shardable household/CHW FHIR dataset generator for the eCHIS progressive benchmark (spec 008).
+- `scripts/merge_seed_shards.rb`, `scripts/merge_k6_shards.rb`: combine per-shard dataset/k6 summary output from `manifests/seed-job/`, `manifests/k6-shard-job/` Indexed Jobs into one comparable result.
 - `results/`: ignored local benchmark report publications; do not commit generated result artifacts.
 - `docs/benchmark-lab-epic.md`: issue #18 acceptance mapping for the full benchmark lab workflow.
 - `docs/getting-started-benchmark-lab.md`: first-run guide for provisioning a lab instance and running benchmarks with the helper scripts.
@@ -85,6 +87,8 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `docs/autoscaling.md`: KEDA rollout, connection-budget math, PgBouncer threshold, verification, and rollback.
 - `docs/runtime-rollout.md`: JVM flags, graceful shutdown, topology spread, PDB alignment, and rollout verification.
 - `docs/indexing-strategy.md`: D6 decision memo for disabled advanced indexing.
+- `docs/echis-benchmark-tiers.md`: progressive eCHIS household/CHW benchmark tier definitions (T2-T5), `scripts/lab --echis-tier` sequencing guard, and known gaps (spec 008).
+- `docs/echis-data-model.md`: eCHIS FHIR resource shape memo for `scripts/echis_seed.rb`'s generated dataset (spec 008).
 - `specs/`: Spec Kit workstream specs for the Rev2 child issues.
 
 ## Prerequisites

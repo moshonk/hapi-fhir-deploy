@@ -18,12 +18,17 @@ PATIENTS=""
 SEED=""
 PROFILE=""
 ECHIS_TIER=""
+HOUSEHOLDS=""
+INDIVIDUALS_PER_HOUSEHOLD=""
+PARALLEL_SHARDS=""
+IN_CLUSTER=false
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
 GENERATE_ONLY=false
 TF_VARS=()
 ANSIBLE_EXTRA_VARS=()
+SEED_GENERATOR_MODE="${LAB_SEED_GENERATOR_MODE:-synthea}"
 
 usage() {
   cat <<'USAGE'
@@ -31,7 +36,13 @@ Usage:
   scripts/lab up --cloud aws|azure|gcp --name NAME [--auto-approve] [--var key=value]
   scripts/lab deploy --cloud aws|azure|gcp --name NAME [--extra-vars key=value]
   scripts/lab seed --patients N --seed S [--run RUN_ID] [--generate-only]
+  scripts/lab seed --households N --seed S [--individuals-per-household N] [--run RUN_ID] [--generate-only]
+    (LAB_SEED_GENERATOR_MODE=native; add --in-cluster --parallel-shards N to run
+    scripts/echis_seed.rb as a distributed Kubernetes Indexed Job instead of a
+    single local process)
   scripts/lab benchmark --profile smoke|baseline|load|stress [--echis-tier T2|T3|T4|T5] [--run RUN_ID]
+    (add --in-cluster --parallel-shards N to run benchmarks/k6/echis_load_100.js
+    as a distributed Kubernetes Indexed Job instead of a single local k6 process)
   scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
 
@@ -51,7 +62,13 @@ Environment:
   LAB_KUBECONFIG          Explicit kubeconfig path for deploy; otherwise uses generated lab kubeconfig.
   SYNTHEA_CMD             Synthea executable path; otherwise synthea or $SYNTHEA_HOME/run_synthea.
   SYNTHEA_CONFIG          Synthea properties file; defaults to benchmarks/synthea/synthea.properties.
-  LAB_SEED_LOADER_CMD     Loader command; defaults to scripts/synthea_loader.rb.
+  LAB_SEED_LOADER_CMD     Synthea-mode loader command; defaults to scripts/synthea_loader.rb.
+                          Only used when LAB_SEED_GENERATOR_MODE=synthea (the default).
+  LAB_ECHIS_SEED_CMD      Native-mode eCHIS generator command; defaults to
+                          scripts/echis_seed.rb. Only used when
+                          LAB_SEED_GENERATOR_MODE=native -- a distinct env var from
+                          LAB_SEED_LOADER_CMD so overriding one mode's command can't
+                          accidentally get invoked with the other mode's flags.
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
@@ -63,6 +80,14 @@ Environment:
                           Set to "true" to attest the PgBouncer pooled tier (spec 007,
                           enable_pgbouncer: true) is deployed and validated; required by
                           --echis-tier T4 or T5.
+  LAB_SEED_GENERATOR_MODE
+                          synthea (default, existing behavior unchanged) or native
+                          (invokes scripts/echis_seed.rb directly with --households,
+                          skipping Synthea entirely; requires --households not
+                          --patients).
+  KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster.
+  LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
+                          defaults to echis-shard-output. Used by --in-cluster.
 USAGE
 }
 
@@ -136,6 +161,25 @@ parse_args() {
         [[ -n "${2:-}" ]] || die "--echis-tier requires a value (T2, T3, T4, or T5)"
         ECHIS_TIER="$2"
         shift 2
+        ;;
+      --households)
+        [[ -n "${2:-}" ]] || die "--households requires a value"
+        HOUSEHOLDS="$2"
+        shift 2
+        ;;
+      --individuals-per-household)
+        [[ -n "${2:-}" ]] || die "--individuals-per-household requires a value"
+        INDIVIDUALS_PER_HOUSEHOLD="$2"
+        shift 2
+        ;;
+      --parallel-shards)
+        [[ -n "${2:-}" ]] || die "--parallel-shards requires a value"
+        PARALLEL_SHARDS="$2"
+        shift 2
+        ;;
+      --in-cluster)
+        IN_CLUSTER=true
+        shift
         ;;
       --auto-approve)
         AUTO_APPROVE=true
@@ -368,7 +412,163 @@ seed_loader_bin() {
   printf '%s' "${LAB_SEED_LOADER_CMD:-$ROOT_DIR/scripts/synthea_loader.rb}"
 }
 
+kubectl_bin() {
+  printf '%s' "${KUBECTL_BIN:-kubectl}"
+}
+
+shard_output_pvc() {
+  printf '%s' "${LAB_SHARD_OUTPUT_PVC:-echis-shard-output}"
+}
+
+# Renders a Job manifest template's <ANGLE_BRACKET> placeholder tokens (see
+# manifests/seed-job/README.md, manifests/k6-shard-job/README.md) via sed.
+# Pass token/value pairs after the template and output paths.
+render_job_manifest() {
+  local template="$1" rendered="$2"
+  shift 2
+  (($# % 2 == 0)) || die "render_job_manifest requires an even number of token/value arguments"
+
+  local sed_args=()
+  while [[ $# -gt 0 ]]; do
+    local token="$1" value="$2"
+    # Escape sed's replacement-side special characters (backslash first, so
+    # the escapes added for & and | aren't themselves re-escaped) and the
+    # s|...|...| delimiter itself, so a value containing any of these (e.g.
+    # a FHIR_BASE_URL with a query string) round-trips literally instead of
+    # corrupting the rendered manifest.
+    local escaped_value="${value//\\/\\\\}"
+    escaped_value="${escaped_value//&/\\&}"
+    escaped_value="${escaped_value//|/\\|}"
+    sed_args+=(-e "s|$token|$escaped_value|g")
+    shift 2
+  done
+  sed "${sed_args[@]}" "$template" > "$rendered"
+}
+
 cmd_seed() {
+  case "$SEED_GENERATOR_MODE" in
+    synthea|native) ;;
+    *) die "unsupported LAB_SEED_GENERATOR_MODE '$SEED_GENERATOR_MODE'; expected synthea or native" ;;
+  esac
+
+  if [[ "$SEED_GENERATOR_MODE" == "native" ]]; then
+    cmd_seed_native
+    return 0
+  fi
+
+  cmd_seed_synthea
+}
+
+cmd_seed_native() {
+  [[ -n "$HOUSEHOLDS" ]] || die "--households is required when LAB_SEED_GENERATOR_MODE=native"
+  [[ "$HOUSEHOLDS" =~ ^[0-9]+$ ]] || die "--households must be a positive integer"
+  [[ "$HOUSEHOLDS" -gt 0 ]] || die "--households must be greater than zero"
+  [[ -n "$SEED" ]] || die "--seed is required"
+  [[ "$SEED" =~ ^[0-9]+$ ]] || die "--seed must be a non-negative integer"
+
+  if [[ -z "$RUN_ID" ]]; then
+    RUN_ID="$(timestamp)-seed"
+  fi
+  validate_run_id
+
+  if [[ "$IN_CLUSTER" == true ]]; then
+    cmd_seed_native_in_cluster
+    return 0
+  fi
+
+  local dir
+  dir="$(run_dir)"
+  mkdir -p "$dir"
+  local metadata_file="$dir/dataset-metadata.json"
+  local loader_cmd="${LAB_ECHIS_SEED_CMD:-$ROOT_DIR/scripts/echis_seed.rb}"
+  need_command_unless_dry_run "$loader_cmd"
+
+  if [[ "$GENERATE_ONLY" != true && "$DRY_RUN" != true ]]; then
+    [[ -n "${FHIR_BASE_URL:-}" ]] || die "FHIR_BASE_URL is required unless --generate-only is set"
+  elif [[ "$GENERATE_ONLY" != true && -z "${FHIR_BASE_URL:-}" ]]; then
+    log "Dry run: FHIR_BASE_URL is not set and would be required for import"
+  fi
+
+  local loader_args=(
+    --households "$HOUSEHOLDS"
+    --seed "$SEED"
+    --run-id "$RUN_ID"
+    --metadata "$metadata_file"
+  )
+  if [[ -n "$INDIVIDUALS_PER_HOUSEHOLD" ]]; then
+    loader_args+=(--individuals-per-household "$INDIVIDUALS_PER_HOUSEHOLD")
+  fi
+  if [[ "$GENERATE_ONLY" == true ]]; then
+    loader_args+=(--metadata-only)
+  elif [[ -n "${FHIR_BASE_URL:-}" ]]; then
+    loader_args+=(--fhir-base-url "$FHIR_BASE_URL")
+  else
+    loader_args+=(--fhir-base-url "http://example.invalid/fhir")
+  fi
+
+  log "Generating native eCHIS dataset (single process) via $loader_cmd"
+  run "$loader_cmd" "${loader_args[@]}"
+}
+
+# Renders manifests/seed-job/echis-seed-job.yaml, applies it, and waits for
+# completion -- distributing generation across --parallel-shards Kubernetes
+# Job pods instead of one local process, per contracts/shard-job.md. The
+# final merge step (scripts/merge_seed_shards.rb) is left as a follow-up: it
+# needs a path into the shard-output PVC, which is cluster/storage-class
+# specific and out of this command's scope (contracts/shard-job.md's own
+# Non-goals section defers per-cloud storage sizing/access the same way).
+cmd_seed_native_in_cluster() {
+  local shard_count="${PARALLEL_SHARDS:-1}"
+  [[ "$shard_count" =~ ^[0-9]+$ && "$shard_count" -gt 0 ]] || die "--parallel-shards must be a positive integer"
+
+  local manifest_template="$ROOT_DIR/manifests/seed-job/echis-seed-job.yaml"
+  [[ -f "$manifest_template" ]] || die "seed Job manifest not found: $manifest_template"
+
+  local dir
+  dir="$(run_dir)"
+  mkdir -p "$dir"
+  local rendered="$dir/echis-seed-job.rendered.yaml"
+
+  local fhir_base_url="${FHIR_BASE_URL:-}"
+  if [[ -z "$fhir_base_url" ]]; then
+    [[ "$GENERATE_ONLY" == true ]] || die "FHIR_BASE_URL is required for --in-cluster unless --generate-only is set"
+    fhir_base_url="http://example.invalid/fhir"
+  fi
+
+  local individuals_per_household="${INDIVIDUALS_PER_HOUSEHOLD:-3}"
+  local configmap_name="echis-seed-job-scripts"
+  local pvc_name
+  pvc_name="$(shard_output_pvc)"
+
+  log "Rendering $manifest_template for $shard_count shard(s)"
+  render_job_manifest "$manifest_template" "$rendered" \
+    "<SHARD_COUNT>" "$shard_count" \
+    "<HOUSEHOLDS_TOTAL>" "$HOUSEHOLDS" \
+    "<INDIVIDUALS_PER_HOUSEHOLD>" "$individuals_per_household" \
+    "<SEED>" "$SEED" \
+    "<RUN_ID>" "$RUN_ID" \
+    "<FHIR_BASE_URL>" "$fhir_base_url" \
+    "<SEED_SCRIPTS_CONFIGMAP>" "$configmap_name" \
+    "<SHARD_OUTPUT_PVC>" "$pvc_name"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+
+  log "Creating/updating ConfigMap $configmap_name from scripts/echis_seed.rb"
+  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+
+  log "Applying rendered seed Job: $rendered"
+  run "$kbin" apply -f "$rendered"
+
+  log "Waiting for seed Job to complete ($shard_count shard(s))"
+  run "$kbin" wait --for=condition=complete job/echis-seed-job -n fhir --timeout=3600s
+
+  log "Job complete. Shard output lives on PVC $pvc_name; merge with:"
+  log "  ruby scripts/merge_seed_shards.rb --shard-dir <path into PVC $pvc_name> --shard-count $shard_count --output $dir/dataset-metadata.json"
+}
+
+cmd_seed_synthea() {
   [[ -n "$PATIENTS" ]] || die "--patients is required"
   [[ "$PATIENTS" =~ ^[0-9]+$ ]] || die "--patients must be a positive integer"
   [[ "$PATIENTS" -gt 0 ]] || die "--patients must be greater than zero"
@@ -517,6 +717,61 @@ record_echis_tier_progress() {
   ' "$progress_file" "$tier"
 }
 
+# Renders manifests/k6-shard-job/echis-k6-shard-job.yaml, applies it, and
+# waits for completion -- distributing k6 load generation across
+# --parallel-shards Kubernetes Job pods instead of one local k6 process, per
+# contracts/shard-job.md. Always targets benchmarks/k6/echis_load_100.js,
+# matching the manifest's own hardcoded ConfigMap items -- see
+# manifests/k6-shard-job/README.md's sharding strategy note (aggregate
+# concurrency is that script's own VU target multiplied by shard count).
+# K6_SCRIPT is intentionally not honored here since the manifest's ConfigMap
+# item mapping is static; retargeting requires updating both together. The
+# final merge step (scripts/merge_k6_shards.rb) is left as a follow-up, same
+# reason as cmd_seed_native_in_cluster.
+cmd_benchmark_in_cluster() {
+  local shard_count="${PARALLEL_SHARDS:-1}"
+  [[ "$shard_count" =~ ^[0-9]+$ && "$shard_count" -gt 0 ]] || die "--parallel-shards must be a positive integer"
+
+  local manifest_template="$ROOT_DIR/manifests/k6-shard-job/echis-k6-shard-job.yaml"
+  [[ -f "$manifest_template" ]] || die "k6 shard Job manifest not found: $manifest_template"
+
+  local dir
+  dir="$(run_dir)"
+  mkdir -p "$dir"
+  local rendered="$dir/echis-k6-shard-job.rendered.yaml"
+  local configmap_name="echis-k6-shard-job-scripts"
+  local pvc_name
+  pvc_name="$(shard_output_pvc)"
+  local k6_script="$ROOT_DIR/benchmarks/k6/echis_load_100.js"
+  [[ -f "$k6_script" ]] || die "k6 script not found: $k6_script"
+  if [[ -n "${K6_SCRIPT:-}" && "$K6_SCRIPT" != "$k6_script" ]]; then
+    die "K6_SCRIPT is set to '$K6_SCRIPT' but --in-cluster always targets $k6_script (the manifest's ConfigMap items are static, per manifests/k6-shard-job/README.md's sharding strategy); unset K6_SCRIPT, or retarget both the manifest and this command together"
+  fi
+
+  log "Rendering $manifest_template for $shard_count shard(s)"
+  render_job_manifest "$manifest_template" "$rendered" \
+    "<SHARD_COUNT>" "$shard_count" \
+    "<FHIR_BASE_URL>" "$FHIR_BASE_URL" \
+    "<K6_SCRIPTS_CONFIGMAP>" "$configmap_name" \
+    "<SHARD_OUTPUT_PVC>" "$pvc_name"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+
+  log "Creating/updating ConfigMap $configmap_name from $k6_script"
+  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_load_100.js=\"$k6_script\" --from-file=fhir_benchmark.js=\"$ROOT_DIR/benchmarks/k6/lib/fhir_benchmark.js\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+
+  log "Applying rendered k6 shard Job: $rendered"
+  run "$kbin" apply -f "$rendered"
+
+  log "Waiting for k6 shard Job to complete ($shard_count shard(s))"
+  run "$kbin" wait --for=condition=complete job/echis-k6-shard-job -n fhir --timeout=7200s
+
+  log "Job complete. Shard output lives on PVC $pvc_name; merge with:"
+  log "  ruby scripts/merge_k6_shards.rb --shard-dir <path into PVC $pvc_name> --shard-count $shard_count --output $dir/k6-fhir-summary.json"
+}
+
 cmd_benchmark() {
   require_profile
   if [[ -n "$ECHIS_TIER" ]]; then
@@ -528,6 +783,14 @@ cmd_benchmark() {
   fi
   validate_run_id
   [[ -n "${FHIR_BASE_URL:-}" ]] || die "FHIR_BASE_URL is required for benchmark"
+
+  if [[ "$IN_CLUSTER" == true ]]; then
+    cmd_benchmark_in_cluster
+    if [[ -n "$ECHIS_TIER" ]]; then
+      record_echis_tier_progress "$ECHIS_TIER"
+    fi
+    return 0
+  fi
 
   local k6_bin="${K6_BIN:-k6}"
   need_command_unless_dry_run "$k6_bin"

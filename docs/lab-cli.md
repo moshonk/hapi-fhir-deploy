@@ -64,6 +64,24 @@ scripts/lab seed --patients 1000 --seed 12345 --run baseline-aws --generate-only
 
 Set `LAB_SEED_LOADER_CMD` to replace the default loader with another command that accepts the same loader CLI flags.
 
+#### Native (non-Synthea) generator mode
+
+Set `LAB_SEED_GENERATOR_MODE=native` to skip Synthea entirely and generate a
+deterministic eCHIS household/CHW dataset via `scripts/echis_seed.rb`
+directly. Use `--households`/`--individuals-per-household` instead of
+`--patients`:
+
+```sh
+LAB_SEED_GENERATOR_MODE=native FHIR_BASE_URL=https://example/fhir \
+scripts/lab seed --households 33333 --individuals-per-household 3 --seed 12345 --run echis-t2
+```
+
+Add `--in-cluster --parallel-shards N` to distribute generation across `N`
+Kubernetes Job pods (`manifests/seed-job/echis-seed-job.yaml`) instead of one
+local process — see `docs/echis-benchmark-tiers.md` and
+`manifests/seed-job/README.md` for the ConfigMap/PVC prerequisites and the
+`scripts/merge_seed_shards.rb` follow-up step this leaves for the operator.
+
 ### Benchmark
 
 ```sh
@@ -92,6 +110,26 @@ scripts/lab benchmark --profile baseline --run baseline-aws
 ```
 
 Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-jpaserver-.*`, Hikari pool size `10`, two replicas, and maximum Hikari utilization `0.8`. Override with `HAPI_NAMESPACE`, `HAPI_POD_REGEX`, `HIKARI_MAX_POOL_SIZE`, `HAPI_REPLICAS`, `HIKARI_MAX_UTILIZATION`, `POD_RESTARTS_QUERY`, `HIKARI_ACTIVE_QUERY`, or `HIKARI_MAX_QUERY` when the target environment differs.
+
+#### eCHIS progressive tiers
+
+Use `K6_SCRIPT=benchmarks/k6/echis_load_100.js` (or another `echis_load_*.js`
+tier script) with `--echis-tier T2|T3|T4|T5` to run a progressive eCHIS tier
+locally, under the sequencing/pooled-tier-attestation guard described in
+`docs/echis-benchmark-tiers.md`.
+
+Add `--in-cluster --parallel-shards N` to distribute k6 load generation
+across `N` Kubernetes Job pods (`manifests/k6-shard-job/echis-k6-shard-job.yaml`)
+instead of one local k6 process. **`--in-cluster` does not honor `K6_SCRIPT`**
+— it always targets `benchmarks/k6/echis_load_100.js`, matching the
+manifest's own static ConfigMap item mapping (`scripts/lab` errors out if
+`K6_SCRIPT` is set to anything else, rather than silently ignoring it).
+Retargeting an in-cluster run at a different tier script requires updating
+the manifest's `args`/ConfigMap `items` and this command together — see
+`manifests/k6-shard-job/README.md` for the sharding strategy (aggregate
+concurrency is the target script's own VU count multiplied by shard count),
+the ConfigMap/PVC prerequisites, and the `scripts/merge_k6_shards.rb`
+follow-up step this leaves for the operator.
 
 ### Report
 
