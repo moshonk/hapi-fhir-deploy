@@ -98,16 +98,74 @@ infrastructure this sandbox doesn't have:
 A live T2 run against a real cluster remains an open action item for whoever has
 cloud access, tracked against issue #43.
 
+## Quickstart end-to-end status (T039)
+
+`specs/008-echis-workload-benchmark/quickstart.md` steps 1-4 (through T3) all
+need either a live Kubernetes cluster, a live FHIR server, or both — this
+sandbox has neither. Status per step:
+
+1. **Sharding mechanism against existing tooling**: verified locally, not via
+   the live `kubectl apply` shown in the quickstart — see PR #56 (T030/T032),
+   which ran `merge_seed_shards.rb`/`merge_k6_shards.rb` against real sharded
+   `echis_seed.rb --metadata-only` output and hand-crafted k6 summary
+   fixtures, including a deliberate missing-shard failure injection.
+2. **Small eCHIS dataset locally**: run for real in this sandbox (no live
+   server needed with `--metadata-only`): `scripts/echis_seed.rb --households
+   100 --individuals-per-household 3 --seed 12345 --run-id local-smoke
+   --metadata-only` produced 1,752 entries, matching the cardinality formula
+   in `docs/echis-data-model.md` exactly (not just within the spec's 1%
+   tolerance).
+3. **T2 under the new data model**: **blocked** — needs a live FHIR server to
+   run `echis_load_100.js` against and compare real p95/p99/failure-rate
+   numbers to the proven `load_100.js` baseline. Not performed here.
+4. **T3 first real result**: **blocked** — same live-server dependency as
+   step 3, plus a live cluster for `scripts/lab report` to publish against.
+   Not performed here.
+5. **Calibration spike**: already documented as dependent on spec 007's
+   pooled tier being validated first; not attempted.
+6. **T4**: blocked on spec 007, same as above.
+7. **T5**: blocked on spec 007, same as above.
+8. **Comparability across tiers**: verified, but structurally rather than
+   against real tier runs — see PR #57 (T035), which confirmed
+   `environment.json`'s field set and `report.md`'s section headings are
+   identical across a single-shard dataset and a merged multi-shard dataset.
+
+Live steps 3 and 4 remain open action items for whoever has cloud access,
+tracked against issue #48.
+
 ## `handleSummary` fields
 
 Each `echis_load_*.js` script stamps, in addition to the existing
 `concurrency_target`/`patient_load_target` fields `load_100.js`/`load_1000.js`
 already use:
 
-- `individual_load_target` — target individual (Patient) count for the tier.
+- `individual_load_target` — actual individual (Patient) count `scripts/echis_seed.rb`
+  produces for the tier's documented `--households` invocation (see the tier table
+  above; not the illustrative round target).
 - `household_load_target` — target household (Group) count for the tier.
-- `total_record_load_target` — target total FHIR resource count for the tier,
-  per the illustrative budget in `data-model.md`.
+- `total_record_load_target` — actual total FHIR resource count `scripts/echis_seed.rb`
+  produces for the tier (see the tier table above), not the illustrative budget in
+  `data-model.md` (they diverge — see `docs/echis-data-model.md`'s "Known deviation
+  from the illustrative budget" section).
+
+## Known gap: no per-user authentication (spec FR-013)
+
+The `echis` k6 workload (and the generic workload it extends) sends plain,
+unauthenticated HTTP requests — every simulated CHW, regardless of VU index,
+issues the same anonymous `GET`/`POST`/`PUT` traffic against `FHIR_BASE_URL`.
+This is a deliberate, explicit gap, not a silent omission: a real eCHIS
+deployment would authenticate each CHW individually (e.g. per-CHW
+SMART-on-FHIR/OAuth2 bearer tokens issued at VU init), and login/token-refresh
+traffic, authorization-failure rates, and per-user rate limiting are real
+production concerns this benchmark does not exercise or measure. Throughput,
+latency, and connection-budget numbers from any tier here should be read as
+"unauthenticated request-handling capacity," not as a prediction of
+authenticated production capacity — a real IAM layer (token validation,
+session lookups, authorization checks) could materially change the FHIR
+server's or database's load profile. Scoping a full simulated-auth workload
+(lightweight bearer-token issuance/validation per VU, at minimum) is a
+follow-up enhancement, not built here — tracked as an open item, not a task
+in this spec's scope.
 
 ## Executor design (dual-scenario, per `research.md` Decision 7)
 
