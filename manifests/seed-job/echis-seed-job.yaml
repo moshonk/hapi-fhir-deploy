@@ -1,0 +1,80 @@
+# Distributed eCHIS dataset seed generation, per
+# specs/008-echis-workload-benchmark/contracts/shard-job.md and issue #46 (US4).
+#
+# This file uses <ANGLE_BRACKET> placeholder tokens that MUST be substituted
+# before `kubectl apply` (e.g. via `envsubst`, or a future `scripts/lab`
+# wiring step -- tracked as tasks.md T038, not yet implemented). See
+# manifests/seed-job/README.md for the required substitutions and the
+# ConfigMap/PVC this manifest expects to already exist.
+#
+# Targets scripts/echis_seed.rb (tasks.md T031), whose --shard-index/
+# --shard-count flags give each shard a genuinely disjoint household index
+# range -- unlike the scripts/minimal_fhir_seed.rb de-risking stage this
+# manifest started from (see git history), shards here do NOT overlap IDs,
+# except for the documented, idempotent-safe CHW catchment redundancy at
+# shard boundaries (scripts/echis_seed.rb's own header comment).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: echis-seed-job
+  namespace: fhir
+  labels:
+    app.kubernetes.io/name: echis-seed-job
+    app.kubernetes.io/part-of: hapi-fhir
+  annotations:
+    hapi-fhir-deploy.moshonk.dev/issue: "46"
+    hapi-fhir-deploy.moshonk.dev/contract: specs/008-echis-workload-benchmark/contracts/shard-job.md
+spec:
+  completionMode: Indexed
+  parallelism: <SHARD_COUNT>
+  completions: <SHARD_COUNT>
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: echis-seed-job
+        app.kubernetes.io/part-of: hapi-fhir
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: docker.io/library/ruby:3.3.12-alpine3.24@sha256:c162e46df6458be2bc169956f207225abd4b017adc0f0a6f7ad50640b93fcf82
+          command: ["ruby", "/scripts/echis_seed.rb"]
+          args:
+            - "--households"
+            - "<HOUSEHOLDS_TOTAL>"
+            - "--individuals-per-household"
+            - "<INDIVIDUALS_PER_HOUSEHOLD>"
+            - "--seed"
+            - "<SEED>"
+            - "--run-id"
+            - "<RUN_ID>"
+            - "--metadata"
+            - "/shard-output/shard-$(SHARD_INDEX)-dataset-metadata.json"
+            - "--fhir-base-url"
+            - "<FHIR_BASE_URL>"
+            - "--shard-index"
+            - "$(SHARD_INDEX)"
+            - "--shard-count"
+            - "<SHARD_COUNT>"
+          env:
+            - name: SHARD_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: "metadata.annotations['batch.kubernetes.io/job-completion-index']"
+            - name: SHARD_COUNT
+              value: "<SHARD_COUNT>"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shard-output
+              mountPath: /shard-output
+      volumes:
+        - name: scripts
+          configMap:
+            name: <SEED_SCRIPTS_CONFIGMAP>
+            defaultMode: 0555
+        - name: shard-output
+          persistentVolumeClaim:
+            claimName: <SHARD_OUTPUT_PVC>

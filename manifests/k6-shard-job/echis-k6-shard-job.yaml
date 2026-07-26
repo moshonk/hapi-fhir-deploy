@@ -1,0 +1,85 @@
+# Distributed k6 load generation, per
+# specs/008-echis-workload-benchmark/contracts/shard-job.md and issue #46 (US4).
+#
+# This file uses <ANGLE_BRACKET> placeholder tokens that MUST be substituted
+# before `kubectl apply` (e.g. via `envsubst`, or a future `scripts/lab`
+# wiring step -- tracked as tasks.md T038, not yet implemented). See
+# manifests/k6-shard-job/README.md for the required substitutions and the
+# ConfigMap/PVC this manifest expects to already exist.
+#
+# Targets benchmarks/k6/echis_load_100.js (tasks.md T031). (It started out
+# pointed at benchmarks/k6/smoke.js for de-risking the Job mechanism itself,
+# before US2/US3 existed -- see git history and tasks.md T027's note.)
+#
+# Sharding strategy: each shard pod runs the SAME, UNMODIFIED tier script in
+# full (echis_load_100.js hardcodes its own VU stage targets, 25->50->100 --
+# it is not parametrized per-shard). Aggregate concurrency is the chosen
+# script's own VU target multiplied by SHARD_COUNT, per this contract's
+# Independent Test ("confirm the combined result matches a single-worker run
+# for an equivalent SMALLER target"). E.g. SHARD_COUNT=10 with
+# echis_load_100.js approximates ~1,000 aggregate VUs (a distributed
+# stand-in for T3); SHARD_COUNT=1000 approximates ~100,000 (T5) -- pick
+# whichever committed echis_load_*.js script's own target, multiplied by
+# SHARD_COUNT, is closest to the concurrency you actually want, and swap the
+# script filename in this manifest's args/ConfigMap items accordingly.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: echis-k6-shard-job
+  namespace: fhir
+  labels:
+    app.kubernetes.io/name: echis-k6-shard-job
+    app.kubernetes.io/part-of: hapi-fhir
+  annotations:
+    hapi-fhir-deploy.moshonk.dev/issue: "46"
+    hapi-fhir-deploy.moshonk.dev/contract: specs/008-echis-workload-benchmark/contracts/shard-job.md
+spec:
+  completionMode: Indexed
+  parallelism: <SHARD_COUNT>
+  completions: <SHARD_COUNT>
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: echis-k6-shard-job
+        app.kubernetes.io/part-of: hapi-fhir
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629
+          command: ["k6", "run"]
+          args:
+            - "-e"
+            - "FHIR_BASE_URL=<FHIR_BASE_URL>"
+            - "-e"
+            - "K6_FHIR_SUMMARY_PATH=/shard-output/shard-$(SHARD_INDEX)-k6-fhir-summary.json"
+            - "--summary-export"
+            - "/shard-output/shard-$(SHARD_INDEX)-k6-summary.json"
+            - "/scripts/echis_load_100.js"
+          env:
+            - name: SHARD_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: "metadata.annotations['batch.kubernetes.io/job-completion-index']"
+            - name: SHARD_COUNT
+              value: "<SHARD_COUNT>"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shard-output
+              mountPath: /shard-output
+      volumes:
+        - name: scripts
+          configMap:
+            name: <K6_SCRIPTS_CONFIGMAP>
+            defaultMode: 0555
+            items:
+              - key: echis_load_100.js
+                path: echis_load_100.js
+              - key: fhir_benchmark.js
+                path: lib/fhir_benchmark.js
+        - name: shard-output
+          persistentVolumeClaim:
+            claimName: <SHARD_OUTPUT_PVC>

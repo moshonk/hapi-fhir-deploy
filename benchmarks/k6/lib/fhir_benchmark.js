@@ -74,6 +74,11 @@ export const observationSearchTotal = new Counter("fhir_operation_observation_se
 export const encounterSearchTotal = new Counter("fhir_operation_encounter_search_total");
 export const conditionSearchTotal = new Counter("fhir_operation_condition_search_total");
 export const bulkExportTotal = new Counter("fhir_operation_bulk_export_total");
+export const householdSyncWriteTotal = new Counter("fhir_operation_household_sync_write_total");
+export const registrationWriteTotal = new Counter("fhir_operation_registration_write_total");
+export const worklistReadTotal = new Counter("fhir_operation_worklist_read_total");
+export const householdRosterReadTotal = new Counter("fhir_operation_household_roster_read_total");
+export const supervisorDashboardReadTotal = new Counter("fhir_operation_supervisor_dashboard_read_total");
 
 const OPERATION_COUNTERS = {
   capability_statement: capabilityStatementTotal,
@@ -82,7 +87,12 @@ const OPERATION_COUNTERS = {
   observation_search: observationSearchTotal,
   encounter_search: encounterSearchTotal,
   condition_search: conditionSearchTotal,
-  bulk_export: bulkExportTotal
+  bulk_export: bulkExportTotal,
+  household_sync_write: householdSyncWriteTotal,
+  registration_write: registrationWriteTotal,
+  worklist_read: worklistReadTotal,
+  household_roster_read: householdRosterReadTotal,
+  supervisor_dashboard_read: supervisorDashboardReadTotal
 };
 
 export function profileOptions(profile) {
@@ -217,11 +227,30 @@ export function runBaselineGates(data) {
 }
 
 export function benchmarkSummary(data, profile) {
+  // total_requests/failed_requests/duration_seconds exist so a multi-shard run
+  // (scripts/merge_k6_shards.rb, spec 008 US4) can recompute merged throughput
+  // and failure rate from summed absolute counts, per
+  // specs/008-echis-workload-benchmark/contracts/merged-report.md -- a rate
+  // alone can't be summed or averaged across shards without distorting it.
+  const totalRequests = metricValue(data.metrics.http_reqs, "count") || 0;
+  const httpFailureRate = metricValue(data.metrics.http_req_failed, "rate") || 0;
+  // http_req_failed is a Rate metric, whose k6 summary values include an exact
+  // "fails" count alongside the rate -- prefer it over round(total * rate),
+  // which can drift from the true count and would make merge_k6_shards.rb
+  // recompute merged failure rates from already-inaccurate inputs.
+  const exactFailedRequests = metricValue(data.metrics.http_req_failed, "fails");
+  const failedRequests = exactFailedRequests !== null ? exactFailedRequests : Math.round(totalRequests * httpFailureRate);
+  const durationSeconds =
+    data.state && typeof data.state.testRunDurationMs === "number" ? data.state.testRunDurationMs / 1000 : null;
+
   const summary = {
     profile: profile || __ENV.PROFILE || "unknown",
     latency_ms: trendSummary(data.metrics.http_req_duration),
     throughput_reqs_per_sec: metricValue(data.metrics.http_reqs, "rate"),
-    http_failure_rate: metricValue(data.metrics.http_req_failed, "rate"),
+    http_failure_rate: httpFailureRate,
+    total_requests: totalRequests,
+    failed_requests: failedRequests,
+    duration_seconds: durationSeconds,
     operation_mix: operationMix(data.metrics),
     gates: {
       health_success_rate: metricValue(data.metrics.fhir_health_success, "rate"),
@@ -851,7 +880,12 @@ function operationMix(metrics) {
     observation_search: metricValue(metrics.fhir_operation_observation_search_total, "count") || 0,
     encounter_search: metricValue(metrics.fhir_operation_encounter_search_total, "count") || 0,
     condition_search: metricValue(metrics.fhir_operation_condition_search_total, "count") || 0,
-    bulk_export: metricValue(metrics.fhir_operation_bulk_export_total, "count") || 0
+    bulk_export: metricValue(metrics.fhir_operation_bulk_export_total, "count") || 0,
+    household_sync_write: metricValue(metrics.fhir_operation_household_sync_write_total, "count") || 0,
+    registration_write: metricValue(metrics.fhir_operation_registration_write_total, "count") || 0,
+    worklist_read: metricValue(metrics.fhir_operation_worklist_read_total, "count") || 0,
+    household_roster_read: metricValue(metrics.fhir_operation_household_roster_read_total, "count") || 0,
+    supervisor_dashboard_read: metricValue(metrics.fhir_operation_supervisor_dashboard_read_total, "count") || 0
   };
 }
 
