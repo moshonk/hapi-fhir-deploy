@@ -497,21 +497,33 @@ function bulkExport(data) {
 // registrationWrite creates a genuinely new household
 // (echis-hh-vu<VU>-reg<ITER>), representing new registrations happening
 // over the course of the run.
+//
+// __VU is local to each k6 process: running this workload distributed across
+// manifests/k6-shard-job/ pods (multiple independent k6 processes, each with
+// its own VU numbering starting at 1) would otherwise collide every shard's
+// VU N onto the identical resource IDs, serializing writes across shards on
+// the same rows. SHARD_ID disambiguates them; it defaults to "0" so a single,
+// non-sharded k6 run is unaffected.
+const SHARD_ID = __ENV.SHARD_INDEX || "0";
 
 function householdSyncWrite(data) {
   const vu = __VU;
   const iter = __ITER;
-  const householdId = `echis-hh-vu${vu}`;
-  const patientId = `echis-p-vu${vu}`;
-  const chwId = `echis-chw-vu${vu}`;
-  const encounterId = `echis-enc-vu${vu}-${iter}`;
-  const observationId = `echis-obs-vu${vu}-${iter}`;
-  const conditionId = `echis-cond-vu${vu}-${iter}`;
-  const questionnaireResponseId = `echis-qr-vu${vu}-${iter}`;
-  const taskId = `echis-task-vu${vu}`;
+  const householdId = `echis-hh-s${SHARD_ID}-vu${vu}`;
+  const patientId = `echis-p-s${SHARD_ID}-vu${vu}`;
+  const chwId = `echis-chw-s${SHARD_ID}-vu${vu}`;
+  const encounterId = `echis-enc-s${SHARD_ID}-vu${vu}-${iter}`;
+  const observationId = `echis-obs-s${SHARD_ID}-vu${vu}-${iter}`;
+  const conditionId = `echis-cond-s${SHARD_ID}-vu${vu}-${iter}`;
+  const questionnaireResponseId = `echis-qr-s${SHARD_ID}-vu${vu}-${iter}`;
+  const taskId = `echis-task-s${SHARD_ID}-vu${vu}`;
   const now = new Date().toISOString();
 
   const bundle = echisTransactionBundle([
+    // taskResource below references this by id -- must exist in the same
+    // transaction, since nothing else in this workload ever creates a
+    // PractitionerRole, and Task.owner is validated on write (HAPI-1094).
+    practitionerRoleResource(chwId),
     householdResource(householdId, [patientId]),
     patientResource(patientId, vu),
     encounterResource(encounterId, patientId, now),
@@ -533,9 +545,9 @@ function householdSyncWrite(data) {
 function registrationWrite(data) {
   const vu = __VU;
   const iter = __ITER;
-  const householdId = `echis-hh-vu${vu}-reg${iter}`;
-  const headPatientId = `echis-p-vu${vu}-reg${iter}`;
-  const relatedPersonId = `echis-rp-vu${vu}-reg${iter}`;
+  const householdId = `echis-hh-s${SHARD_ID}-vu${vu}-reg${iter}`;
+  const headPatientId = `echis-p-s${SHARD_ID}-vu${vu}-reg${iter}`;
+  const relatedPersonId = `echis-rp-s${SHARD_ID}-vu${vu}-reg${iter}`;
 
   const bundle = echisTransactionBundle([
     householdResource(householdId, [headPatientId]),
@@ -549,7 +561,7 @@ function registrationWrite(data) {
 }
 
 function worklistRead(data) {
-  const chwId = `echis-chw-vu${__VU}`;
+  const chwId = `echis-chw-s${SHARD_ID}-vu${__VU}`;
   requestOperation(
     data,
     "worklist_read",
@@ -559,7 +571,7 @@ function worklistRead(data) {
 }
 
 function householdRosterRead(data) {
-  const householdId = `echis-hh-vu${__VU}`;
+  const householdId = `echis-hh-s${SHARD_ID}-vu${__VU}`;
   // A _id search (not a direct instance GET) so this always returns a
   // Bundle (200), even before householdSyncWrite/registrationWrite has run
   // for this VU yet -- a direct `Group/{id}` read would 404 in that window.
@@ -718,6 +730,21 @@ function questionnaireResponseResource(id, patientId, encounterId) {
     item: [
       { linkId: "danger-signs", text: "Any danger signs observed?", answer: [{ valueBoolean: false }] }
     ]
+  };
+}
+
+function practitionerRoleResource(id) {
+  return {
+    resourceType: "PractitionerRole",
+    id,
+    active: true,
+    code: [{
+      coding: [{
+        system: "http://terminology.hl7.org/CodeSystem/practitioner-role",
+        code: "chw",
+        display: "Community Health Worker"
+      }]
+    }]
   };
 }
 

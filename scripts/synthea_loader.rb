@@ -58,8 +58,18 @@ raise LoaderError, "--patients must be greater than zero" unless patients.positi
 raise LoaderError, "--seed must be non-negative" if seed.negative?
 raise LoaderError, "--timeout must be greater than zero" unless options[:timeout].positive?
 
+SUBMITTABLE_BUNDLE_TYPES = %w[transaction batch].freeze
+
+# Synthea writes shared reference data (Practitioners, Organizations) into
+# hospitalInformation*.json / practitionerInformation*.json batch bundles,
+# which every per-patient bundle references via conditional match (e.g.
+# "Practitioner?identifier=..."). A plain alphabetical sort puts those
+# lowercase filenames after every uppercase patient name, so patient bundles
+# would 404 on their conditional references; load the reference bundles first.
 def transaction_bundle_files(input_dir)
-  Find.find(input_dir).select { |path| File.file?(path) && File.extname(path) == ".json" }.sort
+  files = Find.find(input_dir).select { |path| File.file?(path) && File.extname(path) == ".json" }.sort
+  reference_files, patient_files = files.partition { |path| File.basename(path) =~ /\A(hospital|practitioner)Information/ }
+  reference_files + patient_files
 end
 
 def parse_json_file(path)
@@ -120,11 +130,11 @@ transaction_bundle_files(input_dir).each do |path|
   json = parse_json_file(path)
   next unless json["resourceType"] == "Bundle"
 
-  if json["type"] != "transaction"
+  unless SUBMITTABLE_BUNDLE_TYPES.include?(json["type"])
     skipped_bundles << {
       "file" => path,
       "type" => json["type"],
-      "reason" => "not a transaction bundle"
+      "reason" => "not a transaction or batch bundle"
     }
     next
   end

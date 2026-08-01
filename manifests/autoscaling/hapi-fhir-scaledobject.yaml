@@ -46,7 +46,12 @@ spec:
       metricType: AverageValue
       metadata:
         serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
-        query: sum(rate(http_server_requests_seconds_count{job="hapi-fhir-actuator"}[2m]))
+        # job label is the scraped Service name (hapi_service_name in
+        # ansible/group_vars/lab.yml): the upstream HAPI FHIR chart's
+        # ServiceMonitor template has no jobLabel/relabelings support, so
+        # Prometheus Operator's default __meta_kubernetes_service_name
+        # relabeling is what actually sets this value, not "hapi-fhir-actuator".
+        query: sum(rate(http_server_requests_seconds_count{job="hapi-fhir-hapi-fhir-jpaserver"}[2m]))
         threshold: "5"
         ignoreNullValues: "false"
     - type: cpu

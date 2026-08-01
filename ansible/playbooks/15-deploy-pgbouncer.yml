@@ -78,6 +78,29 @@
         state: present
         src: "{{ namespace_manifest_path }}"
 
+    # This play runs before 20-deploy-hapi-fhir.yml (per playbooks/lab.yml's
+    # import order, PgBouncer must exist before HAPI FHIR's datasource can
+    # point at its Service), but the PgBouncer Deployment's DB_PASSWORD reads
+    # from the same Secret that 20-deploy-hapi-fhir.yml creates. Create it
+    # here too (idempotent: state=present, both plays converge on the same
+    # definition) so PgBouncer isn't left referencing a Secret that doesn't
+    # exist yet.
+    - name: Create runtime PostgreSQL Secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ hapi_database_secret_name }}"
+            namespace: "{{ hapi_namespace }}"
+            labels:
+              app.kubernetes.io/name: hapi-fhir-postgres
+              app.kubernetes.io/part-of: hapi-fhir
+          type: Opaque
+          stringData: "{{ {hapi_database_secret_key: lab_database_password} }}"
+      no_log: true
+
     - name: Render PgBouncer Deployment (reuses the existing hapi-fhir-postgres Secret for its DB_PASSWORD)
       ansible.builtin.template:
         src: "{{ pgbouncer_deployment_template }}"

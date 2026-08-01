@@ -37,6 +37,12 @@ spec:
               value: "{{ lab_database_name }}"
             - name: LISTEN_PORT
               value: "{{ pgbouncer_listen_port }}"
+            # See group_vars/lab.yml's pgbouncer_auth_type comment: required
+            # for PgBouncer to store the plaintext password it needs to
+            # complete SCRAM authentication against the backend Postgres
+            # server.
+            - name: AUTH_TYPE
+              value: "{{ pgbouncer_auth_type }}"
             # Templated from group_vars/lab.yml (and lab_database_username for
             # the two admin/stats identities) so there is a single source of
             # truth for pooled-tier settings -- no separate static ConfigMap

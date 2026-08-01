@@ -79,3 +79,12 @@ pgbouncer_replica_count: 2
 pgbouncer_default_pool_size: 20
 pgbouncer_max_client_conn: 1000
 pgbouncer_max_prepared_statements: 200
+
+# scram-sha-256, not the image's own default (md5): the edoburu/pgbouncer
+# entrypoint only writes the plaintext password into userlist.txt (needed for
+# PgBouncer to complete SCRAM auth against the backend Postgres server) when
+# AUTH_TYPE is "plain" or "scram-sha-256" -- otherwise it MD5-hashes the
+# password, which a scram-sha-256-enforcing backend (e.g. Cloud SQL Postgres
+# 16 with the default password_encryption) rejects with "cannot do SCRAM
+# authentication: wrong password type".
+pgbouncer_auth_type: scram-sha-256

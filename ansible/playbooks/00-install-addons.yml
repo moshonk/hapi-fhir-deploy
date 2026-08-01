@@ -42,6 +42,19 @@
             create: false
           grafana:
             enabled: false
+          prometheus:
+            prometheusSpec:
+              # kube-prometheus-stack's chart default only selects
+              # ServiceMonitors/PodMonitors carrying `release: {{ .Release.Name }}`
+              # (here, "release: prometheus"). The official HAPI FHIR chart's own
+              # ServiceMonitor doesn't carry that label (it's an unrelated,
+              # separately-versioned chart per this repo's wrapper-chart
+              # convention), so without this override Prometheus never scrapes
+              # it -- silently starving the KEDA "hapi-fhir-actuator" Prometheus
+              # trigger of data (empty query result, ScaledObject stuck
+              # Ready=False) with no error pointing at the actual cause.
+              serviceMonitorSelectorNilUsesHelmValues: false
+              podMonitorSelectorNilUsesHelmValues: false
       when: install_prometheus_stack | bool
 
     - name: Install Metrics Server
