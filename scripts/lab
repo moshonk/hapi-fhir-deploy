@@ -52,6 +52,8 @@ Usage:
   scripts/lab resume-autoscaling
   scripts/lab expose-fhir --cloud gcp --name NAME --var project_id=P [--port 8080] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-fhir --cloud gcp --name NAME --var project_id=P
+  scripts/lab expose-prometheus --cloud gcp --name NAME --var project_id=P [--port 9090] [--source-ranges CIDR[,CIDR...]]
+  scripts/lab unexpose-prometheus --cloud gcp --name NAME --var project_id=P
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
@@ -75,6 +77,10 @@ Commands:
                        exposure early without tearing down the whole lab.
   unexpose-fhir        GCP only. Reverse of expose-fhir: kill the tracked port-forward and delete
                        the firewall rule. Safe to run even if nothing is currently exposed.
+  expose-prometheus    GCP only. Same as expose-fhir, for the kube-prometheus-stack Prometheus
+                       Service (default port 9090) 00-install-addons.yml installs instead.
+  unexpose-prometheus  GCP only. Reverse of expose-prometheus. Safe to run even if nothing is
+                       currently exposed.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -128,6 +134,10 @@ Environment:
                           expose-fhir, and unexpose-fhir.
   HAPI_SERVICE_NAME       HAPI FHIR Kubernetes Service name; defaults to
                           hapi-fhir-hapi-fhir-jpaserver. Used by expose-fhir.
+  PROMETHEUS_NAMESPACE    Kubernetes namespace for kube-prometheus-stack; defaults to
+                          monitoring. Used by expose-prometheus and unexpose-prometheus.
+  PROMETHEUS_SERVICE_NAME Prometheus Kubernetes Service name; defaults to
+                          prometheus-kube-prometheus-prometheus. Used by expose-prometheus.
 USAGE
 }
 
@@ -1261,15 +1271,16 @@ confirm_destroy() {
   [[ "$answer" == "$NAME" ]] || die "destroy cancelled"
 }
 
-fhir_public_exposure_state_file() {
-  printf '%s/fhir-public-exposure.env' "$(state_dir)"
+public_exposure_state_file() {
+  local slug="$1"
+  printf '%s/%s-public-exposure.env' "$(state_dir)" "$slug"
 }
 
 # Best-effort public-IP self-lookup of *this host* (where scripts/lab is
-# running), used only to print the URL expose-fhir is reachable at --
-# never as a --source-ranges default (see cmd_expose_fhir's comment on why
-# "detect the caller's IP" isn't a meaningful security scope here). Tries a
-# couple of independent echo services so one outage doesn't block the whole
+# running), used only to print the URL an expose-* command is reachable at --
+# never as a --source-ranges default (see expose_public_service's comment on
+# why "detect the caller's IP" isn't a meaningful security scope here). Tries
+# a couple of independent echo services so one outage doesn't block the whole
 # command; callers must tolerate this failing (falls back to a placeholder).
 detect_public_ip() {
   local url ip
@@ -1283,21 +1294,39 @@ detect_public_ip() {
   return 1
 }
 
-# Opens a GCP firewall rule and a 0.0.0.0-bound `kubectl port-forward` so
-# HAPI FHIR is reachable from outside the host running `scripts/lab` (e.g. at
-# a GCE control-plane VM's own public IP), not just via an SSH/VS Code tunnel.
-# HAPI FHIR has no auth in front of it in this lab, so know what you're
-# opting into -- but --source-ranges defaults to 0.0.0.0/0 (the whole
-# internet), not a detected "caller" IP: `scripts/lab` normally runs *on* the
-# GCE VM itself (via SSH/VS Code Remote), so auto-detecting "my public IP"
-# from that same VM detects the VM's own address, not the browser/laptop
-# that's actually trying to reach it -- a restrictive default that doesn't
-# match the real client just breaks access silently. Pass a narrower
-# --source-ranges (e.g. your own IP/32) if you want it restricted.
-cmd_expose_fhir() {
+# Shared implementation behind expose-fhir/expose-prometheus (and any future
+# expose-<service> command): opens a GCP firewall rule and a 0.0.0.0-bound
+# `kubectl port-forward` for one Kubernetes Service, so it's reachable from
+# outside the host running `scripts/lab` (e.g. at a GCE control-plane VM's
+# own public IP), not just via an SSH/VS Code tunnel.
+#
+# --source-ranges defaults to 0.0.0.0/0 (the whole internet), not a detected
+# "caller" IP: `scripts/lab` normally runs *on* the GCE VM itself (via
+# SSH/VS Code Remote), so auto-detecting "my public IP" from that same VM
+# detects the VM's own address, not the browser/laptop that's actually
+# trying to reach it -- a restrictive default that doesn't match the real
+# client just breaks access silently. Pass a narrower --source-ranges (e.g.
+# your own IP/32) if you want it restricted. None of the services this
+# wraps (HAPI FHIR, Prometheus) have auth in front of them in this lab.
+#
+# state_slug: state-file/log-file name component (e.g. "fhir", "prometheus").
+# rule_prefix: firewall-rule name component (kept distinct from state_slug
+#   for fhir's sake, to preserve the firewall rule name already in use:
+#   allow-hapi-fhir-<port>-<lab>, not allow-fhir-<port>-<lab>).
+# target_port: the Service's actual port (not user-overridable -- it has to
+#   match the Service). The externally-exposed port defaults to this but can
+#   be moved with --port, independent of the container's real port.
+# display_name: human-readable name for log messages (e.g. "HAPI FHIR"),
+#   kept distinct from the Kubernetes Service name (svc).
+# url_path (optional): path suffix for the printed reachable-at URL, e.g.
+#   "/fhir" for HAPI FHIR's REST API base path. Empty for a bare root UI
+#   like Prometheus's.
+expose_public_service() {
+  local state_slug="$1" rule_prefix="$2" target_port="$3" ns="$4" svc="$5" display_name="$6" url_path="${7:-}"
+
   require_cloud
   require_name
-  [[ "$CLOUD" == "gcp" ]] || die "expose-fhir is currently GCP-only; see docs/gcp-echis-t3-lab-runbook.md for the manual steps to adapt this for aws/azure"
+  [[ "$CLOUD" == "gcp" ]] || die "expose-$state_slug is currently GCP-only; see docs/gcp-echis-t3-lab-runbook.md for the manual steps to adapt this for aws/azure"
 
   need_command_unless_dry_run gcloud
   local kbin
@@ -1305,20 +1334,17 @@ cmd_expose_fhir() {
   need_command_unless_dry_run "$kbin"
 
   local project_id
-  project_id="$(tf_var_get project_id)" || die "expose-fhir requires --var project_id=PROJECT_ID"
+  project_id="$(tf_var_get project_id)" || die "expose-$state_slug requires --var project_id=PROJECT_ID"
 
-  local port="${PORT:-8080}"
+  local port="${PORT:-$target_port}"
   local source_ranges="${SOURCE_RANGES:-0.0.0.0/0}"
-  local display_ip=""
   if [[ "$source_ranges" == "0.0.0.0/0" ]]; then
-    log "Opening firewall rule to the entire internet (0.0.0.0/0, the default) -- HAPI FHIR has no auth in front of it in this lab. Pass --source-ranges CIDR to restrict it (e.g. to your own IP/32)."
+    log "Opening firewall rule to the entire internet (0.0.0.0/0, the default) -- $display_name has no auth in front of it in this lab. Pass --source-ranges CIDR to restrict it (e.g. to your own IP/32)."
   else
     log "Restricting firewall rule to $source_ranges"
   fi
 
-  local firewall_rule="allow-hapi-fhir-${port}-${NAME}"
-  local ns="${HAPI_NAMESPACE:-fhir}"
-  local svc="${HAPI_SERVICE_NAME:-hapi-fhir-hapi-fhir-jpaserver}"
+  local firewall_rule="allow-${rule_prefix}-${port}-${NAME}"
 
   local rule_exists=false
   if [[ "$DRY_RUN" != true ]] && gcloud compute firewall-rules describe "$firewall_rule" --project "$project_id" >/dev/null 2>&1; then
@@ -1335,11 +1361,11 @@ cmd_expose_fhir() {
       --action=ALLOW \
       --rules="tcp:$port" \
       --source-ranges="$source_ranges" \
-      --description="scripts/lab expose-fhir: public access to HAPI FHIR lab '$NAME'. No auth in front -- synthetic data only. Run 'scripts/lab unexpose-fhir' or 'scripts/lab down' to remove."
+      --description="scripts/lab expose-$state_slug: public access to $display_name ($svc) in lab '$NAME'. No auth in front. Run 'scripts/lab unexpose-$state_slug' or 'scripts/lab down' to remove."
   fi
 
   local state_file
-  state_file="$(fhir_public_exposure_state_file)"
+  state_file="$(public_exposure_state_file "$state_slug")"
   local old_pid
   old_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
   if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
@@ -1348,14 +1374,14 @@ cmd_expose_fhir() {
   fi
 
   mkdir -p "$(state_dir)"
-  local pf_log="$(state_dir)/fhir-public-portforward.log"
+  local pf_log="$(state_dir)/${state_slug}-public-portforward.log"
 
   if [[ "$DRY_RUN" == true ]]; then
-    run "$kbin" -n "$ns" port-forward --address 0.0.0.0 "svc/$svc" "$port:8080"
+    run "$kbin" -n "$ns" port-forward --address 0.0.0.0 "svc/$svc" "$port:$target_port"
     return 0
   fi
 
-  nohup "$kbin" -n "$ns" port-forward --address 0.0.0.0 "svc/$svc" "$port:8080" >"$pf_log" 2>&1 &
+  nohup "$kbin" -n "$ns" port-forward --address 0.0.0.0 "svc/$svc" "$port:$target_port" >"$pf_log" 2>&1 &
   local pf_pid=$!
   disown
   sleep 2
@@ -1368,23 +1394,29 @@ cmd_expose_fhir() {
     printf 'PROJECT_ID=%s\n' "$project_id"
   } >"$state_file"
 
-  [[ -n "$display_ip" ]] || display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
-  log "HAPI FHIR is reachable at http://${display_ip}:${port}/fhir (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
-  log "Run 'scripts/lab unexpose-fhir --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
+  local display_ip
+  display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
+  log "$display_name is reachable at http://${display_ip}:${port}${url_path} (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
+  log "Run 'scripts/lab unexpose-$state_slug --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
 }
 
-# Reverse of expose-fhir: kills the tracked port-forward and deletes the
-# firewall rule. Safe to call even when nothing is currently exposed (no-op).
-cmd_unexpose_fhir() {
+# Reverse of expose_public_service: kills the tracked port-forward and
+# deletes the firewall rule. Safe to call even when nothing is currently
+# exposed (no-op). Arguments match expose_public_service's state_slug,
+# rule_prefix, target_port (the latter only used to compute a fallback
+# firewall-rule name when no state file was ever written).
+unexpose_public_service() {
+  local state_slug="$1" rule_prefix="$2" target_port="$3"
+
   require_cloud
   require_name
   if [[ "$CLOUD" != "gcp" ]]; then
-    log "unexpose-fhir is GCP-only; nothing to do for $CLOUD"
+    log "unexpose-$state_slug is GCP-only; nothing to do for $CLOUD"
     return 0
   fi
 
   local state_file
-  state_file="$(fhir_public_exposure_state_file)"
+  state_file="$(public_exposure_state_file "$state_slug")"
 
   local firewall_rule="" pf_pid="" project_id=""
   if [[ -f "$state_file" ]]; then
@@ -1393,7 +1425,7 @@ cmd_unexpose_fhir() {
     project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
   fi
   [[ -n "$project_id" ]] || project_id="$(tf_var_get project_id)" || true
-  [[ -n "$firewall_rule" ]] || firewall_rule="allow-hapi-fhir-${PORT:-8080}-${NAME}"
+  [[ -n "$firewall_rule" ]] || firewall_rule="allow-${rule_prefix}-${PORT:-$target_port}-${NAME}"
 
   if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
     log "Stopping exposed port-forward (pid $pf_pid)"
@@ -1412,13 +1444,30 @@ cmd_unexpose_fhir() {
   rm -f "$state_file"
 }
 
+cmd_expose_fhir() {
+  expose_public_service fhir hapi-fhir 8080 "${HAPI_NAMESPACE:-fhir}" "${HAPI_SERVICE_NAME:-hapi-fhir-hapi-fhir-jpaserver}" "HAPI FHIR" "/fhir"
+}
+
+cmd_unexpose_fhir() {
+  unexpose_public_service fhir hapi-fhir 8080
+}
+
+cmd_expose_prometheus() {
+  expose_public_service prometheus prometheus 9090 "${PROMETHEUS_NAMESPACE:-monitoring}" "${PROMETHEUS_SERVICE_NAME:-prometheus-kube-prometheus-prometheus}" "Prometheus"
+}
+
+cmd_unexpose_prometheus() {
+  unexpose_public_service prometheus prometheus 9090
+}
+
 cmd_down() {
   require_cloud
   require_name
 
   if [[ "$CLOUD" == "gcp" ]]; then
-    log "Cleaning up any public FHIR exposure from 'expose-fhir' before destroying infrastructure"
+    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus' before destroying infrastructure"
     cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
+    cmd_unexpose_prometheus || log "WARNING: could not fully clean up public Prometheus exposure (see above); continuing with destroy anyway"
   fi
 
   local tf_bin
@@ -1506,6 +1555,8 @@ case "$COMMAND" in
   resume-autoscaling) cmd_resume_autoscaling ;;
   expose-fhir) cmd_expose_fhir ;;
   unexpose-fhir) cmd_unexpose_fhir ;;
+  expose-prometheus) cmd_expose_prometheus ;;
+  unexpose-prometheus) cmd_unexpose_prometheus ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

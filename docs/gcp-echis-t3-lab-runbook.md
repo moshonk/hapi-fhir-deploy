@@ -301,6 +301,14 @@ terminal and pass `PROMETHEUS_BASE_URL`:
 kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090
 ```
 
+To browse the Prometheus UI itself at the control-plane host's public IP
+instead of a loopback tunnel (same rationale as [Step 7's `expose-fhir`
+alternative](#alternative-reach-it-at-the-control-plane-hosts-public-ip)):
+
+```sh
+scripts/lab expose-prometheus --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
+```
+
 ```sh
 PROMETHEUS_BASE_URL=http://localhost:9090 \
 FHIR_BASE_URL=http://localhost:8080/fhir \
@@ -349,14 +357,16 @@ scripts/lab down --cloud gcp --name "$LAB_NAME" --yes \
   --var kubernetes_version=1.35.6-gke.1258000
 ```
 
-This also removes any `expose-fhir` firewall rule/port-forward for `$LAB_NAME`
-before destroying infrastructure — no separate `unexpose-fhir` call needed if
-you used Step 7's public-IP alternative.
+This also removes any `expose-fhir`/`expose-prometheus` firewall rule/
+port-forward for `$LAB_NAME` before destroying infrastructure — no separate
+`unexpose-fhir`/`unexpose-prometheus` call needed if you used Step 7's or
+Step 9's public-IP alternative.
 
 If `down` fails, go to the GCP console and delete GKE/Cloud SQL resources
-labeled with `$LAB_NAME` and the TTL you set. If only the `expose-fhir`
-cleanup failed (logged as a warning, `down` still proceeds to destroy
-infrastructure), check for a stray `allow-hapi-fhir-*-$LAB_NAME` firewall rule
+labeled with `$LAB_NAME` and the TTL you set. If only the `expose-fhir`/
+`expose-prometheus` cleanup failed (logged as a warning, `down` still
+proceeds to destroy infrastructure), check for a stray
+`allow-hapi-fhir-*-$LAB_NAME` or `allow-prometheus-*-$LAB_NAME` firewall rule
 in the GCP console.
 
 ## Reference: full variable list used above
