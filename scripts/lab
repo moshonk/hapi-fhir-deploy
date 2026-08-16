@@ -66,9 +66,11 @@ Commands:
   expose-fhir          GCP only. Open a firewall rule and a 0.0.0.0-bound `kubectl port-forward`
                        so HAPI FHIR is reachable at http://EXTERNAL_IP:PORT/fhir from outside the
                        control-plane host running `scripts/lab`, not just via SSH/VS Code tunnels.
-                       Defaults --source-ranges to the caller's own detected public IP/32; pass
-                       --source-ranges 0.0.0.0/0 to open it to the entire internet instead (HAPI
-                       FHIR has no auth in front of it in this lab -- know what you're opting into).
+                       --source-ranges defaults to 0.0.0.0/0 (the whole internet) -- HAPI FHIR has
+                       no auth in front of it in this lab, know what you're opting into. Pass
+                       --source-ranges CIDR (e.g. your own IP/32) to restrict it; auto-detecting a
+                       "caller" IP isn't a safe default here since `scripts/lab` normally runs on
+                       the GCE VM itself, not on the machine whose browser needs access.
                        `down` calls this same cleanup automatically, but run it yourself to close
                        exposure early without tearing down the whole lab.
   unexpose-fhir        GCP only. Reverse of expose-fhir: kill the tracked port-forward and delete
@@ -1263,11 +1265,12 @@ fhir_public_exposure_state_file() {
   printf '%s/fhir-public-exposure.env' "$(state_dir)"
 }
 
-# Best-effort public-IP self-lookup, used only as the *default* firewall
-# --source-ranges scope (never for anything security-critical beyond that).
-# Tries a couple of independent echo services so one outage doesn't block
-# expose-fhir entirely; the caller must fall back to requiring an explicit
-# --source-ranges if every lookup fails.
+# Best-effort public-IP self-lookup of *this host* (where scripts/lab is
+# running), used only to print the URL expose-fhir is reachable at --
+# never as a --source-ranges default (see cmd_expose_fhir's comment on why
+# "detect the caller's IP" isn't a meaningful security scope here). Tries a
+# couple of independent echo services so one outage doesn't block the whole
+# command; callers must tolerate this failing (falls back to a placeholder).
 detect_public_ip() {
   local url ip
   for url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
@@ -1283,9 +1286,14 @@ detect_public_ip() {
 # Opens a GCP firewall rule and a 0.0.0.0-bound `kubectl port-forward` so
 # HAPI FHIR is reachable from outside the host running `scripts/lab` (e.g. at
 # a GCE control-plane VM's own public IP), not just via an SSH/VS Code tunnel.
-# HAPI FHIR has no auth in front of it in this lab, so --source-ranges
-# defaults to the caller's own detected /32 rather than the whole internet --
-# pass --source-ranges 0.0.0.0/0 explicitly to open it up fully.
+# HAPI FHIR has no auth in front of it in this lab, so know what you're
+# opting into -- but --source-ranges defaults to 0.0.0.0/0 (the whole
+# internet), not a detected "caller" IP: `scripts/lab` normally runs *on* the
+# GCE VM itself (via SSH/VS Code Remote), so auto-detecting "my public IP"
+# from that same VM detects the VM's own address, not the browser/laptop
+# that's actually trying to reach it -- a restrictive default that doesn't
+# match the real client just breaks access silently. Pass a narrower
+# --source-ranges (e.g. your own IP/32) if you want it restricted.
 cmd_expose_fhir() {
   require_cloud
   require_name
@@ -1300,12 +1308,12 @@ cmd_expose_fhir() {
   project_id="$(tf_var_get project_id)" || die "expose-fhir requires --var project_id=PROJECT_ID"
 
   local port="${PORT:-8080}"
-  local source_ranges="$SOURCE_RANGES"
+  local source_ranges="${SOURCE_RANGES:-0.0.0.0/0}"
   local display_ip=""
-  if [[ -z "$source_ranges" ]]; then
-    display_ip="$(detect_public_ip)" || die "could not auto-detect your public IP to scope --source-ranges; pass --source-ranges explicitly (e.g. --source-ranges 0.0.0.0/0 to open it to the entire internet -- HAPI FHIR has no auth in front of it in this lab, know what you're opting into)"
-    source_ranges="${display_ip}/32"
-    log "Auto-detected your public IP as $display_ip; restricting the firewall rule to $source_ranges (pass --source-ranges to override, e.g. --source-ranges 0.0.0.0/0 for the whole internet)"
+  if [[ "$source_ranges" == "0.0.0.0/0" ]]; then
+    log "Opening firewall rule to the entire internet (0.0.0.0/0, the default) -- HAPI FHIR has no auth in front of it in this lab. Pass --source-ranges CIDR to restrict it (e.g. to your own IP/32)."
+  else
+    log "Restricting firewall rule to $source_ranges"
   fi
 
   local firewall_rule="allow-hapi-fhir-${port}-${NAME}"

@@ -209,15 +209,17 @@ browser/`curl` without a tunnel, use `expose-fhir` instead of the plain
 scripts/lab expose-fhir --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
 ```
 
-This opens a GCP firewall rule (`tcp:8080`, scoped by default to your own
-detected public IP `/32` — pass `--source-ranges 0.0.0.0/0` to open it to the
-entire internet instead) and starts a `0.0.0.0`-bound `kubectl port-forward`
-in the background, then prints the reachable URL
-(`http://EXTERNAL_IP:8080/fhir`). **HAPI FHIR has no authentication in front
-of it in this lab** — the data is synthetic, but anything in the
-`--source-ranges` you choose can read and write to the FHIR API for as long as
-it's up, so prefer the default (your own IP) unless you specifically need
-broader access, and close it as soon as you're done:
+This opens a GCP firewall rule (`tcp:8080`, `0.0.0.0/0` by default) and starts
+a `0.0.0.0`-bound `kubectl port-forward` in the background, then prints the
+reachable URL (`http://EXTERNAL_IP:8080/fhir`). The default is the whole
+internet, not a detected "your IP" — you're driving this from the GCE VM
+itself, so auto-detecting a caller IP would detect the VM's own address, not
+your actual browser/laptop, and silently block the access you're trying to
+set up. Pass `--source-ranges CIDR` (e.g. your own IP as a `/32`) if you want
+it restricted instead. **HAPI FHIR has no authentication in front of it in
+this lab** — the data is synthetic, but anything in the `--source-ranges` you
+choose can read and write to the FHIR API for as long as it's up, so close it
+as soon as you're done:
 
 ```sh
 scripts/lab unexpose-fhir --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
