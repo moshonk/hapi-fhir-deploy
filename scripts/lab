@@ -54,7 +54,7 @@ Usage:
   scripts/lab unexpose-fhir --cloud gcp --name NAME --var project_id=P
   scripts/lab expose-prometheus --cloud gcp --name NAME --var project_id=P [--port 9090] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-prometheus --cloud gcp --name NAME --var project_id=P
-  scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 80] [--source-ranges CIDR[,CIDR...]]
+  scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3000] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
 
 Commands:
@@ -84,7 +84,8 @@ Commands:
   unexpose-prometheus  GCP only. Reverse of expose-prometheus. Safe to run even if nothing is
                        currently exposed.
   expose-grafana       GCP only. Same as expose-fhir, for the kube-prometheus-stack Grafana
-                       Service (default port 80) 00-install-addons.yml installs when
+                       Service (Service port 80, exposed locally on 3000 by default since
+                       binding 80 needs root) 00-install-addons.yml installs when
                        install_grafana is true. Login is required (unlike FHIR/Prometheus,
                        which have no auth at all): user "admin", password from
                        `kubectl -n monitoring get secret prometheus-grafana -o
@@ -1320,23 +1321,35 @@ detect_public_ip() {
 # detects the VM's own address, not the browser/laptop that's actually
 # trying to reach it -- a restrictive default that doesn't match the real
 # client just breaks access silently. Pass a narrower --source-ranges (e.g.
-# your own IP/32) if you want it restricted. None of the services this
-# wraps (HAPI FHIR, Prometheus) have auth in front of them in this lab.
+# your own IP/32) if you want it restricted. Not every service this wraps
+# has auth in front of it in this lab -- HAPI FHIR and Prometheus don't,
+# Grafana does (login required) -- check the specific expose-* command.
 #
 # state_slug: state-file/log-file name component (e.g. "fhir", "prometheus").
 # rule_prefix: firewall-rule name component (kept distinct from state_slug
 #   for fhir's sake, to preserve the firewall rule name already in use:
 #   allow-hapi-fhir-<port>-<lab>, not allow-fhir-<port>-<lab>).
 # target_port: the Service's actual port (not user-overridable -- it has to
-#   match the Service). The externally-exposed port defaults to this but can
-#   be moved with --port, independent of the container's real port.
+#   match the Service, and is always used as-is on the port-forward's
+#   Kubernetes-facing side).
 # display_name: human-readable name for log messages (e.g. "HAPI FHIR"),
 #   kept distinct from the Kubernetes Service name (svc).
 # url_path (optional): path suffix for the printed reachable-at URL, e.g.
 #   "/fhir" for HAPI FHIR's REST API base path. Empty for a bare root UI
-#   like Prometheus's.
+#   like Prometheus's/Grafana's.
+# default_external_port (optional, defaults to target_port): the port
+#   --port defaults to for the *local*/firewall side. Distinct from
+#   target_port because that side needs CAP_NET_BIND_SERVICE/root for any
+#   port below 1024 (e.g. Grafana's Service port 80) -- defaulting the
+#   externally-exposed port to a privileged one would fail for every
+#   non-root caller, so a service whose real port is privileged should pass
+#   a sane unprivileged default here instead (Grafana passes 3000).
 expose_public_service() {
   local state_slug="$1" rule_prefix="$2" target_port="$3" ns="$4" svc="$5" display_name="$6" url_path="${7:-}"
+  # Not folded into the `local` line above: a variable assigned earlier in
+  # the same `local` statement isn't visible to a later one's default-value
+  # expansion in bash (all word expansions happen before any assignment).
+  local default_external_port="${8:-$target_port}"
 
   require_cloud
   require_name
@@ -1350,7 +1363,7 @@ expose_public_service() {
   local project_id
   project_id="$(tf_var_get project_id)" || die "expose-$state_slug requires --var project_id=PROJECT_ID"
 
-  local port="${PORT:-$target_port}"
+  local port="${PORT:-$default_external_port}"
   local source_ranges="${SOURCE_RANGES:-0.0.0.0/0}"
   if [[ "$source_ranges" == "0.0.0.0/0" ]]; then
     log "Opening firewall rule to the entire internet (0.0.0.0/0, the default). Pass --source-ranges CIDR to restrict it (e.g. to your own IP/32)."
@@ -1417,10 +1430,11 @@ expose_public_service() {
 # Reverse of expose_public_service: kills the tracked port-forward and
 # deletes the firewall rule. Safe to call even when nothing is currently
 # exposed (no-op). Arguments match expose_public_service's state_slug,
-# rule_prefix, target_port (the latter only used to compute a fallback
-# firewall-rule name when no state file was ever written).
+# rule_prefix, default_external_port (the latter only used to compute a
+# fallback firewall-rule name when no state file was ever written -- pass
+# the same value given to the matching expose_public_service call).
 unexpose_public_service() {
-  local state_slug="$1" rule_prefix="$2" target_port="$3"
+  local state_slug="$1" rule_prefix="$2" default_external_port="$3"
 
   require_cloud
   require_name
@@ -1439,7 +1453,7 @@ unexpose_public_service() {
     project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
   fi
   [[ -n "$project_id" ]] || project_id="$(tf_var_get project_id)" || true
-  [[ -n "$firewall_rule" ]] || firewall_rule="allow-${rule_prefix}-${PORT:-$target_port}-${NAME}"
+  [[ -n "$firewall_rule" ]] || firewall_rule="allow-${rule_prefix}-${PORT:-$default_external_port}-${NAME}"
 
   if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
     log "Stopping exposed port-forward (pid $pf_pid)"
@@ -1475,11 +1489,14 @@ cmd_unexpose_prometheus() {
 }
 
 cmd_expose_grafana() {
-  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana"
+  # target_port 80 is the Grafana Service's real port; default_external_port
+  # 3000 (Grafana's own conventional UI port) is what --port defaults to
+  # locally, since binding the literal privileged port 80 needs root.
+  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana" "" 3000
 }
 
 cmd_unexpose_grafana() {
-  unexpose_public_service grafana grafana 80
+  unexpose_public_service grafana grafana 3000
 }
 
 cmd_down() {
