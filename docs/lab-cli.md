@@ -27,12 +27,18 @@ Generated Terraform outputs, kubeconfigs, Synthea datasets, and benchmark run ar
 scripts/lab up --cloud aws|azure|gcp --name NAME [--auto-approve] [--var key=value]
 ```
 
+Before touching Terraform, `up` checks that the tools the *whole* lab lifecycle needs are present -- not just what `up` itself calls, but `deploy`'s (`helm`, `kubectl`, `ansible-playbook`/`ansible-galaxy`, and on GCP `gke-gcloud-auth-plugin`), plus `seed`/`benchmark`'s (`ruby`, `k6`, `java`). This reports every missing tool at once, with install links, instead of failing one step at a time -- possibly after a GKE/EKS/AKS cluster has already been created and billing. Set `LAB_SKIP_PREFLIGHT=true` to skip it (the check still runs but only warns under `--dry-run`, regardless of this setting).
+
 `up` runs Terraform in `infra/terraform/<cloud>`, selects or creates a Terraform workspace named after the lab, applies `lab_name=NAME`, then saves ignored outputs to:
 
 - `ansible/artifacts/lab/<cloud>/<name>/terraform-output.json`
 - `ansible/artifacts/lab/<cloud>/<name>/kubeconfig`
 
 Use repeated `--var key=value` flags for provider settings such as region, node size, cluster size, DB SKU, TTL, and tags.
+
+If `apply` fails because a resource already exists in the cloud but isn't yet tracked in this workspace's Terraform state (e.g. left behind by a prior interrupted `up`, or a `down` that didn't fully complete), `up` imports the existing resource and retries instead of failing outright, logging each reuse. Set `LAB_TF_AUTO_IMPORT=false` to restore the old strict-fail behavior. A full apply log is written to `ansible/artifacts/lab/<cloud>/<name>/terraform-apply.log` on every run.
+
+For GCP, `up` also checks two resources proactively before every apply, since their failure modes don't surface a parseable `'ID' already exists` error: the private-services-access peering connection, and the Cloud SQL instance (`google_sql_database_instance.postgres` can finish creating successfully on the API side while `terraform apply` still fails with an opaque, message-less `Error waiting for Create Instance:` -- known `terraform-provider-google` flakiness on long-running Cloud SQL operations). Both checks query the live GCP API directly and import the resource into state if it's already there, so a re-run doesn't hit a real `already exists` conflict next time.
 
 ### Deploy
 
