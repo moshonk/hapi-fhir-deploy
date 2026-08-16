@@ -34,10 +34,29 @@
         - namespace: "{{ keda_namespace }}"
           name: "{{ keda_operator_deployment_name }}"
           enabled: "{{ install_keda }}"
-        - namespace: "{{ metrics_server_namespace }}"
-          name: "{{ metrics_server_deployment_name }}"
-          enabled: "{{ install_metrics_server }}"
       when: item.enabled | bool
+
+    # Not a `deploy/metrics-server` rollout-status wait like the loop above:
+    # 00-install-addons.yml skips the Helm chart (and its "metrics-server"
+    # Deployment name) when the cluster already ships
+    # its own metrics-server (e.g. GKE's addon-manager-reconciled
+    # "metrics-server-v1.35.1"), so the Deployment name isn't stable across
+    # providers/install paths. The metrics.k8s.io APIService reporting
+    # Available is the actual capability HPA/KEDA depend on, regardless of
+    # which Deployment serves it.
+    - name: Wait for metrics-server API to be available
+      kubernetes.core.k8s_info:
+        api_version: apiregistration.k8s.io/v1
+        kind: APIService
+        name: v1beta1.metrics.k8s.io
+      register: metrics_server_apiservice
+      until: >-
+        metrics_server_apiservice.resources | default([]) | length == 1 and
+        (metrics_server_apiservice.resources[0].status.conditions | default([]) |
+          selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length) == 1
+      retries: 30
+      delay: 10
+      when: install_metrics_server | bool
 
     - name: Wait for HAPI service to expose FHIR and Actuator ports
       kubernetes.core.k8s_info:
