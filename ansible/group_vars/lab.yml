@@ -45,6 +45,7 @@ install_grafana: true
 install_metrics_server: true
 install_keda: true
 apply_autoscaling: true
+enable_prometheus_remote_write: true
 
 prometheus_namespace: monitoring
 prometheus_release_name: prometheus

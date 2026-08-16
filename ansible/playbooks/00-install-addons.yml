@@ -48,6 +48,16 @@
             enabled: "{{ install_grafana | bool }}"
           prometheus:
             prometheusSpec:
+              # Off by default upstream: lets k6 (`k6 run -o
+              # experimental-prometheus-rw`, see docs/lab-cli.md's
+              # "Live k6 metrics in Grafana" note) push its own load-test
+              # time series straight into this Prometheus over its remote
+              # write endpoint, alongside the HAPI FHIR server-side metrics
+              # already scraped below -- both queryable/graphable in Grafana
+              # during a live benchmark run, not just from the post-run k6
+              # JSON summary. Only reachable in-cluster (via port-forward)
+              # unless expose-prometheus is also run.
+              enableRemoteWriteReceiver: "{{ enable_prometheus_remote_write | bool }}"
               # kube-prometheus-stack's chart default only selects
               # ServiceMonitors/PodMonitors carrying `release: {{ .Release.Name }}`
               # (here, "release: prometheus"). The official HAPI FHIR chart's own

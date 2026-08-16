@@ -1193,11 +1193,24 @@ cmd_benchmark() {
     data["cloud"] = cloud unless cloud.to_s.empty?
     File.write(path, "#{JSON.pretty_generate(data)}\n")
   ' "$metadata_file" "$RUN_ID" "$PROFILE" "$FHIR_BASE_URL" "${BULK_EXPORT_ENABLED:-false}" "$prometheus_present" "$(date -u +%FT%TZ)" "$CLOUD"
+  # K6_PROMETHEUS_RW_SERVER_URL is a k6-native env var (only configures the
+  # remote-write target's URL); k6 still needs -o experimental-prometheus-rw
+  # on the command line to actually select that output. Requires the
+  # target Prometheus to have enableRemoteWriteReceiver on (see
+  # ansible/group_vars/lab.yml's enable_prometheus_remote_write, default
+  # true) -- lets this run's load/latency/failure-rate be watched live in
+  # Grafana instead of only from the post-run k6 JSON summary.
+  local k6_out_args=(--out "json=$dir/k6-raw.jsonl")
+  if [[ -n "${K6_PROMETHEUS_RW_SERVER_URL:-}" ]]; then
+    k6_out_args+=(--out experimental-prometheus-rw)
+    log "Also streaming live k6 metrics to Prometheus remote-write at $K6_PROMETHEUS_RW_SERVER_URL"
+  fi
+
   run "$k6_bin" run \
     -e "FHIR_BASE_URL=$FHIR_BASE_URL" \
     -e "PROFILE=$PROFILE" \
     -e "K6_FHIR_SUMMARY_PATH=$dir/k6-fhir-summary.json" \
-    --out "json=$dir/k6-raw.jsonl" \
+    "${k6_out_args[@]}" \
     --summary-export "$dir/k6-summary.json" \
     "$script"
 

@@ -117,6 +117,34 @@ scripts/lab benchmark --profile baseline --run baseline-aws
 
 Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-jpaserver-.*`, Hikari pool size `10`, two replicas, and maximum Hikari utilization `0.8`. Override with `HAPI_NAMESPACE`, `HAPI_POD_REGEX`, `HIKARI_MAX_POOL_SIZE`, `HAPI_REPLICAS`, `HIKARI_MAX_UTILIZATION`, `POD_RESTARTS_QUERY`, `HIKARI_ACTIVE_QUERY`, or `HIKARI_MAX_QUERY` when the target environment differs.
 
+#### Live k6 metrics in Grafana
+
+Set `K6_PROMETHEUS_RW_SERVER_URL` (a k6-native env var, e.g.
+`http://localhost:9090/api/v1/write` against a `kubectl -n monitoring
+port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090`) and
+`benchmark` adds `-o experimental-prometheus-rw` to the k6 invocation
+automatically, streaming live VU count/request rate/latency/failure-rate
+into Prometheus as the run progresses, alongside the always-written
+`k6-raw.jsonl` -- not instead of it:
+
+```sh
+FHIR_BASE_URL=http://localhost:8080/fhir \
+K6_PROMETHEUS_RW_SERVER_URL=http://localhost:9090/api/v1/write \
+scripts/lab benchmark --profile load --run load-1 --echis-tier T2
+```
+
+Requires the target Prometheus to have its remote-write receiver enabled
+(`enableRemoteWriteReceiver`, `ansible/group_vars/lab.yml`'s
+`enable_prometheus_remote_write`, default `true` -- a Prometheus restart on
+first enable). Import [Grafana Labs' official "k6 Prometheus"
+dashboard](https://grafana.com/grafana/dashboards/19665-k6-prometheus/)
+(dashboard ID `19665`) to watch it: in Grafana, **Dashboards → New → Import**,
+enter `19665`, and map its `Prometheus` datasource input to this stack's
+`Prometheus` datasource. HAPI FHIR's own server-side metrics (HTTP latency,
+JVM, Hikari pool) are scraped into the same Prometheus independently of this
+setting, so they're visible in Grafana during any run, not only when
+`K6_PROMETHEUS_RW_SERVER_URL` is set.
+
 #### eCHIS progressive tiers
 
 Use `K6_SCRIPT=benchmarks/k6/echis_load_100.js` (or another `echis_load_*.js`
