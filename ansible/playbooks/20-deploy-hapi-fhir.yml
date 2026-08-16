@@ -107,6 +107,22 @@
         dest: "{{ runtime_values_path }}"
         mode: "0600"
 
+    # charts/hapi-fhir-deploy/Chart.yaml's own dependencies (hapi-fhir-jpaserver,
+    # fhir-server-exporter) come from these two upstream repos, distinct from
+    # the cluster add-on repos 00-install-addons.yml registers (prometheus-community,
+    # metrics-server, kedacore). `helm dependency build` fails outright on a
+    # fresh Helm install/machine that has never run `helm repo add` for them
+    # (matches .github/workflows/ci.yml's pinned repo URLs).
+    - name: Add HAPI FHIR chart dependency Helm repositories
+      kubernetes.core.helm_repository:
+        name: "{{ item.name }}"
+        repo_url: "{{ item.repo_url }}"
+      loop:
+        - name: hapifhir
+          repo_url: https://hapifhir.github.io/hapi-fhir-jpaserver-starter/
+        - name: chgl
+          repo_url: https://chgl.github.io/charts
+
     - name: Build HAPI FHIR Helm dependencies
       ansible.builtin.command:
         cmd: helm dependency build charts/hapi-fhir-deploy

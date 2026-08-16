@@ -57,6 +57,43 @@
               podMonitorSelectorNilUsesHelmValues: false
       when: install_prometheus_stack | bool
 
+    # GKE (and some other managed offerings) ships its own metrics-server in
+    # kube-system as an addon-manager-reconciled component -- a ServiceAccount
+    # named "metrics-server" already exists there before this playbook ever
+    # runs. `helm upgrade -i` refuses to adopt a resource it didn't create
+    # (missing meta.helm.sh/* ownership annotations), so installing the
+    # community chart on top of it fails outright; forcibly adopting it would
+    # just have the cluster's addon manager fight Helm over it afterwards.
+    # Detect that case up front and skip the chart install -- the cluster
+    # already has working metrics-server functionality for HPA/KEDA.
+    - name: Check for a pre-existing metrics-server ServiceAccount
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ServiceAccount
+        name: "{{ metrics_server_release_name }}"
+        namespace: "{{ metrics_server_namespace }}"
+      register: existing_metrics_server_sa
+      when: install_metrics_server | bool
+
+    - name: Determine whether metrics-server is already provided outside Helm
+      ansible.builtin.set_fact:
+        metrics_server_externally_managed: >-
+          {{
+            (existing_metrics_server_sa.resources | default([]) | length > 0) and
+            ('meta.helm.sh/release-name' not in (existing_metrics_server_sa.resources[0].metadata.annotations | default({})))
+          }}
+      when: install_metrics_server | bool
+
+    - name: Note pre-existing, non-Helm-managed metrics-server
+      ansible.builtin.debug:
+        msg: >-
+          A ServiceAccount named "{{ metrics_server_release_name }}" already exists in
+          "{{ metrics_server_namespace }}" and isn't owned by Helm (e.g. GKE's built-in,
+          addon-manager-reconciled metrics-server). Skipping the metrics-server Helm
+          chart install to avoid an ownership conflict and to avoid fighting the
+          cluster's own addon reconciliation.
+      when: install_metrics_server | bool and metrics_server_externally_managed
+
     - name: Install Metrics Server
       kubernetes.core.helm:
         name: "{{ metrics_server_release_name }}"
@@ -66,7 +103,7 @@
         update_repo_cache: true
         wait: true
         wait_timeout: "{{ helm_wait_timeout }}"
-      when: install_metrics_server | bool
+      when: install_metrics_server | bool and not (metrics_server_externally_managed | default(false))
 
     - name: Install KEDA
       kubernetes.core.helm:

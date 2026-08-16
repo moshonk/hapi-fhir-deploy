@@ -1,4 +1,15 @@
 ---
+# hosts: lab is always localhost/ansible_connection=local, but interpreter
+# auto-discovery doesn't reliably reuse the controller's own Python (the one
+# `ansible-playbook` itself is running under, e.g. ansible/.venv/bin/python
+# per docs/getting-started-benchmark-lab.md) -- it can land on a system
+# python3 that lacks the pinned `kubernetes` library from
+# ansible/requirements.txt, failing any kubernetes.core.k8s/k8s_info task
+# with "Failed to import the required Python library (kubernetes)". Pin it
+# explicitly so module execution always uses the same interpreter the
+# playbook run itself is using.
+ansible_python_interpreter: "{{ ansible_playbook_python }}"
+
 lab_kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('', true) }}"
 terraform_output_file: "{{ lookup('env', 'TERRAFORM_OUTPUT_FILE') | default('', true) }}"
 
@@ -41,7 +52,6 @@ kube_prometheus_stack_chart_version: "87.17.0"
 metrics_server_namespace: kube-system
 metrics_server_release_name: metrics-server
 metrics_server_chart_version: "3.13.1"
-metrics_server_deployment_name: metrics-server
 
 keda_namespace: keda
 keda_release_name: keda

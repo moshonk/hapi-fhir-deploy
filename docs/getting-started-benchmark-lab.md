@@ -23,15 +23,15 @@ Generated Terraform outputs, kubeconfigs, Synthea bundles, benchmark raw data, a
 
 Install these locally:
 
-- Terraform `>= 1.9.0, < 2.0.0`.
-- Python `3`.
-- Helm `3.x`.
-- `kubectl`.
-- Ruby.
-- k6.
-- Java `17` or newer.
+- Terraform `>= 1.9.0, < 2.0.0` — [install guide](https://developer.hashicorp.com/terraform/install).
+- Python `3` — [downloads](https://www.python.org/downloads/).
+- Helm `3.x` — [install guide](https://helm.sh/docs/intro/install/). Match the version CI uses (`v3.15.4`, see `.github/workflows/ci.yml`) unless you have a reason to diverge. The `kubernetes.core.helm`/`helm_repository` Ansible modules (invoked by `scripts/lab deploy`) shell out to a real `helm` binary on `PATH`; a missing binary fails with `Failed to find required executable "helm"`.
+- `kubectl` — [install guide](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/). Pick a client version within the [version skew policy](https://kubernetes.io/releases/version-skew-policy/#kubectl) of the cluster's `kubernetes_version` Terraform var (client within one minor version of the server); e.g. for a `1.35.x` cluster, `curl -L -O "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable-1.35.txt)/bin/linux/amd64/kubectl"`.
+- Ruby — [install guide](https://www.ruby-lang.org/en/documentation/installation/). CI pins `3.3` (see `ruby/setup-ruby@v1` in `.github/workflows/ci.yml`); match it unless you have a reason to diverge.
+- k6 — [install guide](https://grafana.com/docs/k6/latest/set-up/install-k6/).
+- Java `17` or newer — e.g. [Eclipse Temurin](https://adoptium.net/installation/).
 - Synthea, available as `SYNTHEA_CMD`, a `synthea` executable on `PATH`, or `$SYNTHEA_HOME/run_synthea`.
-- Cloud credentials for one provider.
+- Cloud credentials for one provider (see below).
 
 Install the pinned Ansible dependencies from the repository root:
 
@@ -42,9 +42,11 @@ ansible-galaxy collection install -r ansible/requirements.yml
 
 Authenticate to one provider before running `up`:
 
-- AWS: run `aws sso login` or provide standard AWS environment credentials. Set `AWS_PROFILE` and `AWS_REGION` when needed.
-- Azure: run `az login`, then `az account set --subscription SUBSCRIPTION_ID` when your default subscription is not the target.
-- GCP: run `gcloud auth application-default login` or use an approved service account flow. GCP also requires `--var project_id=PROJECT_ID`.
+- AWS: run `aws sso login` or provide standard AWS environment credentials. Set `AWS_PROFILE` and `AWS_REGION` when needed. Install the CLI first if needed: [install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
+- Azure: run `az login`, then `az account set --subscription SUBSCRIPTION_ID` when your default subscription is not the target. Install the CLI first if needed: [install guide](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli).
+- GCP: install the `gcloud` CLI ([install guide](https://cloud.google.com/sdk/docs/install)), then run `gcloud auth application-default login` or use an approved service account flow. GCP also requires `--var project_id=PROJECT_ID`.
+  - `scripts/lab deploy`/`kubectl` need the cluster's kubeconfig auth plugin too: [`gke-gcloud-auth-plugin`](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin), normally `gcloud components install gke-gcloud-auth-plugin`. If your `gcloud` install is managed by an external package manager (apt/snap — `gcloud components install` refuses with "this installation is managed by an external package manager"), install the plugin via apt instead: add the [Cloud SDK apt repo](https://cloud.google.com/sdk/docs/install#deb) and `sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin`.
+  - Troubleshooting: if `kubectl` fails against a GKE cluster with `the server has asked for the client to provide credentials` even though `gke-gcloud-auth-plugin` is installed, your `gcloud` *active account* (`gcloud config get-value account`, used by the plugin) is a different, lower-privilege identity than your Application Default Credentials (`gcloud auth application-default print-access-token`) — common when running from a GCE VM, where `gcloud`'s active account can default to the VM's attached service account and its narrower instance scopes. Compare `gcloud auth print-access-token` and `gcloud auth application-default print-access-token` against `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=...` to confirm, then align them (e.g. `gcloud auth login` as the intended identity, or `gcloud config set account`) rather than assuming the plugin install itself is broken.
 
 ## Choose Run Settings
 
