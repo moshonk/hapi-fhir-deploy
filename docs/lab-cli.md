@@ -40,6 +40,30 @@ If `apply` fails because a resource already exists in the cloud but isn't yet tr
 
 For GCP, `up` also checks two resources proactively before every apply, since their failure modes don't surface a parseable `'ID' already exists` error: the private-services-access peering connection, and the Cloud SQL instance (`google_sql_database_instance.postgres` can finish creating successfully on the API side while `terraform apply` still fails with an opaque, message-less `Error waiting for Create Instance:` -- known `terraform-provider-google` flakiness on long-running Cloud SQL operations). Both checks query the live GCP API directly and import the resource into state if it's already there, so a re-run doesn't hit a real `already exists` conflict next time.
 
+### Doctor (prerequisite check)
+
+```sh
+scripts/lab doctor --cloud aws|azure|gcp [--format text|json]
+```
+
+Runs the exact same toolchain checks as `up`'s preflight (above) -- Terraform,
+Helm, kubectl, the Ansible venv binaries plus whether the pinned collections
+from `ansible/requirements.yml` are actually installed (not just that
+`ansible-galaxy` is on `PATH`), Ruby, k6, Java, and on GCP `gcloud`,
+`gke-gcloud-auth-plugin`, and an active Application Default Credentials
+token -- but read-only: it never provisions anything, always exits `0`, and
+ignores `LAB_SKIP_PREFLIGHT`. Both commands share one check implementation
+(`collect_prerequisite_checks` in `scripts/lab`) so they can't silently
+drift apart.
+
+Default output is a human-readable `[pass|warn|fail] label detail` line per
+check. `--format json` emits a JSON array of `{id, label, status, detail}`
+records instead, for scripting or for the Lab Control UI's prerequisite
+panel (`specs/009-lab-control-ui`) to consume directly.
+
+Use this when you just want to know "can I even start" without attempting
+`up`, or to confirm a missing prerequisite is fixed before retrying it.
+
 ### Deploy
 
 ```sh

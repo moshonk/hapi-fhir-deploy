@@ -21,7 +21,11 @@ Generated Terraform outputs, kubeconfigs, Synthea bundles, benchmark raw data, a
 
 ## Prerequisites
 
-Install these locally:
+Install these locally. Once installed, `scripts/lab doctor --cloud CLOUD` (see
+[lab-cli.md](lab-cli.md#doctor-prerequisite-check)) gives a read-only
+pass/warn/fail report against this whole list without attempting to
+provision anything -- useful for confirming you're ready before running `up`
+for real.
 
 - Terraform `>= 1.9.0, < 2.0.0` — [install guide](https://developer.hashicorp.com/terraform/install).
 - Python `3` — [downloads](https://www.python.org/downloads/).
@@ -39,6 +43,13 @@ Install the pinned Ansible dependencies from the repository root:
 python3 -m pip install -r ansible/requirements.txt
 ansible-galaxy collection install -r ansible/requirements.yml
 ```
+
+Want a browser-based alternative to typing the commands below by hand? See
+[`lab-control-ui/README.md`](../lab-control-ui/README.md) — a web control UI
+over this same `scripts/lab` CLI (autofilled config form, one-click lifecycle
+actions, live log streaming, a prerequisite panel backed by
+`scripts/lab doctor`). GCP only for now. It adds one new prerequisite of its
+own, for *hosting the UI itself* (not the lab lifecycle): Node.js 22.x.
 
 Authenticate to one provider before running `up`:
 

@@ -27,3 +27,10 @@ ansible/.venv/
 
 # Local benchmark result publications
 results/
+
+# Lab Control UI (specs/009-lab-control-ui)
+lab-control-ui/*/node_modules/
+lab-control-ui/*/dist/
+lab-control-ui/*/coverage/
+lab-control-ui/*/tsconfig.tsbuildinfo
+ansible/artifacts/lab/ui/

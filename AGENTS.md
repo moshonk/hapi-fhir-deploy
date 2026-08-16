@@ -62,6 +62,7 @@ The following specs are not Rev2 child workstreams (#2-#7); they belong to a new
 
 - `007-pgbouncer-connection-pooling`: amends issue #5 / `003-autoscaling-connection-budget` with an additive, opt-in pooled connection tier.
 - `008-echis-workload-benchmark`: extends issue #18's benchmark lab with a progressive eCHIS household/CHW workload benchmark; depends on `007-pgbouncer-connection-pooling` for its two highest tiers.
+- `009-lab-control-ui`: extends issue #18's benchmark lab with a browser-based control UI (`lab-control-ui/`) over the existing `scripts/lab` CLI -- autofilled config, one-click lifecycle actions, live log streaming, prerequisite checks via a new `scripts/lab doctor` subcommand. GCP only for now; provider-extensible by design.
 
 ## Validation Expectations
 
