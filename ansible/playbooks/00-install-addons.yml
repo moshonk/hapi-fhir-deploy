@@ -41,7 +41,11 @@
           defaultRules:
             create: false
           grafana:
-            enabled: false
+            # Auto-generated admin password (kube-prometheus-stack default,
+            # not set here): kubectl -n monitoring get secret
+            # prometheus-grafana -o jsonpath='{.data.admin-password}' |
+            # base64 -d. Admin user defaults to "admin".
+            enabled: "{{ install_grafana | bool }}"
           prometheus:
             prometheusSpec:
               # kube-prometheus-stack's chart default only selects

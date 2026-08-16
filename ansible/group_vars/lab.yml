@@ -41,6 +41,7 @@ hapi_database_secret_name: hapi-fhir-postgres
 hapi_database_secret_key: password
 
 install_prometheus_stack: true
+install_grafana: true
 install_metrics_server: true
 install_keda: true
 apply_autoscaling: true

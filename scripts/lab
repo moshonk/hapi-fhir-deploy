@@ -54,6 +54,8 @@ Usage:
   scripts/lab unexpose-fhir --cloud gcp --name NAME --var project_id=P
   scripts/lab expose-prometheus --cloud gcp --name NAME --var project_id=P [--port 9090] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-prometheus --cloud gcp --name NAME --var project_id=P
+  scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 80] [--source-ranges CIDR[,CIDR...]]
+  scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
@@ -80,6 +82,14 @@ Commands:
   expose-prometheus    GCP only. Same as expose-fhir, for the kube-prometheus-stack Prometheus
                        Service (default port 9090) 00-install-addons.yml installs instead.
   unexpose-prometheus  GCP only. Reverse of expose-prometheus. Safe to run even if nothing is
+                       currently exposed.
+  expose-grafana       GCP only. Same as expose-fhir, for the kube-prometheus-stack Grafana
+                       Service (default port 80) 00-install-addons.yml installs when
+                       install_grafana is true. Login is required (unlike FHIR/Prometheus,
+                       which have no auth at all): user "admin", password from
+                       `kubectl -n monitoring get secret prometheus-grafana -o
+                       jsonpath='{.data.admin-password}' | base64 -d`.
+  unexpose-grafana     GCP only. Reverse of expose-grafana. Safe to run even if nothing is
                        currently exposed.
 
 Environment:
@@ -138,6 +148,10 @@ Environment:
                           monitoring. Used by expose-prometheus and unexpose-prometheus.
   PROMETHEUS_SERVICE_NAME Prometheus Kubernetes Service name; defaults to
                           prometheus-kube-prometheus-prometheus. Used by expose-prometheus.
+  GRAFANA_NAMESPACE       Kubernetes namespace for Grafana; defaults to monitoring.
+                          Used by expose-grafana and unexpose-grafana.
+  GRAFANA_SERVICE_NAME    Grafana Kubernetes Service name; defaults to prometheus-grafana.
+                          Used by expose-grafana.
 USAGE
 }
 
@@ -1339,7 +1353,7 @@ expose_public_service() {
   local port="${PORT:-$target_port}"
   local source_ranges="${SOURCE_RANGES:-0.0.0.0/0}"
   if [[ "$source_ranges" == "0.0.0.0/0" ]]; then
-    log "Opening firewall rule to the entire internet (0.0.0.0/0, the default) -- $display_name has no auth in front of it in this lab. Pass --source-ranges CIDR to restrict it (e.g. to your own IP/32)."
+    log "Opening firewall rule to the entire internet (0.0.0.0/0, the default). Pass --source-ranges CIDR to restrict it (e.g. to your own IP/32)."
   else
     log "Restricting firewall rule to $source_ranges"
   fi
@@ -1361,7 +1375,7 @@ expose_public_service() {
       --action=ALLOW \
       --rules="tcp:$port" \
       --source-ranges="$source_ranges" \
-      --description="scripts/lab expose-$state_slug: public access to $display_name ($svc) in lab '$NAME'. No auth in front. Run 'scripts/lab unexpose-$state_slug' or 'scripts/lab down' to remove."
+      --description="scripts/lab expose-$state_slug: public access to $display_name ($svc) in lab '$NAME'. Run 'scripts/lab unexpose-$state_slug' or 'scripts/lab down' to remove."
   fi
 
   local state_file
@@ -1460,14 +1474,23 @@ cmd_unexpose_prometheus() {
   unexpose_public_service prometheus prometheus 9090
 }
 
+cmd_expose_grafana() {
+  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana"
+}
+
+cmd_unexpose_grafana() {
+  unexpose_public_service grafana grafana 80
+}
+
 cmd_down() {
   require_cloud
   require_name
 
   if [[ "$CLOUD" == "gcp" ]]; then
-    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus' before destroying infrastructure"
+    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus'/'expose-grafana' before destroying infrastructure"
     cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
     cmd_unexpose_prometheus || log "WARNING: could not fully clean up public Prometheus exposure (see above); continuing with destroy anyway"
+    cmd_unexpose_grafana || log "WARNING: could not fully clean up public Grafana exposure (see above); continuing with destroy anyway"
   fi
 
   local tf_bin
@@ -1557,6 +1580,8 @@ case "$COMMAND" in
   unexpose-fhir) cmd_unexpose_fhir ;;
   expose-prometheus) cmd_expose_prometheus ;;
   unexpose-prometheus) cmd_unexpose_prometheus ;;
+  expose-grafana) cmd_expose_grafana ;;
+  unexpose-grafana) cmd_unexpose_grafana ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

@@ -309,6 +309,20 @@ alternative](#alternative-reach-it-at-the-control-plane-hosts-public-ip)):
 scripts/lab expose-prometheus --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
 ```
 
+kube-prometheus-stack's bundled Grafana is installed by default
+(`install_grafana: true` in `ansible/group_vars/lab.yml`), with the same
+`expose-*`/`unexpose-*` pair available for it. Unlike FHIR and Prometheus,
+Grafana requires login -- user `admin`, password from:
+
+```sh
+kubectl -n monitoring get secret prometheus-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d
+```
+
+```sh
+scripts/lab expose-grafana --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
+```
+
 ```sh
 PROMETHEUS_BASE_URL=http://localhost:9090 \
 FHIR_BASE_URL=http://localhost:8080/fhir \
@@ -357,16 +371,16 @@ scripts/lab down --cloud gcp --name "$LAB_NAME" --yes \
   --var kubernetes_version=1.35.6-gke.1258000
 ```
 
-This also removes any `expose-fhir`/`expose-prometheus` firewall rule/
-port-forward for `$LAB_NAME` before destroying infrastructure — no separate
-`unexpose-fhir`/`unexpose-prometheus` call needed if you used Step 7's or
-Step 9's public-IP alternative.
+This also removes any `expose-fhir`/`expose-prometheus`/`expose-grafana`
+firewall rule/port-forward for `$LAB_NAME` before destroying infrastructure —
+no separate `unexpose-*` call needed if you used Step 7's or Step 9's
+public-IP alternatives.
 
 If `down` fails, go to the GCP console and delete GKE/Cloud SQL resources
-labeled with `$LAB_NAME` and the TTL you set. If only the `expose-fhir`/
-`expose-prometheus` cleanup failed (logged as a warning, `down` still
-proceeds to destroy infrastructure), check for a stray
-`allow-hapi-fhir-*-$LAB_NAME` or `allow-prometheus-*-$LAB_NAME` firewall rule
+labeled with `$LAB_NAME` and the TTL you set. If only an `expose-*` cleanup
+failed (logged as a warning, `down` still proceeds to destroy
+infrastructure), check for a stray `allow-hapi-fhir-*-$LAB_NAME`,
+`allow-prometheus-*-$LAB_NAME`, or `allow-grafana-*-$LAB_NAME` firewall rule
 in the GCP console.
 
 ## Reference: full variable list used above
