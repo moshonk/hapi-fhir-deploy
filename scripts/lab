@@ -63,6 +63,18 @@ Commands:
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
   TERRAFORM_BIN           Terraform executable; defaults to terraform.
+  LAB_SKIP_PREFLIGHT      `up` only. Defaults to false: `up` checks the whole lab
+                          lifecycle's toolchain (not just what `up` itself needs)
+                          before provisioning anything, so a missing `deploy`/
+                          `seed`/`benchmark` prerequisite is a fast failure instead
+                          of a surprise after 10+ minutes of billable cluster
+                          creation. Set to true to skip this check.
+  LAB_TF_AUTO_IMPORT      `up` only. Defaults to true: if apply fails because a
+                          resource already exists in the cloud but isn't yet in
+                          this workspace's Terraform state (e.g. left behind by
+                          a prior interrupted `up`, or an incomplete `down`),
+                          import it and retry instead of failing outright. Set
+                          to false to restore the old strict-fail behavior.
   ANSIBLE_PLAYBOOK_BIN    ansible-playbook executable; defaults to ansible-playbook.
   ANSIBLE_GALAXY_BIN      ansible-galaxy executable; defaults to ansible-galaxy.
   LAB_KUBECONFIG          Explicit kubeconfig path for deploy; otherwise uses generated lab kubeconfig.
@@ -327,9 +339,276 @@ write_terraform_outputs() {
   log "Wrote ignored kubeconfig to $kubeconfig_file"
 }
 
+# up only: whether to auto-reuse a pre-existing cloud resource that isn't
+# yet tracked in this workspace's Terraform state, instead of failing apply.
+TF_AUTO_IMPORT="${LAB_TF_AUTO_IMPORT:-true}"
+
+# up only: whether to skip the whole-lifecycle prerequisites check before
+# provisioning. See check_lab_prerequisites.
+LAB_SKIP_PREFLIGHT="${LAB_SKIP_PREFLIGHT:-false}"
+
+terraform_state_has_resource() {
+  local tf_bin="$1" tf_dir="$2" addr="$3"
+  "$tf_bin" -chdir="$tf_dir" state list 2>/dev/null | grep -qxF "$addr"
+}
+
+# Looks up the value most recently supplied via --var/--terraform-var
+# "key=value". Prints nothing and fails if key was never supplied.
+tf_var_get() {
+  local key="$1"
+  local i
+  for ((i = ${#TF_VARS[@]} - 1; i >= 0; i--)); do
+    [[ "${TF_VARS[$i]}" == "-var" ]] || continue
+    local kv="${TF_VARS[$((i + 1))]:-}"
+    if [[ "$kv" == "$key="* ]]; then
+      printf '%s' "${kv#"$key"=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# infra/terraform/gcp/main.tf's private-services-access peering
+# (google_service_networking_connection.private_service) doesn't surface a
+# parseable "already exists" error on re-create the way the other resources
+# below do -- the servicenetworking API rejects a conflicting create with a
+# different error shape entirely. Reconcile it proactively, before apply,
+# rather than relying on the generic retry-and-import path.
+gcp_reuse_service_networking_connection() {
+  local tf_bin="$1" tf_dir="$2"
+  shift 2
+  local var_args=("$@")
+
+  [[ "$DRY_RUN" == true ]] && return 0
+
+  local addr="google_service_networking_connection.private_service"
+  terraform_state_has_resource "$tf_bin" "$tf_dir" "$addr" && return 0
+
+  local project_id
+  project_id="$(tf_var_get project_id)" || return 0
+  [[ -n "$project_id" ]] || return 0
+
+  local import_id="projects/${project_id}/global/networks/${NAME}:servicenetworking.googleapis.com"
+  if "$tf_bin" -chdir="$tf_dir" import "${var_args[@]}" "$addr" "$import_id" >/dev/null 2>&1; then
+    log "Reused existing GCP private-services-access connection for '$NAME' (was not tracked in this workspace's state)."
+  fi
+  # Otherwise the connection genuinely doesn't exist yet; apply will create it.
+}
+
+# infra/terraform/gcp/main.tf's Cloud SQL instance
+# (google_sql_database_instance.postgres) has been observed to finish
+# creating successfully on the API side while `terraform apply` still fails,
+# because the provider's operation-wait call can die with an opaque,
+# message-less "Error waiting for Create Instance: " -- known
+# terraform-provider-google flakiness on long-running Cloud SQL operations.
+# That error text has no 'ID' already exists to match, so
+# parse_apply_conflicts never fires for it and the instance is silently
+# orphaned outside Terraform state; the next `up` then hits a real "already
+# exists" 409. Reconcile it proactively, before apply, the same way
+# gcp_reuse_service_networking_connection does above -- ask the Cloud SQL
+# Admin API directly whether the instance already exists rather than relying
+# on apply's error text.
+gcp_reuse_sql_database_instance() {
+  local tf_bin="$1" tf_dir="$2"
+  shift 2
+  local var_args=("$@")
+
+  [[ "$DRY_RUN" == true ]] && return 0
+
+  local addr="google_sql_database_instance.postgres"
+  terraform_state_has_resource "$tf_bin" "$tf_dir" "$addr" && return 0
+
+  local project_id
+  project_id="$(tf_var_get project_id)" || return 0
+  [[ -n "$project_id" ]] || return 0
+
+  command -v gcloud >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  local token
+  token="$(gcloud auth application-default print-access-token 2>/dev/null)" || return 0
+  [[ -n "$token" ]] || return 0
+
+  local instance_name="${NAME}-postgres"
+  local instance_json
+  instance_json="$(curl -fsS --max-time 15 \
+    -H "Authorization: Bearer $token" \
+    "https://sqladmin.googleapis.com/sql/v1beta4/projects/${project_id}/instances/${instance_name}" 2>/dev/null)" || return 0
+  [[ -n "$instance_json" ]] || return 0
+
+  # Only reuse an instance the API reports as actually present (has a
+  # "state" field, e.g. RUNNABLE) -- a 404 body has none, so this also
+  # covers the common case where the instance genuinely doesn't exist yet.
+  # A plain sed extraction (not ruby -rjson, unlike the rest of this file)
+  # keeps `up` free of the Ruby prerequisite the other subcommands need.
+  local instance_state
+  instance_state="$(printf '%s\n' "$instance_json" | sed -n 's/.*"state": *"\([A-Z_]*\)".*/\1/p' | head -n1)"
+  [[ -n "$instance_state" ]] || return 0
+
+  local import_id="${project_id}/${instance_name}"
+  if "$tf_bin" -chdir="$tf_dir" import "${var_args[@]}" "$addr" "$import_id" >/dev/null 2>&1; then
+    log "Reused existing GCP Cloud SQL instance '$instance_name' for '$NAME' (was not tracked in this workspace's state -- likely left behind by a prior apply whose operation-wait failed after the instance actually finished creating)."
+  fi
+  # Otherwise the instance genuinely doesn't exist yet; apply will create it.
+}
+
+# Extracts tab-separated "<error summary>\t<resource address>" pairs from a
+# `terraform apply` log, one per "Error: ... 'ID' already exists" block --
+# Terraform's standard shape for a provider create call that conflicts with
+# a real cloud resource not present in this workspace's state.
+parse_apply_conflicts() {
+  awk '
+    /^Error: / { summary = $0; next }
+    /with .+,$/ {
+      if (summary != "") {
+        addr = $0
+        sub(/^.*with /, "", addr)
+        sub(/,$/, "", addr)
+        print summary "\t" addr
+        summary = ""
+      }
+    }
+  ' "$1"
+}
+
+# Runs `terraform apply`. If it fails because a resource already exists in
+# the cloud but isn't yet tracked in this workspace's state (e.g. left
+# behind by a prior interrupted `up`, or a `down` that didn't fully
+# complete), imports the existing resource and retries instead of failing
+# outright. Falls back to surfacing the original error unchanged when a
+# conflict can't be auto-resolved (unrecognized error shape, or
+# LAB_TF_AUTO_IMPORT=false).
+terraform_apply_reusing_existing() {
+  local tf_bin="$1" tf_dir="$2" log_file="$3"
+  shift 3
+  local apply_args=("$@")
+
+  if [[ "$DRY_RUN" == true ]]; then
+    run "$tf_bin" -chdir="$tf_dir" "${apply_args[@]}"
+    return 0
+  fi
+
+  local var_args=()
+  local i
+  for ((i = 0; i < ${#apply_args[@]}; i++)); do
+    case "${apply_args[$i]}" in
+      apply | -auto-approve) ;;
+      *) var_args+=("${apply_args[$i]}") ;;
+    esac
+  done
+
+  local max_attempts=8
+  local attempt=1
+  while ((attempt <= max_attempts)); do
+    printf '+'
+    printf ' %q' "$tf_bin" -chdir="$tf_dir" "${apply_args[@]}"
+    printf '\n'
+
+    if "$tf_bin" -chdir="$tf_dir" "${apply_args[@]}" -no-color 2>&1 | tee "$log_file"; then
+      return 0
+    fi
+
+    if [[ "$TF_AUTO_IMPORT" != true ]]; then
+      die "terraform apply failed (set LAB_TF_AUTO_IMPORT=true to auto-reuse pre-existing resources; see $log_file)"
+    fi
+
+    local imported=0 seen=" "
+    while IFS=$'\t' read -r summary addr; do
+      [[ "$summary" == *"already exists"* ]] || continue
+      [[ "$seen" == *" $addr "* ]] && continue
+      seen="$seen$addr "
+      terraform_state_has_resource "$tf_bin" "$tf_dir" "$addr" && continue
+
+      local existing_id
+      existing_id="$(printf '%s\n' "$summary" | sed -E "s/.*'([^']+)' already exists.*/\1/")"
+      [[ -n "$existing_id" && "$existing_id" != "$summary" ]] || continue
+
+      log "'$addr' already exists in the cloud ($existing_id); importing it into Terraform state instead of failing."
+      if "$tf_bin" -chdir="$tf_dir" import "${var_args[@]}" "$addr" "$existing_id"; then
+        imported=$((imported + 1))
+      else
+        log "WARNING: could not auto-import $addr; leaving the apply error as-is."
+      fi
+    done < <(parse_apply_conflicts "$log_file")
+
+    if ((imported == 0)); then
+      die "terraform apply failed; see error above (no auto-importable 'already exists' conflicts found; log: $log_file)"
+    fi
+
+    attempt=$((attempt + 1))
+  done
+
+  die "terraform apply still failing after $max_attempts auto-import attempts; see $log_file"
+}
+
+# `up` provisions billable cloud infrastructure (a GKE/EKS/AKS cluster, a
+# managed database, ...) *before* `deploy`/`seed`/`benchmark` ever run. A
+# missing tool those later stages need -- helm, kubectl, the GKE kubeconfig
+# auth plugin, ansible-galaxy, ruby, k6, java -- would otherwise only surface
+# as a failure minutes (or tens of minutes) into a live run, after the cloud
+# spend and wait are already sunk. Check the whole lifecycle's toolchain up
+# front instead, reporting every gap at once rather than one discovery-by-
+# failure at a time. See docs/getting-started-benchmark-lab.md#prerequisites
+# for install links and version-pinning notes behind each of these.
+check_lab_prerequisites() {
+  if [[ "$LAB_SKIP_PREFLIGHT" == true ]]; then
+    log "Skipping prerequisites check (LAB_SKIP_PREFLIGHT=true)"
+    return 0
+  fi
+
+  local missing=() warnings=()
+  local tf_bin kbin
+  tf_bin="$(terraform_bin)"
+  kbin="$(kubectl_bin)"
+
+  command -v "$tf_bin" >/dev/null 2>&1 || missing+=("$tf_bin -- Terraform: https://developer.hashicorp.com/terraform/install")
+  command -v helm >/dev/null 2>&1 || missing+=("helm -- Helm 3.x, used by 'deploy': https://helm.sh/docs/intro/install/")
+  command -v "$kbin" >/dev/null 2>&1 || missing+=("$kbin -- used by 'deploy' readiness checks and cluster access: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/")
+  command -v "${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook}" >/dev/null 2>&1 || missing+=("${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook} -- Ansible, used by 'deploy': https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html")
+  command -v "${ANSIBLE_GALAXY_BIN:-ansible-galaxy}" >/dev/null 2>&1 || missing+=("${ANSIBLE_GALAXY_BIN:-ansible-galaxy} -- bundled with Ansible")
+  command -v "${RUBY_BIN:-ruby}" >/dev/null 2>&1 || missing+=("${RUBY_BIN:-ruby} -- used by 'seed'/'benchmark'/'report': https://www.ruby-lang.org/en/documentation/installation/")
+  command -v "${K6_BIN:-k6}" >/dev/null 2>&1 || missing+=("${K6_BIN:-k6} -- used by 'benchmark': https://grafana.com/docs/k6/latest/set-up/install-k6/")
+  command -v java >/dev/null 2>&1 || missing+=("java 17+ -- used by Synthea seed generation: https://adoptium.net/installation/")
+
+  case "$CLOUD" in
+    gcp)
+      command -v gcloud >/dev/null 2>&1 || missing+=("gcloud -- GCP CLI: https://cloud.google.com/sdk/docs/install")
+      command -v gke-gcloud-auth-plugin >/dev/null 2>&1 || missing+=("gke-gcloud-auth-plugin -- required for kubectl/deploy to authenticate to the GKE cluster 'up' creates: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin")
+      if command -v gcloud >/dev/null 2>&1 && ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
+        warnings+=("gcloud has no Application Default Credentials -- Terraform will fail to authenticate. Run: gcloud auth application-default login")
+      fi
+      ;;
+    aws)
+      command -v aws >/dev/null 2>&1 || missing+=("aws -- AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html")
+      ;;
+    azure)
+      command -v az >/dev/null 2>&1 || missing+=("az -- Azure CLI: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli")
+      ;;
+  esac
+
+  local w
+  for w in "${warnings[@]}"; do
+    log "WARNING: $w"
+  done
+
+  if ((${#missing[@]})); then
+    log "Missing prerequisites for the '$CLOUD' lab lifecycle (up/deploy/seed/benchmark):"
+    local item
+    for item in "${missing[@]}"; do
+      log "  - $item"
+    done
+    if [[ "$DRY_RUN" == true ]]; then
+      log "Dry run: continuing despite missing prerequisites"
+    else
+      die "install the missing tools above (or set LAB_SKIP_PREFLIGHT=true to bypass this check) before running 'up'"
+    fi
+  fi
+}
+
 cmd_up() {
   require_cloud
   require_name
+  check_lab_prerequisites
 
   local tf_bin
   tf_bin="$(terraform_bin)"
@@ -355,7 +634,16 @@ cmd_up() {
     apply_args+=("${TF_VARS[@]}")
   fi
 
-  run "$tf_bin" -chdir="$tf_dir" "${apply_args[@]}"
+  if [[ "$CLOUD" == "gcp" && "$TF_AUTO_IMPORT" == true ]]; then
+    local sn_var_args=("-var" "lab_name=$NAME")
+    if ((${#TF_VARS[@]})); then
+      sn_var_args+=("${TF_VARS[@]}")
+    fi
+    gcp_reuse_service_networking_connection "$tf_bin" "$tf_dir" "${sn_var_args[@]}"
+    gcp_reuse_sql_database_instance "$tf_bin" "$tf_dir" "${sn_var_args[@]}"
+  fi
+
+  terraform_apply_reusing_existing "$tf_bin" "$tf_dir" "$dir/terraform-apply.log" "${apply_args[@]}"
   write_terraform_outputs "$tf_bin" "$tf_dir" "$dir"
 }
 
@@ -390,7 +678,17 @@ cmd_deploy() {
   mkdir -p "$collections_path"
 
   log "Installing pinned Ansible collections"
-  run "$ansible_galaxy_bin" collection install -r "$ROOT_DIR/ansible/requirements.yml" -p "$collections_path"
+  # --force is required here, not optional: without it, ansible-galaxy checks
+  # its *default* configured collections path (e.g. ~/.ansible/collections)
+  # first, and if the pinned collection is already present there (from an
+  # unrelated `ansible-galaxy collection install` run on this machine, with
+  # no -p), it prints "Nothing to do. All requested collections are already
+  # installed." and skips installing into our project-local $collections_path
+  # -- leaving it empty. `deploy` below then scopes ANSIBLE_COLLECTIONS_PATH
+  # to only that (now-empty) project-local path, so ansible-playbook fails
+  # with "No module named 'ansible_collections.kubernetes'" even though the
+  # install step reported success.
+  run "$ansible_galaxy_bin" collection install -r "$ROOT_DIR/ansible/requirements.yml" -p "$collections_path" --force
 
   log "Deploying HAPI FHIR to $CLOUD lab '$NAME' with Ansible"
   local env_args=(
