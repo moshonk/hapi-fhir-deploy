@@ -23,6 +23,8 @@ INDIVIDUALS_PER_HOUSEHOLD=""
 PARALLEL_SHARDS=""
 IN_CLUSTER=false
 REPLICAS=""
+PORT=""
+SOURCE_RANGES=""
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
@@ -48,6 +50,8 @@ Usage:
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
   scripts/lab pause-autoscaling --replicas N
   scripts/lab resume-autoscaling
+  scripts/lab expose-fhir --cloud gcp --name NAME --var project_id=P [--port 8080] [--source-ranges CIDR[,CIDR...]]
+  scripts/lab unexpose-fhir --cloud gcp --name NAME --var project_id=P
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
@@ -59,6 +63,16 @@ Commands:
   pause-autoscaling    Pin the KEDA-managed replica count to N for a bulk data-load window
                        (see docs/autoscaling.md's "Bulk Data-Load Window Procedure").
   resume-autoscaling   Remove the pin so KEDA resumes live-metric-driven autoscaling.
+  expose-fhir          GCP only. Open a firewall rule and a 0.0.0.0-bound `kubectl port-forward`
+                       so HAPI FHIR is reachable at http://EXTERNAL_IP:PORT/fhir from outside the
+                       control-plane host running `scripts/lab`, not just via SSH/VS Code tunnels.
+                       Defaults --source-ranges to the caller's own detected public IP/32; pass
+                       --source-ranges 0.0.0.0/0 to open it to the entire internet instead (HAPI
+                       FHIR has no auth in front of it in this lab -- know what you're opting into).
+                       `down` calls this same cleanup automatically, but run it yourself to close
+                       exposure early without tearing down the whole lab.
+  unexpose-fhir        GCP only. Reverse of expose-fhir: kill the tracked port-forward and delete
+                       the firewall rule. Safe to run even if nothing is currently exposed.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -108,7 +122,10 @@ Environment:
   LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
                           defaults to echis-shard-output. Used by --in-cluster.
   HAPI_NAMESPACE          Kubernetes namespace for the HAPI FHIR deployment; defaults
-                          to fhir. Used by pause-autoscaling and resume-autoscaling.
+                          to fhir. Used by pause-autoscaling, resume-autoscaling,
+                          expose-fhir, and unexpose-fhir.
+  HAPI_SERVICE_NAME       HAPI FHIR Kubernetes Service name; defaults to
+                          hapi-fhir-hapi-fhir-jpaserver. Used by expose-fhir.
 USAGE
 }
 
@@ -205,6 +222,16 @@ parse_args() {
       --replicas)
         [[ -n "${2:-}" ]] || die "--replicas requires a value"
         REPLICAS="$2"
+        shift 2
+        ;;
+      --port)
+        [[ -n "${2:-}" ]] || die "--port requires a value"
+        PORT="$2"
+        shift 2
+        ;;
+      --source-ranges)
+        [[ -n "${2:-}" ]] || die "--source-ranges requires a value"
+        SOURCE_RANGES="$2"
         shift 2
         ;;
       --auto-approve)
@@ -1232,9 +1259,159 @@ confirm_destroy() {
   [[ "$answer" == "$NAME" ]] || die "destroy cancelled"
 }
 
+fhir_public_exposure_state_file() {
+  printf '%s/fhir-public-exposure.env' "$(state_dir)"
+}
+
+# Best-effort public-IP self-lookup, used only as the *default* firewall
+# --source-ranges scope (never for anything security-critical beyond that).
+# Tries a couple of independent echo services so one outage doesn't block
+# expose-fhir entirely; the caller must fall back to requiring an explicit
+# --source-ranges if every lookup fails.
+detect_public_ip() {
+  local url ip
+  for url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
+    ip="$(curl -fsS --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      printf '%s' "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Opens a GCP firewall rule and a 0.0.0.0-bound `kubectl port-forward` so
+# HAPI FHIR is reachable from outside the host running `scripts/lab` (e.g. at
+# a GCE control-plane VM's own public IP), not just via an SSH/VS Code tunnel.
+# HAPI FHIR has no auth in front of it in this lab, so --source-ranges
+# defaults to the caller's own detected /32 rather than the whole internet --
+# pass --source-ranges 0.0.0.0/0 explicitly to open it up fully.
+cmd_expose_fhir() {
+  require_cloud
+  require_name
+  [[ "$CLOUD" == "gcp" ]] || die "expose-fhir is currently GCP-only; see docs/gcp-echis-t3-lab-runbook.md for the manual steps to adapt this for aws/azure"
+
+  need_command_unless_dry_run gcloud
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+
+  local project_id
+  project_id="$(tf_var_get project_id)" || die "expose-fhir requires --var project_id=PROJECT_ID"
+
+  local port="${PORT:-8080}"
+  local source_ranges="$SOURCE_RANGES"
+  local display_ip=""
+  if [[ -z "$source_ranges" ]]; then
+    display_ip="$(detect_public_ip)" || die "could not auto-detect your public IP to scope --source-ranges; pass --source-ranges explicitly (e.g. --source-ranges 0.0.0.0/0 to open it to the entire internet -- HAPI FHIR has no auth in front of it in this lab, know what you're opting into)"
+    source_ranges="${display_ip}/32"
+    log "Auto-detected your public IP as $display_ip; restricting the firewall rule to $source_ranges (pass --source-ranges to override, e.g. --source-ranges 0.0.0.0/0 for the whole internet)"
+  fi
+
+  local firewall_rule="allow-hapi-fhir-${port}-${NAME}"
+  local ns="${HAPI_NAMESPACE:-fhir}"
+  local svc="${HAPI_SERVICE_NAME:-hapi-fhir-hapi-fhir-jpaserver}"
+
+  local rule_exists=false
+  if [[ "$DRY_RUN" != true ]] && gcloud compute firewall-rules describe "$firewall_rule" --project "$project_id" >/dev/null 2>&1; then
+    rule_exists=true
+  fi
+
+  log "$([[ "$rule_exists" == true ]] && echo Updating || echo Creating) GCP firewall rule '$firewall_rule' (tcp:$port from $source_ranges)"
+  if [[ "$rule_exists" == true ]]; then
+    run gcloud compute firewall-rules update "$firewall_rule" --project "$project_id" --source-ranges="$source_ranges"
+  else
+    run gcloud compute firewall-rules create "$firewall_rule" \
+      --project "$project_id" \
+      --direction=INGRESS \
+      --action=ALLOW \
+      --rules="tcp:$port" \
+      --source-ranges="$source_ranges" \
+      --description="scripts/lab expose-fhir: public access to HAPI FHIR lab '$NAME'. No auth in front -- synthetic data only. Run 'scripts/lab unexpose-fhir' or 'scripts/lab down' to remove."
+  fi
+
+  local state_file
+  state_file="$(fhir_public_exposure_state_file)"
+  local old_pid
+  old_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
+  if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+    log "Stopping previous exposed port-forward (pid $old_pid)"
+    run kill "$old_pid"
+  fi
+
+  mkdir -p "$(state_dir)"
+  local pf_log="$(state_dir)/fhir-public-portforward.log"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    run "$kbin" -n "$ns" port-forward --address 0.0.0.0 "svc/$svc" "$port:8080"
+    return 0
+  fi
+
+  nohup "$kbin" -n "$ns" port-forward --address 0.0.0.0 "svc/$svc" "$port:8080" >"$pf_log" 2>&1 &
+  local pf_pid=$!
+  disown
+  sleep 2
+  kill -0 "$pf_pid" 2>/dev/null || die "port-forward failed to start; see $pf_log"
+
+  {
+    printf 'FIREWALL_RULE=%s\n' "$firewall_rule"
+    printf 'PORT=%s\n' "$port"
+    printf 'PORT_FORWARD_PID=%s\n' "$pf_pid"
+    printf 'PROJECT_ID=%s\n' "$project_id"
+  } >"$state_file"
+
+  [[ -n "$display_ip" ]] || display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
+  log "HAPI FHIR is reachable at http://${display_ip}:${port}/fhir (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
+  log "Run 'scripts/lab unexpose-fhir --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
+}
+
+# Reverse of expose-fhir: kills the tracked port-forward and deletes the
+# firewall rule. Safe to call even when nothing is currently exposed (no-op).
+cmd_unexpose_fhir() {
+  require_cloud
+  require_name
+  if [[ "$CLOUD" != "gcp" ]]; then
+    log "unexpose-fhir is GCP-only; nothing to do for $CLOUD"
+    return 0
+  fi
+
+  local state_file
+  state_file="$(fhir_public_exposure_state_file)"
+
+  local firewall_rule="" pf_pid="" project_id=""
+  if [[ -f "$state_file" ]]; then
+    firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
+    pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
+    project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
+  fi
+  [[ -n "$project_id" ]] || project_id="$(tf_var_get project_id)" || true
+  [[ -n "$firewall_rule" ]] || firewall_rule="allow-hapi-fhir-${PORT:-8080}-${NAME}"
+
+  if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
+    log "Stopping exposed port-forward (pid $pf_pid)"
+    run kill "$pf_pid"
+  fi
+
+  local project_flag=()
+  [[ -n "$project_id" ]] && project_flag=(--project "$project_id")
+
+  if [[ "$DRY_RUN" != true ]] && ! gcloud compute firewall-rules describe "$firewall_rule" "${project_flag[@]}" >/dev/null 2>&1; then
+    log "Firewall rule '$firewall_rule' not found (already removed or never created); nothing to delete"
+  else
+    run gcloud compute firewall-rules delete "$firewall_rule" "${project_flag[@]}" --quiet
+  fi
+
+  rm -f "$state_file"
+}
+
 cmd_down() {
   require_cloud
   require_name
+
+  if [[ "$CLOUD" == "gcp" ]]; then
+    log "Cleaning up any public FHIR exposure from 'expose-fhir' before destroying infrastructure"
+    cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
+  fi
 
   local tf_bin
   tf_bin="$(terraform_bin)"
@@ -1319,6 +1496,8 @@ case "$COMMAND" in
   down) cmd_down ;;
   pause-autoscaling) cmd_pause_autoscaling ;;
   resume-autoscaling) cmd_resume_autoscaling ;;
+  expose-fhir) cmd_expose_fhir ;;
+  unexpose-fhir) cmd_unexpose_fhir ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

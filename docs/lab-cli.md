@@ -164,6 +164,21 @@ scripts/lab down --cloud aws|azure|gcp --name NAME --yes
 
 `down` selects the Terraform workspace for `NAME` and runs destroy with the same `lab_name` value used by `up`. Run this command even after failed deploy, seed, or benchmark steps so cloud resources do not continue to accrue cost.
 
+On GCP, `down` also runs `unexpose-fhir`'s cleanup first (see below) so a forgotten `expose-fhir` doesn't outlive the lab. That cleanup is best-effort: a failure there logs a warning but does not block the actual Terraform destroy.
+
+### Public exposure (GCP only)
+
+```sh
+scripts/lab expose-fhir --cloud gcp --name NAME --var project_id=P [--port 8080] [--source-ranges CIDR[,CIDR...]]
+scripts/lab unexpose-fhir --cloud gcp --name NAME --var project_id=P
+```
+
+`kubectl port-forward` (Step 7 of the [GCP T3 runbook](gcp-echis-t3-lab-runbook.md)) only binds `127.0.0.1`, reachable via an SSH/VS Code Remote tunnel. `expose-fhir` is for the case where you're driving `scripts/lab` from a GCE VM directly and want HAPI FHIR reachable at that VM's own public IP without a tunnel: it opens a GCP firewall rule for `tcp:PORT` and starts a `0.0.0.0`-bound `kubectl port-forward` in the background, then prints the reachable `http://EXTERNAL_IP:PORT/fhir` URL.
+
+**HAPI FHIR has no authentication in front of it in this lab.** `--source-ranges` defaults to your own detected public IP as a `/32` (via `api.ipify.org`/`ifconfig.me`/`icanhazip.com`, first one that responds) rather than the whole internet — pass `--source-ranges 0.0.0.0/0` explicitly to open it to everyone. Whatever range you choose can read and write the FHIR API for as long as the exposure is up.
+
+State (the firewall rule name, port-forward PID, and project) is tracked in `ansible/artifacts/lab/gcp/<name>/fhir-public-exposure.env`. `unexpose-fhir` reads it back to kill the port-forward and delete the firewall rule, and is safe to run even when nothing is currently exposed (no-op). Re-running `expose-fhir` for the same lab replaces the previous exposure rather than leaking an orphaned port-forward process. Requires `KUBECONFIG` to be set, same as `pause-autoscaling`/`resume-autoscaling`.
+
 ### Autoscaling (bulk data-load window)
 
 ```sh

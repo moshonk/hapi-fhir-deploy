@@ -197,6 +197,36 @@ export FHIR_BASE_URL=http://localhost:8080/fhir
 curl -fsS "$FHIR_BASE_URL/metadata" >/dev/null
 ```
 
+### Alternative: reach it at the control-plane host's public IP
+
+The `port-forward` above only binds `127.0.0.1`, reachable through an SSH/VS
+Code Remote tunnel. If you're driving this runbook from a GCE VM directly (not
+tunneling in) and want to hit the FHIR endpoint from your own machine's
+browser/`curl` without a tunnel, use `expose-fhir` instead of the plain
+`port-forward` command above:
+
+```sh
+scripts/lab expose-fhir --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
+```
+
+This opens a GCP firewall rule (`tcp:8080`, scoped by default to your own
+detected public IP `/32` — pass `--source-ranges 0.0.0.0/0` to open it to the
+entire internet instead) and starts a `0.0.0.0`-bound `kubectl port-forward`
+in the background, then prints the reachable URL
+(`http://EXTERNAL_IP:8080/fhir`). **HAPI FHIR has no authentication in front
+of it in this lab** — the data is synthetic, but anything in the
+`--source-ranges` you choose can read and write to the FHIR API for as long as
+it's up, so prefer the default (your own IP) unless you specifically need
+broader access, and close it as soon as you're done:
+
+```sh
+scripts/lab unexpose-fhir --cloud gcp --name "$LAB_NAME" --var project_id="$PROJECT_ID"
+```
+
+`scripts/lab down` (Step 11) also runs this cleanup automatically before
+destroying infrastructure, so an `expose-fhir` you forgot to close doesn't
+outlive the lab itself.
+
 ## 8. Bulk data-load window, then seed T3's dataset
 
 333,333 households (5,839,996 total records) will import far faster with a
@@ -317,8 +347,15 @@ scripts/lab down --cloud gcp --name "$LAB_NAME" --yes \
   --var kubernetes_version=1.35.6-gke.1258000
 ```
 
+This also removes any `expose-fhir` firewall rule/port-forward for `$LAB_NAME`
+before destroying infrastructure — no separate `unexpose-fhir` call needed if
+you used Step 7's public-IP alternative.
+
 If `down` fails, go to the GCP console and delete GKE/Cloud SQL resources
-labeled with `$LAB_NAME` and the TTL you set.
+labeled with `$LAB_NAME` and the TTL you set. If only the `expose-fhir`
+cleanup failed (logged as a warning, `down` still proceeds to destroy
+infrastructure), check for a stray `allow-hapi-fhir-*-$LAB_NAME` firewall rule
+in the GCP console.
 
 ## Reference: full variable list used above
 
