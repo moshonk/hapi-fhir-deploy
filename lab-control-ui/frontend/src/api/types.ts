@@ -57,6 +57,23 @@ export interface ActionRunDetail extends ActionRunSummary {
   lab_configuration_id: string;
   command_preview: string;
   log_file_path: string;
+  cli_run_label: string;
+}
+
+/** GET /api/runs/:runId/artifacts's per-file record. `content` is the
+ * parsed JSON value for kind "json", or the raw file text for kind
+ * "text" (e.g. report.md, summary.csv). Never includes k6-raw.jsonl --
+ * that's a multi-gigabyte NDJSON dump, not something this endpoint will
+ * ever serve. */
+export interface ArtifactFile {
+  name: string;
+  kind: 'json' | 'text';
+  content: unknown;
+}
+
+export interface RunArtifacts {
+  cliRunLabel: string;
+  files: ArtifactFile[];
 }
 
 export type PrereqStatus = 'pass' | 'warn' | 'fail';

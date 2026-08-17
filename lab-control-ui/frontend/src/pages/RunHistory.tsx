@@ -2,9 +2,10 @@
 // the configuration that produced it and its full captured output.
 
 import { useEffect, useState } from 'react';
-import { fetchRun, fetchRunsForLab } from '../api/client.js';
-import type { ActionRunDetail, ActionRunSummary } from '../api/types.js';
+import { fetchRun, fetchRunArtifacts, fetchRunsForLab } from '../api/client.js';
+import type { ActionRunDetail, ActionRunSummary, RunArtifacts } from '../api/types.js';
 import { LogViewer } from '../components/LogViewer.js';
+import { RESULT_ARTIFACT_ACTIONS, ResultsPanel } from '../components/ResultsPanel.js';
 import { DURATION_TRACKED_ACTIONS, RunDuration } from '../components/RunDuration.js';
 
 export interface RunHistoryProps {
@@ -16,6 +17,7 @@ export interface RunHistoryProps {
 export function RunHistory({ labId, refreshKey }: RunHistoryProps) {
   const [runs, setRuns] = useState<ActionRunSummary[]>([]);
   const [selected, setSelected] = useState<ActionRunDetail | null>(null);
+  const [results, setResults] = useState<RunArtifacts | null>(null);
 
   useEffect(() => {
     fetchRunsForLab(labId)
@@ -23,8 +25,21 @@ export function RunHistory({ labId, refreshKey }: RunHistoryProps) {
       .catch(() => setRuns([]));
   }, [labId, refreshKey]);
 
+  async function refreshResults(runId: string) {
+    try {
+      setResults(await fetchRunArtifacts(runId));
+    } catch {
+      setResults(null);
+    }
+  }
+
   async function select(runId: string) {
-    setSelected(await fetchRun(runId));
+    const run = await fetchRun(runId);
+    setSelected(run);
+    setResults(null);
+    if (RESULT_ARTIFACT_ACTIONS.has(run.action_name)) {
+      void refreshResults(runId);
+    }
   }
 
   return (
@@ -53,7 +68,18 @@ export function RunHistory({ labId, refreshKey }: RunHistoryProps) {
             )}
           </h3>
           <pre className="command-preview">{selected.command_preview}</pre>
-          <LogViewer key={selected.id} runId={selected.id} />
+          {RESULT_ARTIFACT_ACTIONS.has(selected.action_name) && (
+            <>
+              <h4>Results</h4>
+              <ResultsPanel files={results?.files ?? []} />
+            </>
+          )}
+          <h4>Log</h4>
+          <LogViewer
+            key={selected.id}
+            runId={selected.id}
+            onStatus={() => void refreshResults(selected.id)}
+          />
         </div>
       )}
     </section>
