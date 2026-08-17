@@ -12,6 +12,18 @@ export interface AppConfig {
   dbPath: string;
   runsDir: string;
   secureCookies: boolean;
+  /**
+   * Where the built frontend (lab-control-ui/frontend/dist) lives. Defaults
+   * to `repoRoot`-relative, correct for the bare-metal deployment where the
+   * frontend is built directly inside the same checkout scripts/lab lives
+   * in. The Docker deployment (Dockerfile, docker-compose.yml) overrides
+   * this explicitly: there, the frontend is compiled INTO the image at
+   * build time, while `repoRoot` points at the separately bind-mounted
+   * scripts/lab checkout -- anything baked into that mount point during the
+   * image build is hidden the moment the host volume actually mounts over
+   * it, so the two paths cannot be derived from one another in that case.
+   */
+  frontendDistPath: string;
 }
 
 export class ConfigError extends Error {}
@@ -55,5 +67,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'lab-control-ui.db'),
     runsDir: env.LAB_UI_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'runs'),
     secureCookies: env.LAB_UI_COOKIE_SECURE === 'true',
+    frontendDistPath:
+      env.LAB_UI_FRONTEND_DIST ?? resolve(repoRoot, 'lab-control-ui', 'frontend', 'dist'),
   };
 }

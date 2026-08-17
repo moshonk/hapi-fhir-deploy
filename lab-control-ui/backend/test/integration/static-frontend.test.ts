@@ -24,33 +24,20 @@ describe('static frontend fallback', () => {
     const db = new DatabaseSync(':memory:');
     initSchema(db);
 
-    expect(() =>
-      createApp({
-        db,
-        config: {
-          sharedSecret: TEST_SECRET,
-          port: 0,
-          repoRoot,
-          labCliPath: '/bin/true',
-          dbPath: ':memory:',
-          runsDir: join(repoRoot, 'runs'),
-          secureCookies: false,
-        },
-      }),
-    ).not.toThrow();
+    const config = {
+      sharedSecret: TEST_SECRET,
+      port: 0,
+      repoRoot,
+      labCliPath: '/bin/true',
+      dbPath: ':memory:',
+      runsDir: join(repoRoot, 'runs'),
+      secureCookies: false,
+      frontendDistPath: dist,
+    };
 
-    const app = createApp({
-      db,
-      config: {
-        sharedSecret: TEST_SECRET,
-        port: 0,
-        repoRoot,
-        labCliPath: '/bin/true',
-        dbPath: ':memory:',
-        runsDir: join(repoRoot, 'runs'),
-        secureCookies: false,
-      },
-    });
+    expect(() => createApp({ db, config })).not.toThrow();
+
+    const app = createApp({ db, config });
 
     // Unauthenticated API routes still 401 (the SPA fallback must not
     // shadow /api/*).
@@ -63,5 +50,39 @@ describe('static frontend fallback', () => {
     const pageRes = await request(app).get('/some/client/route');
     expect(pageRes.status).toBe(200);
     expect(pageRes.text).toContain('<title>ok</title>');
+  });
+
+  it('serves frontendDistPath even when it is NOT under repoRoot (the Docker deployment shape)', async () => {
+    // Regression test: docker-compose.yml bind-mounts the scripts/lab
+    // checkout at repoRoot, but the frontend is built INTO the image at a
+    // separate path -- anything baked into the mount point during image
+    // build is hidden the instant the host volume actually mounts over it,
+    // so frontendDistPath cannot be derived from repoRoot in that shape.
+    const repoRoot = mkdtempSync(join(tmpdir(), 'lab-ui-repo-'));
+    const imageDist = mkdtempSync(join(tmpdir(), 'lab-ui-image-dist-'));
+    writeFileSync(join(imageDist, 'index.html'), '<!doctype html><title>from image</title>');
+    // repoRoot's OWN lab-control-ui/frontend/dist deliberately does not
+    // exist, proving the app isn't accidentally falling back to it.
+
+    const db = new DatabaseSync(':memory:');
+    initSchema(db);
+    const app = createApp({
+      db,
+      config: {
+        sharedSecret: TEST_SECRET,
+        port: 0,
+        repoRoot,
+        labCliPath: '/bin/true',
+        dbPath: ':memory:',
+        runsDir: join(repoRoot, 'runs'),
+        secureCookies: false,
+        frontendDistPath: imageDist,
+      },
+    });
+
+    await loginAndGetCookie(app);
+    const pageRes = await request(app).get('/');
+    expect(pageRes.status).toBe(200);
+    expect(pageRes.text).toContain('<title>from image</title>');
   });
 });

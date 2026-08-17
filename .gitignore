@@ -33,4 +33,5 @@ lab-control-ui/*/node_modules/
 lab-control-ui/*/dist/
 lab-control-ui/*/coverage/
 lab-control-ui/*/tsconfig.tsbuildinfo
+lab-control-ui/.env
 ansible/artifacts/lab/ui/

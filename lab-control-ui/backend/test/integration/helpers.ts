@@ -35,6 +35,11 @@ export function buildTestApp(overrides: Partial<AppConfig> = {}): TestContext {
     dbPath: ':memory:',
     runsDir,
     secureCookies: false,
+    // Deliberately non-existent in the test context (same as before this
+    // field existed, when it was computed inline from repoRoot) -- the
+    // static-frontend.test.ts below is the one test that actually exercises
+    // a real, existing frontendDistPath.
+    frontendDistPath: join(process.cwd(), 'lab-control-ui', 'frontend', 'dist'),
     ...overrides,
   };
 

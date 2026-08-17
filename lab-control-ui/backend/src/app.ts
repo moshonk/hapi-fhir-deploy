@@ -45,7 +45,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/api/prerequisites', createPrerequisitesRouter(deps.config));
 
   // Static frontend build (served by this same process/port -- research.md §1).
-  const frontendDist = join(deps.config.repoRoot, 'lab-control-ui', 'frontend', 'dist');
+  const frontendDist = deps.config.frontendDistPath;
   if (existsSync(frontendDist)) {
     app.use(express.static(frontendDist));
     // A path-less middleware (rather than app.get('*', ...)) is

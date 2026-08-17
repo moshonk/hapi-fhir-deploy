@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Required, no default -- the app itself refuses to start without this
+      # (config.ts's fail-closed guard, spec.md Edge Case 5). Set it in .env.
+      LAB_UI_SHARED_SECRET: ${LAB_UI_SHARED_SECRET:?set LAB_UI_SHARED_SECRET in lab-control-ui/.env}
+      LAB_REPO_ROOT: /repo
+      LAB_UI_PORT: "3000"
+      # The frontend is built INTO the image (Dockerfile), not read from the
+      # /repo bind mount above -- see config.ts's frontendDistPath doc
+      # comment for why the two can't be derived from one another here.
+      LAB_UI_FRONTEND_DIST: /app/lab-control-ui/frontend/dist
+      # Set to "true" once nginx (or whatever's in front of it) terminates
+      # real HTTPS, so the session cookie gets the Secure flag.
+      LAB_UI_COOKIE_SECURE: ${LAB_UI_COOKIE_SECURE:-false}
+    volumes:
+      # The actual scripts/lab checkout this container operates against --
+      # see the Dockerfile's header note. Read-write: scripts/lab writes
+      # Terraform state/outputs, kubeconfigs, and seed/benchmark run
+      # artifacts under the already-gitignored ansible/artifacts/lab/ tree,
+      # and this is also where the app's own SQLite DB and captured run
+      # logs live (config.ts defaults both under LAB_REPO_ROOT).
+      - ..:/repo
+      # GCP Application Default Credentials, so `gcloud auth application-default
+      # login` run on the HOST is visible inside the container too. Read-only:
+      # the container only needs to present the token, not manage the login
+      # flow itself (run that command on the host, not inside the container).
+      - ${GCLOUD_CONFIG_DIR:-${HOME}/.config/gcloud}:/root/.config/gcloud:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  nginx:
+    image: nginx:1.27.5-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Uncomment to serve real HTTPS -- see nginx/nginx.conf's commented-out
+      # server block and lab-control-ui/README.md's TLS section.
+      # - ${TLS_CERT_DIR:-./nginx/certs}:/etc/nginx/certs:ro

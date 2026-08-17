@@ -211,6 +211,17 @@ cloud actions. A reverse proxy is also where TLS termination naturally lives
 whatever is already documented/available on the deployment host," not by
 this feature.
 
+**Concrete implementation**: `lab-control-ui/docker-compose.yml` +
+`lab-control-ui/nginx/nginx.conf` implement this decision as the primary
+recommended deployment path — nginx on port 80 (or `HTTP_PORT`) in front of
+the app container's internal port, with SSE-specific proxy settings
+(`proxy_buffering off`, a long `proxy_read_timeout`) for the live log stream
+(§2 above). The `Dockerfile` also bakes in the entire `scripts/lab`
+toolchain (Terraform, Helm, kubectl, Ansible, Ruby, k6, Java, gcloud), so
+the reverse-proxy decision here and the "what needs to be installed to run
+this at all" question are solved by the same `docker compose up`. See
+`lab-control-ui/README.md`'s "Run with Docker" section.
+
 ## 8. Provider extensibility mechanism
 
 **Decision**: A `ProviderAdapter` interface (implemented once, for `gcp`,
