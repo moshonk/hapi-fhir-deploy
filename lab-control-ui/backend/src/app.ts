@@ -13,6 +13,7 @@ import { createLabsRouter } from './routes/labs.js';
 import { createActionsRouter } from './routes/actions.js';
 import { createRunsRouter } from './routes/runs.js';
 import { createPrerequisitesRouter } from './routes/prerequisites.js';
+import { createExposuresRouter } from './routes/exposures.js';
 import { createHealthRouter } from './routes/health.js';
 
 export interface AppDeps {
@@ -41,6 +42,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/api/providers', createProvidersRouter());
   app.use('/api/labs', createLabsRouter(deps.db));
   app.use('/api/labs', createActionsRouter(deps));
+  app.use('/api/labs', createExposuresRouter(deps));
   app.use('/api/runs', createRunsRouter(deps.db));
   app.use('/api/prerequisites', createPrerequisitesRouter(deps.config));
 

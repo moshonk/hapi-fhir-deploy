@@ -7,9 +7,11 @@
 import { useState } from 'react';
 import { ActionList } from '../components/ActionList.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
+import { ExposurePanel } from '../components/ExposurePanel.js';
 import { LogViewer } from '../components/LogViewer.js';
 import { PrerequisitePanel } from '../components/PrerequisitePanel.js';
 import { usePrerequisites } from '../hooks/usePrerequisites.js';
+import { useExposures } from '../hooks/useExposures.js';
 import { ApiError, triggerAction } from '../api/client.js';
 import type {
   ActionDef,
@@ -35,6 +37,7 @@ interface PendingConfirm {
 
 export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboardProps) {
   const { checks, error: prereqError } = usePrerequisites(provider.id);
+  const { exposures, error: exposuresError, refresh: refreshExposures } = useExposures(lab.id);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [runningActionName, setRunningActionName] = useState<string | null>(null);
@@ -89,6 +92,10 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
   function handleRunStatus() {
     setRunningActionName(null);
     onRunTriggered();
+    // Whatever just finished might have been an expose-*/unexpose-*
+    // action -- re-check rather than waiting out useExposures' own poll
+    // interval, so the link/credentials panel updates right away.
+    refreshExposures();
   }
 
   return (
@@ -109,6 +116,8 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
         runningActionName={runningActionName}
         onTrigger={handleTrigger}
       />
+
+      <ExposurePanel exposures={exposures} error={exposuresError} />
 
       {pendingConfirm && (
         <ConfirmDialog

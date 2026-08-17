@@ -46,6 +46,7 @@ As an operator, I trigger each lab lifecycle step (provision, deploy, expose end
 2. **Given** a lab lifecycle step that depends on a prior step (e.g., `seed` requires `deploy` to have completed; the T3 eCHIS tier requires a prior successful T2 run, per the CLI's own sequencing guard), **When** the operator attempts to trigger it out of order, **Then** the UI reflects the CLI's own refusal (surfacing its actual error) rather than silently allowing or separately re-validating the action.
 3. **Given** a step that already ran, **When** the operator opens run history, **Then** they can select that past run and view its full captured output, including which configuration produced it.
 4. **Given** a step is currently running, **When** the operator closes and reopens the browser tab, **Then** they can reconnect to the in-progress log stream and see output from where the step currently stands, not just from the point they reopened.
+5. **Given** `expose-fhir`/`expose-prometheus`/`expose-grafana` has succeeded, **When** the operator looks at the dashboard (no log-scrolling required), **Then** they see a clickable link to the now-reachable service, and, for Grafana specifically, the login credential needed to use it.
 
 ---
 
@@ -129,6 +130,7 @@ As a maintainer, when a non-GCP provider (AWS, Azure — both already modeled by
 - **FR-017**: The system's configuration schema and action set MUST represent provider-specific fields and provider-specific actions (e.g., GCP's `expose-fhir`/`expose-prometheus`/`expose-grafana`, region/zone, DB SKU/edition) as distinct from fields and actions common to every provider, so that a future non-GCP provider can be added by declaring its own fields/actions without modifying shared configuration, action-triggering, or log-streaming behavior.
 - **FR-018**: For this feature's scope, the system MUST implement only the GCP provider's fields and actions; other providers (`--cloud aws|azure`, already accepted by `scripts/lab` itself) are out of scope for implementation but MUST NOT be precluded by the design (see FR-017).
 - **FR-019**: The system MUST continue running a triggered action to completion on the server independent of the operator's browser connection state, and MUST record its outcome regardless of whether anyone was watching when it finished.
+- **FR-020**: Once a public exposure action (`expose-fhir`/`expose-prometheus`/`expose-grafana`) has succeeded, the system MUST display the resulting reachable URL, and any credential required to use it (Grafana's login), without the operator needing to read the action's raw log output to find them. This status MUST reflect whether the exposure is still actually active, not merely that it was triggered at some point in the past.
 
 ### Key Entities
 

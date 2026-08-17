@@ -67,3 +67,19 @@ export interface PrereqCheck {
   status: PrereqStatus;
   detail: string;
 }
+
+/** GET /api/labs/:id/exposures's per-service record (backend/src/routes/
+ * exposures.ts, `scripts/lab exposures --format json` relayed verbatim). */
+export interface ExposureRecord {
+  id: string;
+  label: string;
+  exposed: boolean;
+  url?: string;
+  port?: string;
+  firewallRule?: string;
+  /** Only present on the grafana record -- FHIR/Prometheus have no auth. */
+  credentialsAvailable?: boolean;
+  username?: string;
+  password?: string;
+  credentialsReason?: string;
+}

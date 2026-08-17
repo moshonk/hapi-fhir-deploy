@@ -111,6 +111,58 @@ Otherwise spawns the action and responds `202` with
 `{ "actionRunId": string, "streamUrl": "/api/runs/:actionRunId/stream" }`
 immediately — the caller does not wait for completion.
 
+## Exposures
+
+### `GET /api/labs/:id/exposures`
+
+Shells out to `scripts/lab exposures --cloud gcp --name {lab_name} --format
+json` (`contracts/cli-action-map.md`'s `exposures` row) and relays its
+records verbatim — like `GET /api/prerequisites`, this endpoint performs no
+independent judgment of its own. Used to show a link (and credentials, if
+applicable) once `expose-fhir`/`expose-prometheus`/`expose-grafana` has
+actually succeeded, and polled on load so the panel reflects reality even
+after a page reload or an exposure closed some other way (`unexpose-*`,
+`down`). Response `200`:
+
+```json
+{
+  "exposures": [
+    { "id": "fhir", "label": "HAPI FHIR", "exposed": false },
+    {
+      "id": "prometheus",
+      "label": "Prometheus",
+      "exposed": true,
+      "url": "http://203.0.113.5:9090",
+      "port": "9090",
+      "firewallRule": "allow-prometheus-9090-hapi-fhir-lab"
+    },
+    {
+      "id": "grafana",
+      "label": "Grafana",
+      "exposed": true,
+      "url": "http://203.0.113.5:3000",
+      "port": "3000",
+      "firewallRule": "allow-grafana-3000-hapi-fhir-lab",
+      "credentialsAvailable": true,
+      "username": "admin",
+      "password": "..."
+    }
+  ]
+}
+```
+
+`exposed` reflects the tracked port-forward process actually still being
+alive, not merely a state file existing (a stale file left by e.g. a host
+reboot without a matching `unexpose-*` reports `exposed: false`). Only the
+`grafana` record ever carries `credentialsAvailable`/`username`/`password` —
+FHIR and Prometheus have no auth in front of them in this lab
+(`docs/lab-cli.md`'s login-required note). Grafana's password is fetched
+live via `kubectl` on every call and never persisted by this endpoint or by
+`scripts/lab exposures` itself; when the fetch fails, `credentialsAvailable`
+is `false` and `credentialsReason` explains why. `502` with `{ "error":
+string }` if the CLI invocation itself fails (not to be confused with an
+individual service simply being `exposed: false`, which is a normal `200`).
+
 ## Runs
 
 **Naming note**: `actionRunId` here (the `action_runs.id` UUID, used in every

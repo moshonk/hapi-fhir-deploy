@@ -510,6 +510,17 @@ export function gcpBuildCommand(
         env: { KUBECONFIG: kubeconfigPathFor(labName) },
       };
 
+    // Not in GCP_ACTIONS -- this is a read-only status query (routes/
+    // exposures.ts), not an operator-triggerable action with its own
+    // confirmation/log-stream/run-history entry. Kept in this same switch
+    // so it shares f()/labName/projectId/kubeconfigPathFor with every real
+    // action instead of duplicating that lookup elsewhere.
+    case 'exposures':
+      return {
+        argv: ['exposures', '--cloud', 'gcp', '--name', labName, '--format', 'json'],
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
+      };
+
     case 'pause-autoscaling':
       return {
         argv: ['pause-autoscaling', '--replicas', f('pause_replicas')],

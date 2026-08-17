@@ -58,6 +58,7 @@ Usage:
   scripts/lab unexpose-prometheus --cloud gcp --name NAME --var project_id=P
   scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3000] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
+  scripts/lab exposures --cloud gcp --name NAME [--format text|json]
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
@@ -102,6 +103,15 @@ Commands:
                        jsonpath='{.data.admin-password}' | base64 -d`.
   unexpose-grafana     GCP only. Reverse of expose-grafana. Safe to run even if nothing is
                        currently exposed.
+  exposures            GCP only. Read-only status query: which of fhir/prometheus/grafana are
+                       currently exposed (verifying the tracked port-forward is still alive, not
+                       just that a state file exists), each with its URL, port, and firewall rule
+                       name. Grafana additionally fetches its admin password live via kubectl on
+                       every call (never written to disk by this command) when exposed. Never
+                       mutates anything -- use expose-*/unexpose-* to change exposure state, this
+                       only reports it. --format json emits one {id,label,exposed,...} record per
+                       service; used by the Lab Control UI (specs/009-lab-control-ui) to show a
+                       link (and credentials, if applicable) once a service is exposed.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -1604,16 +1614,24 @@ expose_public_service() {
   sleep 2
   kill -0 "$pf_pid" 2>/dev/null || die "port-forward failed to start; see $pf_log"
 
+  # Computed before writing the state file (not just for the log line below)
+  # so `exposures` (a read-only status query the Lab Control UI polls,
+  # specs/009-lab-control-ui) can report the same URL without redoing the
+  # public-IP lookup itself -- one computation, persisted, per FR-005's
+  # single-source-of-truth rule.
+  local display_ip
+  display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
+  local url="http://${display_ip}:${port}${url_path}"
+
   {
     printf 'FIREWALL_RULE=%s\n' "$firewall_rule"
     printf 'PORT=%s\n' "$port"
     printf 'PORT_FORWARD_PID=%s\n' "$pf_pid"
     printf 'PROJECT_ID=%s\n' "$project_id"
+    printf 'URL=%s\n' "$url"
   } >"$state_file"
 
-  local display_ip
-  display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
-  log "$display_name is reachable at http://${display_ip}:${port}${url_path} (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
+  log "$display_name is reachable at $url (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
   log "Run 'scripts/lab unexpose-$state_slug --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
 }
 
@@ -1687,6 +1705,115 @@ cmd_expose_grafana() {
 
 cmd_unexpose_grafana() {
   unexpose_public_service grafana grafana 3000
+}
+
+# Read-only status query for the Lab Control UI's "once exposed, show a
+# link (and credentials, if applicable)" panel (specs/009-lab-control-ui) --
+# and equally usable from a terminal to check what's currently open without
+# re-running an expose-* command. Never mutates anything (no firewall calls,
+# no port-forward management -- that's expose-*/unexpose-*'s job), and never
+# dies: a single service's state being unreadable is reported as
+# exposed:false for that service, not a hard failure for the whole command.
+#
+# One JSON/text record per service (fhir, prometheus, grafana), each:
+#   id, label, exposed (bool), and when exposed: url, port, firewallRule.
+# Grafana additionally includes credentialsAvailable (bool) and, when true,
+# username/password -- fetched live via kubectl each call, never persisted
+# to disk by this command (docs/lab-cli.md's login-required note). A
+# fetch failure (cluster unreachable, secret renamed, ...) is reported as
+# credentialsAvailable:false with a human-readable reason, not a die.
+cmd_exposures() {
+  require_cloud
+  require_name
+  [[ "$CLOUD" == "gcp" ]] || die "exposures is currently GCP-only; see docs/gcp-echis-t3-lab-runbook.md for the manual steps to check public exposure on other clouds"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+
+  local ids=(fhir prometheus grafana)
+  local labels=("HAPI FHIR" "Prometheus" "Grafana")
+  local i esc_id esc_label esc_url esc_rule esc_port
+  local first=true
+  if [[ "$FORMAT" == "json" ]]; then printf '['; fi
+
+  for i in "${!ids[@]}"; do
+    local id="${ids[$i]}" label="${labels[$i]}"
+    local state_file url="" port="" firewall_rule="" pf_pid="" exposed=false
+    state_file="$(public_exposure_state_file "$id")"
+    if [[ -f "$state_file" ]]; then
+      url="$(grep -m1 '^URL=' "$state_file" | cut -d= -f2-)" || true
+      port="$(grep -m1 '^PORT=' "$state_file" | cut -d= -f2)" || true
+      firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
+      pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
+      # A state file with a dead port-forward pid is stale (e.g. the host
+      # rebooted without an unexpose-* ever running) -- report not-exposed
+      # rather than showing a link that won't actually connect. Cleanup of
+      # the stale firewall rule/file itself is unexpose-*'s/down's job, not
+      # this read-only command's.
+      if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
+        exposed=true
+      fi
+    fi
+
+    local username="" password="" creds_available=false creds_reason=""
+    if [[ "$id" == grafana && "$exposed" == true ]]; then
+      local ns="${GRAFANA_NAMESPACE:-monitoring}"
+      if command -v "$kbin" >/dev/null 2>&1; then
+        local raw
+        if raw="$(timeout 10s "$kbin" -n "$ns" get secret prometheus-grafana \
+          -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null)" && [[ -n "$raw" ]]; then
+          username="admin"
+          password="$raw"
+          creds_available=true
+        else
+          creds_reason="could not read the 'prometheus-grafana' Secret in namespace '$ns' -- run \`$kbin -n $ns get secret prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d\` manually"
+        fi
+      else
+        creds_reason="$kbin not found"
+      fi
+    fi
+
+    if [[ "$FORMAT" == "json" ]]; then
+      [[ "$first" == true ]] || printf ','
+      first=false
+      esc_id="${id//\\/\\\\}"; esc_id="${esc_id//\"/\\\"}"
+      esc_label="${label//\\/\\\\}"; esc_label="${esc_label//\"/\\\"}"
+      printf '{"id":"%s","label":"%s","exposed":%s' "$esc_id" "$esc_label" "$exposed"
+      if [[ "$exposed" == true ]]; then
+        esc_url="${url//\\/\\\\}"; esc_url="${esc_url//\"/\\\"}"
+        esc_rule="${firewall_rule//\\/\\\\}"; esc_rule="${esc_rule//\"/\\\"}"
+        esc_port="${port//\\/\\\\}"; esc_port="${esc_port//\"/\\\"}"
+        printf ',"url":"%s","port":"%s","firewallRule":"%s"' "$esc_url" "$esc_port" "$esc_rule"
+      fi
+      if [[ "$id" == grafana ]]; then
+        printf ',"credentialsAvailable":%s' "$creds_available"
+        if [[ "$creds_available" == true ]]; then
+          local esc_user="${username//\\/\\\\}"; esc_user="${esc_user//\"/\\\"}"
+          local esc_pass="${password//\\/\\\\}"; esc_pass="${esc_pass//\"/\\\"}"
+          printf ',"username":"%s","password":"%s"' "$esc_user" "$esc_pass"
+        elif [[ -n "$creds_reason" ]]; then
+          local esc_reason="${creds_reason//\\/\\\\}"; esc_reason="${esc_reason//\"/\\\"}"
+          printf ',"credentialsReason":"%s"' "$esc_reason"
+        fi
+      fi
+      printf '}'
+    else
+      if [[ "$exposed" == true ]]; then
+        printf '%-12s exposed at %s (firewall rule %s)\n' "$label" "$url" "$firewall_rule"
+        if [[ "$id" == grafana ]]; then
+          if [[ "$creds_available" == true ]]; then
+            printf '%-12s login: %s / %s\n' "" "$username" "$password"
+          else
+            printf '%-12s login: %s\n' "" "$creds_reason"
+          fi
+        fi
+      else
+        printf '%-12s not exposed\n' "$label"
+      fi
+    fi
+  done
+
+  if [[ "$FORMAT" == "json" ]]; then printf ']\n'; fi
 }
 
 cmd_down() {
@@ -1790,6 +1917,7 @@ case "$COMMAND" in
   unexpose-prometheus) cmd_unexpose_prometheus ;;
   expose-grafana) cmd_expose_grafana ;;
   unexpose-grafana) cmd_unexpose_grafana ;;
+  exposures) cmd_exposures ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

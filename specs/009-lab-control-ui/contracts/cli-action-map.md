@@ -26,6 +26,7 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 | `report` | `report --run {cliRunLabel} --cloud gcp --name {lab_name} --profile {k6_profile}` | No |
 | `down` | `down --cloud gcp --name {lab_name} --yes --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version}` | Yes — destroys infrastructure |
 | `doctor` (prerequisites) | `doctor --cloud gcp --format json` | No — read-only (research.md §5; this is a new subcommand this feature adds to `scripts/lab` itself) |
+| `exposures` (`GET /api/labs/:id/exposures`, `contracts/api.md`) | `exposures --cloud gcp --name {lab_name} --format json` (env: `KUBECONFIG` as above) | No — read-only, like `doctor`; not in `GCP_ACTIONS` (no trigger/confirm/log-stream/run-history), just a status query the UI polls |
 
 Notes:
 

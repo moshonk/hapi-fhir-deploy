@@ -4,6 +4,7 @@
 import type {
   ActionRunDetail,
   ActionRunSummary,
+  ExposureRecord,
   LabConfiguration,
   PrereqCheck,
   ProviderPublicShape,
@@ -105,6 +106,11 @@ export async function fetchRunsForLab(labId: string): Promise<ActionRunSummary[]
 
 export async function fetchRun(runId: string): Promise<ActionRunDetail> {
   return request<ActionRunDetail>(`/runs/${runId}`);
+}
+
+export async function fetchExposures(labId: string): Promise<ExposureRecord[]> {
+  const res = await request<{ exposures: ExposureRecord[] }>(`/labs/${labId}/exposures`);
+  return res.exposures;
 }
 
 export interface TriggerResult {
