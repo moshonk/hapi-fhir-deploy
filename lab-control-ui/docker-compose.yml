@@ -26,10 +26,19 @@ services:
       # logs live (config.ts defaults both under LAB_REPO_ROOT).
       - ..:/repo
       # GCP Application Default Credentials, so `gcloud auth application-default
-      # login` run on the HOST is visible inside the container too. Read-only:
-      # the container only needs to present the token, not manage the login
-      # flow itself (run that command on the host, not inside the container).
-      - ${GCLOUD_CONFIG_DIR:-${HOME}/.config/gcloud}:/root/.config/gcloud:ro
+      # login` run on the HOST is visible inside the container too. Read-write
+      # (NOT :ro, despite the container never running the login flow itself):
+      # `gcloud` writes to its config dir on nearly every invocation, not just
+      # login -- it refreshes/rewrites credentials.db's cached access token,
+      # and always tries to create a per-invocation log file under
+      # logs/YYYY.MM.DD/. A read-only mount makes expose-fhir/expose-prometheus/
+      # expose-grafana (and anything else shelling out to `gcloud compute ...`)
+      # fail outright with "Read-only file system: .../credentials.db" --
+      # discovered via a real failed expose-grafana run, not a theoretical
+      # concern. This is the same GCP account's own credentials either way;
+      # read-write here doesn't grant the container anything it couldn't
+      # already do by driving `gcloud`/`terraform` themselves.
+      - ${GCLOUD_CONFIG_DIR:-${HOME}/.config/gcloud}:/root/.config/gcloud
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 30s

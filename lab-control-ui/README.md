@@ -78,7 +78,7 @@ docker compose down       # containers only -- your lab data under
 |---|---|
 | `LAB_UI_SHARED_SECRET` | *(required)* Login credential. `docker compose up` refuses to start the app without it. |
 | `HTTP_PORT` | Host port nginx binds (default `80`). |
-| `GCLOUD_CONFIG_DIR` | Host path to your `gcloud` config (default `~/.config/gcloud`), mounted read-only for GCP credentials. |
+| `GCLOUD_CONFIG_DIR` | Host path to your `gcloud` config (default `~/.config/gcloud`), mounted read-write for GCP credentials (`gcloud` rewrites its token cache on nearly every invocation, not just login -- a read-only mount breaks `expose-*` actions). |
 | `LAB_UI_COOKIE_SECURE` | Set `true` only once nginx is actually terminating HTTPS (see below). |
 
 **Version pins**: every tool in the image (Terraform, Helm, kubectl, k6,
