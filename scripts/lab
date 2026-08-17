@@ -29,6 +29,7 @@ AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
 GENERATE_ONLY=false
+NO_PROMETHEUS_RW=false
 TF_VARS=()
 ANSIBLE_EXTRA_VARS=()
 SEED_GENERATOR_MODE="${LAB_SEED_GENERATOR_MODE:-synthea}"
@@ -47,7 +48,9 @@ Usage:
     single local process)
   scripts/lab benchmark --profile smoke|baseline|load|stress [--echis-tier T2|T3|T4|T5] [--run RUN_ID]
     (add --in-cluster --parallel-shards N to run benchmarks/k6/echis_load_100.js
-    as a distributed Kubernetes Indexed Job instead of a single local k6 process)
+    as a distributed Kubernetes Indexed Job instead of a single local k6 process;
+    streams live metrics to Prometheus/Grafana by default when a kubeconfig
+    resolves -- see --no-prometheus-remote-write)
   scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
   scripts/lab pause-autoscaling --replicas N
@@ -72,7 +75,17 @@ Commands:
                        reused by `up` and `doctor` alike, so the two can never silently drift apart.
   deploy               Run the provider-neutral Ansible deployment workflow.
   seed                 Generate deterministic Synthea FHIR data and optionally invoke a loader.
-  benchmark            Run a k6 FHIR benchmark profile.
+  benchmark            Run a k6 FHIR benchmark profile. By default, auto-detects a
+                       kubeconfig (LAB_KUBECONFIG > KUBECONFIG > --cloud/--name's
+                       generated one) and streams live metrics to Prometheus's
+                       remote-write endpoint over a local-only port-forward (no
+                       firewall rule opened), torn down again once the run ends --
+                       so a live k6 dashboard in Grafana works regardless of which
+                       tier/profile is running or what triggered it. Never blocks
+                       the run if no kubeconfig resolves or Prometheus isn't
+                       reachable. Pass --no-prometheus-remote-write to opt out, or
+                       set K6_PROMETHEUS_RW_SERVER_URL yourself to target a
+                       different Prometheus (always wins over auto-detection).
   report               Publish local benchmark result artifacts from a run directory.
   down                 Destroy cloud infrastructure. Use this promptly to control cloud cost.
   pause-autoscaling    Pin the KEDA-managed replica count to N for a bulk data-load window
@@ -144,6 +157,13 @@ Environment:
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
   PROMETHEUS_BASE_URL     Required by baseline profile gates for pod restart and Hikari checks.
+  K6_PROMETHEUS_RW_SERVER_URL
+                          benchmark only. Overrides automatic live-metrics
+                          detection (see the benchmark command's own help above)
+                          -- set explicitly to target a different Prometheus, or
+                          leave unset to let benchmark auto-detect one.
+  NO_PROMETHEUS_RW        benchmark only. Set via --no-prometheus-remote-write;
+                          disables automatic live k6 metrics entirely.
   LAB_RESULTS_DIR         Published result root; defaults to results/.
   LAB_RESULT_PUBLISHER_CMD Optional publisher command; defaults to scripts/publish_results.rb.
   LAB_REPORT_CMD          Legacy report command invoked as: CMD RUN_DIR REPORT_PATH.
@@ -166,9 +186,11 @@ Environment:
   HAPI_SERVICE_NAME       HAPI FHIR Kubernetes Service name; defaults to
                           hapi-fhir-hapi-fhir-jpaserver. Used by expose-fhir.
   PROMETHEUS_NAMESPACE    Kubernetes namespace for kube-prometheus-stack; defaults to
-                          monitoring. Used by expose-prometheus and unexpose-prometheus.
+                          monitoring. Used by expose-prometheus, unexpose-prometheus,
+                          and benchmark's automatic live-metrics port-forward.
   PROMETHEUS_SERVICE_NAME Prometheus Kubernetes Service name; defaults to
-                          prometheus-kube-prometheus-prometheus. Used by expose-prometheus.
+                          prometheus-kube-prometheus-prometheus. Used by expose-prometheus
+                          and benchmark's automatic live-metrics port-forward.
   GRAFANA_NAMESPACE       Kubernetes namespace for Grafana; defaults to monitoring.
                           Used by expose-grafana and unexpose-grafana.
   GRAFANA_SERVICE_NAME    Grafana Kubernetes Service name; defaults to prometheus-grafana.
@@ -303,6 +325,10 @@ parse_args() {
         GENERATE_ONLY=true
         shift
         ;;
+      --no-prometheus-remote-write)
+        NO_PROMETHEUS_RW=true
+        shift
+        ;;
       --var|--terraform-var)
         TF_VARS+=("-var" "${2:-}")
         shift 2
@@ -360,6 +386,27 @@ state_dir() {
 
 run_dir() {
   printf '%s/%s' "$RUN_ROOT" "$RUN_ID"
+}
+
+# Shared kubeconfig-resolution precedence, factored out of cmd_deploy so
+# ensure_local_prometheus_remote_write can reuse it without requiring
+# --cloud/--name (cmd_benchmark doesn't require either -- it only needs
+# FHIR_BASE_URL -- so this only falls through to state_dir()/kubeconfig
+# when both happen to be set, e.g. because the Lab Control UI's benchmark
+# action passes them or an operator exported them by hand).
+#
+# Precedence: LAB_KUBECONFIG (explicit override) > ambient KUBECONFIG (a
+# single real path, not a kubectl-style colon-separated merge list) >
+# this lab's generated kubeconfig under state_dir(). Echoes nothing if
+# none apply -- callers decide whether that's fatal.
+resolve_kubeconfig_file() {
+  if [[ -n "${LAB_KUBECONFIG:-}" ]]; then
+    printf '%s' "$LAB_KUBECONFIG"
+  elif [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" != *:* ]]; then
+    printf '%s' "$KUBECONFIG"
+  elif [[ -n "$CLOUD" && -n "$NAME" ]]; then
+    printf '%s/kubeconfig' "$(state_dir)"
+  fi
 }
 
 terraform_bin() {
@@ -895,12 +942,12 @@ cmd_deploy() {
   local state
   state="$(state_dir)"
   local terraform_output_file="${TERRAFORM_OUTPUT_FILE:-$state/terraform-output.json}"
-  local kubeconfig_file="$state/kubeconfig"
-  if [[ -n "${LAB_KUBECONFIG:-}" ]]; then
-    kubeconfig_file="$LAB_KUBECONFIG"
-  elif [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" != *:* ]]; then
-    kubeconfig_file="$KUBECONFIG"
-  fi
+  # CLOUD/NAME are always set here (require_cloud/require_name above), so
+  # resolve_kubeconfig_file()'s state_dir() fallback always applies,
+  # matching this command's original unconditional "$state/kubeconfig"
+  # default exactly.
+  local kubeconfig_file
+  kubeconfig_file="$(resolve_kubeconfig_file)"
 
   if [[ "$DRY_RUN" == true ]]; then
     [[ -f "$terraform_output_file" ]] || log "Dry run: Terraform output file is not present yet: $terraform_output_file"
@@ -1325,7 +1372,77 @@ cmd_benchmark_in_cluster() {
   log "  ruby scripts/merge_k6_shards.rb --shard-dir <path into PVC $pvc_name> --shard-count $shard_count --output $dir/k6-fhir-summary.json"
 }
 
+# Makes "live k6 metrics in Grafana" the default behavior of `scripts/lab
+# benchmark`, regardless of which caller triggers it (direct CLI or the
+# Lab Control UI) -- not something that only works when the invocation
+# happens to also set K6_PROMETHEUS_RW_SERVER_URL by hand. Never called
+# when that env var is already set (an explicit value always wins) or
+# --no-prometheus-remote-write/NO_PROMETHEUS_RW is set.
+#
+# Starts a localhost-only `kubectl port-forward` into Prometheus's remote
+# write endpoint, on an OS-chosen ephemeral local port (":9090", not a
+# fixed one) so this never collides with an already-running
+# expose-prometheus port-forward (which defaults to a fixed 9090) or
+# anything else already bound to 9090. No firewall rule is opened -- this
+# is purely local, for the k6 process running alongside `scripts/lab`
+# itself to reach.
+#
+# Sets K6_PROMETHEUS_RW_SERVER_URL (exported) and PROMETHEUS_RW_PF_PID on
+# success, leaves both empty otherwise. Never dies: cmd_benchmark doesn't
+# require --cloud/--name (only FHIR_BASE_URL), so a resolvable kubeconfig
+# is often simply unavailable, and a missing/not-yet-installed monitoring
+# stack must never block a benchmark run -- this just falls back to
+# running without live metrics, same as before this existed.
+ensure_local_prometheus_remote_write() {
+  PROMETHEUS_RW_PF_PID=""
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  command -v "$kbin" >/dev/null 2>&1 || { log "kubectl not found; continuing without live k6 metrics in Grafana"; return 0; }
+
+  local kubeconfig_file
+  kubeconfig_file="$(resolve_kubeconfig_file)"
+  if [[ -z "$kubeconfig_file" || ! -f "$kubeconfig_file" ]]; then
+    log "No kubeconfig resolved (set KUBECONFIG, LAB_KUBECONFIG, or pass --cloud/--name); continuing without live k6 metrics in Grafana"
+    return 0
+  fi
+
+  local ns="${PROMETHEUS_NAMESPACE:-monitoring}"
+  local svc="${PROMETHEUS_SERVICE_NAME:-prometheus-kube-prometheus-prometheus}"
+
+  local dir
+  dir="$(run_dir)"
+  mkdir -p "$dir"
+  local pf_log="$dir/prometheus-remote-write-portforward.log"
+
+  KUBECONFIG="$kubeconfig_file" nohup "$kbin" -n "$ns" port-forward "svc/$svc" :9090 >"$pf_log" 2>&1 &
+  local pf_pid=$!
+  disown
+  sleep 2
+  if ! kill -0 "$pf_pid" 2>/dev/null; then
+    log "Could not reach Prometheus ($ns/$svc) for live k6 metrics; continuing without them -- see $pf_log"
+    return 0
+  fi
+
+  local local_port
+  local_port="$(grep -m1 -oE 'Forwarding from 127\.0\.0\.1:[0-9]+' "$pf_log" | cut -d: -f2)"
+  if [[ -z "$local_port" ]]; then
+    log "Could not determine local port for the Prometheus port-forward; continuing without live k6 metrics -- see $pf_log"
+    kill "$pf_pid" 2>/dev/null || true
+    return 0
+  fi
+
+  export K6_PROMETHEUS_RW_SERVER_URL="http://127.0.0.1:${local_port}/api/v1/write"
+  PROMETHEUS_RW_PF_PID="$pf_pid"
+  log "Streaming live k6 metrics to Prometheus remote-write at $K6_PROMETHEUS_RW_SERVER_URL (local only, no firewall rule opened)"
+}
+
 cmd_benchmark() {
+  # Always defined by the time it's checked after the k6 run below, even
+  # when ensure_local_prometheus_remote_write is never called (set -u
+  # would otherwise error on referencing it unset in that case).
+  PROMETHEUS_RW_PF_PID=""
+
   require_profile
   if [[ -n "$ECHIS_TIER" ]]; then
     require_echis_tier_sequence "$ECHIS_TIER"
@@ -1386,7 +1503,21 @@ cmd_benchmark() {
   # target Prometheus to have enableRemoteWriteReceiver on (see
   # ansible/group_vars/lab.yml's enable_prometheus_remote_write, default
   # true) -- lets this run's load/latency/failure-rate be watched live in
-  # Grafana instead of only from the post-run k6 JSON summary.
+  # Grafana instead of only from the post-run k6 JSON summary. An operator
+  # (or the Lab Control UI) can still set K6_PROMETHEUS_RW_SERVER_URL
+  # explicitly beforehand to point at a different Prometheus -- that value
+  # always wins and skips the auto-detection below entirely.
+  if [[ -z "${K6_PROMETHEUS_RW_SERVER_URL:-}" && "$DRY_RUN" != true && "$NO_PROMETHEUS_RW" != true ]]; then
+    ensure_local_prometheus_remote_write
+    if [[ -n "$PROMETHEUS_RW_PF_PID" ]]; then
+      # EXIT (not RETURN): a failing k6 run (e.g. threshold breach) must
+      # still stop this port-forward even though `set -e` ends the whole
+      # script right after the `run` call below, before reaching the
+      # explicit kill further down.
+      trap 'kill "$PROMETHEUS_RW_PF_PID" 2>/dev/null || true' EXIT
+    fi
+  fi
+
   local k6_out_args=(--out "json=$dir/k6-raw.jsonl")
   if [[ -n "${K6_PROMETHEUS_RW_SERVER_URL:-}" ]]; then
     k6_out_args+=(--out experimental-prometheus-rw)
@@ -1400,6 +1531,11 @@ cmd_benchmark() {
     "${k6_out_args[@]}" \
     --summary-export "$dir/k6-summary.json" \
     "$script"
+
+  if [[ -n "$PROMETHEUS_RW_PF_PID" ]]; then
+    kill "$PROMETHEUS_RW_PF_PID" 2>/dev/null || true
+    trap - EXIT
+  fi
 
   if [[ -n "$ECHIS_TIER" ]]; then
     record_echis_tier_progress "$ECHIS_TIER"

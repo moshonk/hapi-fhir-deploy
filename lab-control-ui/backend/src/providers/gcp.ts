@@ -558,6 +558,14 @@ export function gcpBuildCommand(
       const tier = f('echis_tier');
       const env: Record<string, string> = {
         FHIR_BASE_URL: f('fhir_base_url', 'http://localhost:8080/fhir'),
+        // Not required by benchmark itself (only FHIR_BASE_URL is), but
+        // ensure_local_prometheus_remote_write (scripts/lab) uses it to
+        // open a local-only port-forward to Prometheus so this run's live
+        // metrics land in Grafana automatically -- without it, resolving
+        // a kubeconfig here would silently fail and every UI-triggered
+        // benchmark would run without live metrics (docs/lab-cli.md's
+        // "Live k6 metrics in Grafana" section).
+        KUBECONFIG: kubeconfigPathFor(labName),
       };
       const script = ECHIS_TIER_K6_SCRIPT[tier];
       if (script) env.K6_SCRIPT = script;

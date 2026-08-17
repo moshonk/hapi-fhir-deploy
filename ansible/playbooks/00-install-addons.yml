@@ -71,6 +71,19 @@
               podMonitorSelectorNilUsesHelmValues: false
       when: install_prometheus_stack | bool
 
+    # Statically provisions the k6 load-test Grafana dashboard, picked up
+    # automatically by the chart's Grafana sidecar (grafana_dashboard: "1"
+    # label, searchNamespace: ALL by chart default) -- so it's present
+    # regardless of which benchmark run/tier/trigger is in progress, not
+    # only after a manual one-off dashboard import. See
+    # manifests/grafana-dashboards/k6-load-testing-configmap.yaml's header
+    # comment for the full provenance/rationale.
+    - name: Provision the k6 load-test Grafana dashboard
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ playbook_dir }}/../../manifests/grafana-dashboards/k6-load-testing-configmap.yaml"
+      when: install_grafana | bool
+
     # GKE (and some other managed offerings) ships its own metrics-server in
     # kube-system as an addon-manager-reconciled component -- a ServiceAccount
     # named "metrics-server" already exists there before this playbook ever

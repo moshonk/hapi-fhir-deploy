@@ -143,31 +143,46 @@ Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-j
 
 #### Live k6 metrics in Grafana
 
-Set `K6_PROMETHEUS_RW_SERVER_URL` (a k6-native env var, e.g.
-`http://localhost:9090/api/v1/write` against a `kubectl -n monitoring
-port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090`) and
-`benchmark` adds `-o experimental-prometheus-rw` to the k6 invocation
-automatically, streaming live VU count/request rate/latency/failure-rate
-into Prometheus as the run progresses, alongside the always-written
-`k6-raw.jsonl` -- not instead of it:
+On by default, regardless of which tier/profile is running or what
+triggered it (direct CLI or the Lab Control UI): `benchmark` resolves a
+kubeconfig (`LAB_KUBECONFIG` > ambient `KUBECONFIG` > `--cloud`/`--name`'s
+generated one -- the Lab Control UI's `benchmark` action always sets
+`KUBECONFIG`), opens a localhost-only `kubectl port-forward` into
+Prometheus's remote-write endpoint on an OS-chosen ephemeral port (never
+colliding with an already-running `expose-prometheus`), and adds `-o
+experimental-prometheus-rw` to the k6 invocation -- streaming live VU
+count/request rate/latency/failure-rate into Prometheus as the run
+progresses, alongside the always-written `k6-raw.jsonl`, not instead of it.
+The port-forward is torn down again once the run ends (success or failure).
 
 ```sh
 FHIR_BASE_URL=http://localhost:8080/fhir \
-K6_PROMETHEUS_RW_SERVER_URL=http://localhost:9090/api/v1/write \
+KUBECONFIG=/path/to/kubeconfig \
 scripts/lab benchmark --profile load --run load-1 --echis-tier T2
 ```
+
+No kubeconfig required to trigger this -- if none resolves (e.g. running
+`benchmark` without `--cloud`/`--name` or `KUBECONFIG` at all, or the
+target Prometheus isn't reachable), `benchmark` logs why and runs without
+live metrics instead of failing the run. Set `K6_PROMETHEUS_RW_SERVER_URL`
+yourself to point at a different Prometheus instead (an explicit value
+always wins over the auto-detected one), or pass
+`--no-prometheus-remote-write` (`NO_PROMETHEUS_RW=true`) to opt out
+entirely.
 
 Requires the target Prometheus to have its remote-write receiver enabled
 (`enableRemoteWriteReceiver`, `ansible/group_vars/lab.yml`'s
 `enable_prometheus_remote_write`, default `true` -- a Prometheus restart on
-first enable). Import [Grafana Labs' official "k6 Prometheus"
-dashboard](https://grafana.com/grafana/dashboards/19665-k6-prometheus/)
-(dashboard ID `19665`) to watch it: in Grafana, **Dashboards → New → Import**,
-enter `19665`, and map its `Prometheus` datasource input to this stack's
-`Prometheus` datasource. HAPI FHIR's own server-side metrics (HTTP latency,
-JVM, Hikari pool) are scraped into the same Prometheus independently of this
-setting, so they're visible in Grafana during any run, not only when
-`K6_PROMETHEUS_RW_SERVER_URL` is set.
+first enable). The [Grafana Labs' official "k6
+Prometheus"](https://grafana.com/grafana/dashboards/19665-k6-prometheus/)
+dashboard (ID `19665`) is provisioned automatically -- see
+`manifests/grafana-dashboards/k6-load-testing-configmap.yaml`, applied by
+`ansible/playbooks/00-install-addons.yml` whenever `install_grafana` is
+true -- so it's present in Grafana as soon as the lab is up, not only after
+a manual dashboard import. HAPI FHIR's own server-side metrics (HTTP
+latency, JVM, Hikari pool) are scraped into the same Prometheus
+independently of any of this, so they're visible in Grafana during any run
+regardless.
 
 #### eCHIS progressive tiers
 
