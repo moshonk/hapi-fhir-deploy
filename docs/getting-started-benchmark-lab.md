@@ -122,7 +122,7 @@ scripts/lab up --cloud gcp --name "$LAB_NAME" --auto-approve \
   --var project_id=PROJECT_ID \
   --var region=us-central1 \
   --var zone=us-central1-a \
-  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var kubernetes_version=1.35.6-gke.1250000 \
   --var node_size=e2-standard-4 \
   --var db_edition=ENTERPRISE \
   --var db_sku=db-custom-2-7680 \
