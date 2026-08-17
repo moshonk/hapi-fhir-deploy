@@ -10,6 +10,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ExposurePanel } from '../components/ExposurePanel.js';
 import { LogViewer } from '../components/LogViewer.js';
 import { PrerequisitePanel } from '../components/PrerequisitePanel.js';
+import { DURATION_TRACKED_ACTIONS, RunDuration } from '../components/RunDuration.js';
 import { usePrerequisites } from '../hooks/usePrerequisites.js';
 import { useExposures } from '../hooks/useExposures.js';
 import { ApiError, triggerAction } from '../api/client.js';
@@ -35,11 +36,23 @@ interface PendingConfirm {
   message: string;
 }
 
+interface ActiveRun {
+  id: string;
+  action: ActionDef;
+  /** Client-clock timestamps -- close enough to the server's own
+   * action_runs.started_at/ended_at (spawnAction/markActionRunFinished run
+   * essentially synchronously with the 202 response and the SSE `status`
+   * event) without a second round-trip just to read them back. RunHistory
+   * shows the authoritative server timestamps once this run lands there. */
+  startedAt: string;
+  endedAt: string | null;
+}
+
 export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboardProps) {
   const { checks, error: prereqError } = usePrerequisites(provider.id);
   const { exposures, error: exposuresError, refresh: refreshExposures } = useExposures(lab.id);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [runningActionName, setRunningActionName] = useState<string | null>(null);
   const [triggerError, setTriggerError] = useState<string | null>(null);
 
@@ -47,7 +60,7 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
     setTriggerError(null);
     try {
       const result = await triggerAction(lab.id, action.name, { confirmed });
-      setActiveRunId(result.actionRunId);
+      setActiveRun({ id: result.actionRunId, action, startedAt: new Date().toISOString(), endedAt: null });
       setRunningActionName(action.name);
     } catch (err) {
       if (
@@ -91,6 +104,10 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
 
   function handleRunStatus() {
     setRunningActionName(null);
+    // Locks the duration display: from this point on RunDuration is given
+    // a non-null endedAt and stops ticking, however long this panel stays
+    // mounted afterward.
+    setActiveRun((prev) => (prev ? { ...prev, endedAt: new Date().toISOString() } : prev));
     onRunTriggered();
     // Whatever just finished might have been an expose-*/unexpose-*
     // action -- re-check rather than waiting out useExposures' own poll
@@ -128,10 +145,15 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
         />
       )}
 
-      {activeRunId && (
+      {activeRun && (
         <div className="active-run">
-          <h2>Live output</h2>
-          <LogViewer key={activeRunId} runId={activeRunId} onStatus={handleRunStatus} />
+          <h2>
+            Live output
+            {DURATION_TRACKED_ACTIONS.has(activeRun.action.name) && (
+              <RunDuration startedAt={activeRun.startedAt} endedAt={activeRun.endedAt} />
+            )}
+          </h2>
+          <LogViewer key={activeRun.id} runId={activeRun.id} onStatus={handleRunStatus} />
         </div>
       )}
     </section>

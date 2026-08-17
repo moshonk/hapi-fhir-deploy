@@ -43,7 +43,14 @@ export function createApp(deps: AppDeps): Express {
   app.use('/api/labs', createLabsRouter(deps.db));
   app.use('/api/labs', createActionsRouter(deps));
   app.use('/api/labs', createExposuresRouter(deps));
-  app.use('/api/runs', createRunsRouter(deps.db));
+  app.use(
+    '/api/runs',
+    createRunsRouter({
+      db: deps.db,
+      cliRunsDir: deps.config.cliRunsDir,
+      resultsDir: deps.config.resultsDir,
+    }),
+  );
   app.use('/api/prerequisites', createPrerequisitesRouter(deps.config));
 
   // Static frontend build (served by this same process/port -- research.md §1).

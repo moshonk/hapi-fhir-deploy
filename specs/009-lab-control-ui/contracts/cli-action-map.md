@@ -22,7 +22,7 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 | `pause-autoscaling` | `pause-autoscaling --replicas {pause_replicas}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `resume-autoscaling` | `resume-autoscaling` (env: `KUBECONFIG` as above) | No |
 | `seed` | `seed --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`) | No |
-| `benchmark` | `benchmark --profile {k6_profile} [--echis-tier {echis_tier}] --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `K6_SCRIPT` per tier) | No |
+| `benchmark` | `benchmark --profile {k6_profile} [--echis-tier {echis_tier}] --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `K6_SCRIPT` per tier, `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `report` | `report --run {cliRunLabel} --cloud gcp --name {lab_name} --profile {k6_profile}` | No |
 | `down` | `down --cloud gcp --name {lab_name} --yes --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version}` | Yes — destroys infrastructure |
 | `doctor` (prerequisites) | `doctor --cloud gcp --format json` | No — read-only (research.md §5; this is a new subcommand this feature adds to `scripts/lab` itself) |
@@ -49,6 +49,14 @@ Notes:
   shown as the default with the same ceiling warning the runbook itself
   gives (Step 8), rather than silently letting the field drift from that
   doc if the ceiling ever changes.
+- `benchmark`'s `KUBECONFIG` isn't needed by `benchmark` itself (only
+  `FHIR_BASE_URL` is) -- it's for `scripts/lab`'s
+  `ensure_local_prometheus_remote_write`, which auto-detects a kubeconfig
+  to open a local-only port-forward into Prometheus's remote-write
+  endpoint, streaming live k6 metrics into Grafana by default regardless
+  of which tier/profile is running (`docs/lab-cli.md`'s "Live k6 metrics
+  in Grafana" section). Without it, every UI-triggered benchmark would
+  silently run without live metrics.
 - eCHIS tier selection (`echis_tier`) drives which `K6_SCRIPT` is passed for
   `benchmark` (`echis_load_100.js` for T2, `echis_load_1000.js` for T3, per
   `docs/echis-benchmark-tiers.md`) — this mapping lives in the GCP

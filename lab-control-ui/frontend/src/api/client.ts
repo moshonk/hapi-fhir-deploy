@@ -8,6 +8,7 @@ import type {
   LabConfiguration,
   PrereqCheck,
   ProviderPublicShape,
+  RunArtifacts,
 } from './types.js';
 
 export class ApiError extends Error {
@@ -106,6 +107,14 @@ export async function fetchRunsForLab(labId: string): Promise<ActionRunSummary[]
 
 export async function fetchRun(runId: string): Promise<ActionRunDetail> {
   return request<ActionRunDetail>(`/runs/${runId}`);
+}
+
+/** Result artifacts (dataset/benchmark summaries, published report) for a
+ * seed/benchmark/report run -- distinct from the process log fetched via
+ * LogViewer. `files: []` is a normal response (nothing produced yet, or
+ * this action never writes into a run directory), not an error. */
+export async function fetchRunArtifacts(runId: string): Promise<RunArtifacts> {
+  return request<RunArtifacts>(`/runs/${runId}/artifacts`);
 }
 
 export async function fetchExposures(labId: string): Promise<ExposureRecord[]> {

@@ -140,9 +140,9 @@ after a page reload or an exposure closed some other way (`unexpose-*`,
       "id": "grafana",
       "label": "Grafana",
       "exposed": true,
-      "url": "http://203.0.113.5:3000",
-      "port": "3000",
-      "firewallRule": "allow-grafana-3000-hapi-fhir-lab",
+      "url": "http://203.0.113.5:3001",
+      "port": "3001",
+      "firewallRule": "allow-grafana-3001-hapi-fhir-lab",
       "credentialsAvailable": true,
       "username": "admin",
       "password": "..."
@@ -195,3 +195,41 @@ event (`succeeded` or `failed`) and closes the stream when the process
 exits. Reconnecting after a drop simply reopens this same endpoint — the
 full-content replay on connect satisfies FR-008 without any client-tracked
 offset.
+
+### `GET /api/runs/:actionRunId/artifacts`
+
+Result artifacts for a `seed`/`benchmark`/`report` run — distinct from the
+raw process log above. Response `200`:
+
+```json
+{
+  "cliRunLabel": "hapi-fhir-lab-20260817-143105",
+  "files": [
+    { "name": "k6-fhir-summary.json", "kind": "json", "content": { "concurrency_target": 1000, "...": "..." } },
+    { "name": "benchmark-metadata.json", "kind": "json", "content": { "...": "..." } }
+  ]
+}
+```
+
+`files` is `[]` (never a `404`) both for actions with no run directory at
+all (`up`, `down`, `expose-*`, ...) and for a run that hasn't produced any
+of the known files yet (still running, or failed before writing anything)
+— "no results yet" is a normal state, not an error. `404` only when
+`actionRunId` itself doesn't resolve to a run.
+
+`kind: "json"` entries have `content` as the parsed file; `kind: "text"`
+entries (`report.md`, `summary.csv`) have `content` as the raw file text.
+Never includes `k6-raw.jsonl` (a multi-gigabyte NDJSON dump per real run) —
+`files` is built from a fixed allowlist of basenames inside the run's
+directory, never a directory listing.
+
+For `seed`/`benchmark` runs, files are read directly from
+`ansible/artifacts/lab/runs/{cliRunLabel}/` (the same directory
+`scripts/lab seed|benchmark --run {cliRunLabel}` itself wrote, per
+`cli-action-map.md`): `k6-fhir-summary.json`, `benchmark-metadata.json`,
+`k6-summary.json`, `dataset-metadata.json` — whichever exist. For `report`
+runs, the backend additionally recovers the published `results/<dir>/`
+path from the run's own log (`scripts/publish_results.rb`'s only stdout
+line on success is that directory) and, if it resolves to somewhere
+genuinely inside `RESULT_ROOT` (never elsewhere on disk), also includes
+`report.md`, `environment.json`, and `summary.csv` from there.

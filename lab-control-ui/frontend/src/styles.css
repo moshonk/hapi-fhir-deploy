@@ -70,6 +70,48 @@ fieldset {
   text-align: center;
 }
 
+.run-duration {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* Still ticking -- the run hasn't ended yet. */
+.run-duration-live {
+  color: var(--warn);
+}
+
+/* Locked at the final elapsed time once the run ended. */
+.run-duration-final {
+  opacity: 0.75;
+}
+
+.results-panel-file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.results-panel-file summary {
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.results-panel-content {
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.results-panel-empty {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
 .prerequisite-panel {
   border-collapse: collapse;
   width: 100%;

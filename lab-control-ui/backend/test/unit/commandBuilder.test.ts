@@ -218,6 +218,11 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     expect(cmd.env).toEqual({
       FHIR_BASE_URL: 'http://localhost:8080/fhir',
       K6_SCRIPT: 'benchmarks/k6/echis_load_1000.js',
+      // scripts/lab's ensure_local_prometheus_remote_write needs this to
+      // auto-detect a kubeconfig for the live-metrics port-forward --
+      // without it, every UI-triggered benchmark would silently run
+      // without live k6 metrics in Grafana.
+      KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig',
     });
   });
 

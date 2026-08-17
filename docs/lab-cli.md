@@ -143,31 +143,46 @@ Defaults assume namespace `fhir`, HAPI pod names matching `hapi-fhir-hapi-fhir-j
 
 #### Live k6 metrics in Grafana
 
-Set `K6_PROMETHEUS_RW_SERVER_URL` (a k6-native env var, e.g.
-`http://localhost:9090/api/v1/write` against a `kubectl -n monitoring
-port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090`) and
-`benchmark` adds `-o experimental-prometheus-rw` to the k6 invocation
-automatically, streaming live VU count/request rate/latency/failure-rate
-into Prometheus as the run progresses, alongside the always-written
-`k6-raw.jsonl` -- not instead of it:
+On by default, regardless of which tier/profile is running or what
+triggered it (direct CLI or the Lab Control UI): `benchmark` resolves a
+kubeconfig (`LAB_KUBECONFIG` > ambient `KUBECONFIG` > `--cloud`/`--name`'s
+generated one -- the Lab Control UI's `benchmark` action always sets
+`KUBECONFIG`), opens a localhost-only `kubectl port-forward` into
+Prometheus's remote-write endpoint on an OS-chosen ephemeral port (never
+colliding with an already-running `expose-prometheus`), and adds `-o
+experimental-prometheus-rw` to the k6 invocation -- streaming live VU
+count/request rate/latency/failure-rate into Prometheus as the run
+progresses, alongside the always-written `k6-raw.jsonl`, not instead of it.
+The port-forward is torn down again once the run ends (success or failure).
 
 ```sh
 FHIR_BASE_URL=http://localhost:8080/fhir \
-K6_PROMETHEUS_RW_SERVER_URL=http://localhost:9090/api/v1/write \
+KUBECONFIG=/path/to/kubeconfig \
 scripts/lab benchmark --profile load --run load-1 --echis-tier T2
 ```
+
+No kubeconfig required to trigger this -- if none resolves (e.g. running
+`benchmark` without `--cloud`/`--name` or `KUBECONFIG` at all, or the
+target Prometheus isn't reachable), `benchmark` logs why and runs without
+live metrics instead of failing the run. Set `K6_PROMETHEUS_RW_SERVER_URL`
+yourself to point at a different Prometheus instead (an explicit value
+always wins over the auto-detected one), or pass
+`--no-prometheus-remote-write` (`NO_PROMETHEUS_RW=true`) to opt out
+entirely.
 
 Requires the target Prometheus to have its remote-write receiver enabled
 (`enableRemoteWriteReceiver`, `ansible/group_vars/lab.yml`'s
 `enable_prometheus_remote_write`, default `true` -- a Prometheus restart on
-first enable). Import [Grafana Labs' official "k6 Prometheus"
-dashboard](https://grafana.com/grafana/dashboards/19665-k6-prometheus/)
-(dashboard ID `19665`) to watch it: in Grafana, **Dashboards → New → Import**,
-enter `19665`, and map its `Prometheus` datasource input to this stack's
-`Prometheus` datasource. HAPI FHIR's own server-side metrics (HTTP latency,
-JVM, Hikari pool) are scraped into the same Prometheus independently of this
-setting, so they're visible in Grafana during any run, not only when
-`K6_PROMETHEUS_RW_SERVER_URL` is set.
+first enable). The [Grafana Labs' official "k6
+Prometheus"](https://grafana.com/grafana/dashboards/19665-k6-prometheus/)
+dashboard (ID `19665`) is provisioned automatically -- see
+`manifests/grafana-dashboards/k6-load-testing-configmap.yaml`, applied by
+`ansible/playbooks/00-install-addons.yml` whenever `install_grafana` is
+true -- so it's present in Grafana as soon as the lab is up, not only after
+a manual dashboard import. HAPI FHIR's own server-side metrics (HTTP
+latency, JVM, Hikari pool) are scraped into the same Prometheus
+independently of any of this, so they're visible in Grafana during any run
+regardless.
 
 #### eCHIS progressive tiers
 
@@ -225,12 +240,12 @@ scripts/lab expose-fhir --cloud gcp --name NAME --var project_id=P [--port 8080]
 scripts/lab unexpose-fhir --cloud gcp --name NAME --var project_id=P
 scripts/lab expose-prometheus --cloud gcp --name NAME --var project_id=P [--port 9090] [--source-ranges CIDR[,CIDR...]]
 scripts/lab unexpose-prometheus --cloud gcp --name NAME --var project_id=P
-scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3000] [--source-ranges CIDR[,CIDR...]]
+scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3001] [--source-ranges CIDR[,CIDR...]]
 scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
 scripts/lab exposures --cloud gcp --name NAME [--format text|json]
 ```
 
-`kubectl port-forward` (Step 7 of the [GCP T3 runbook](gcp-echis-t3-lab-runbook.md), and the ad hoc `kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090` used to reach Prometheus) only binds `127.0.0.1`, reachable via an SSH/VS Code Remote tunnel. `expose-fhir`/`expose-prometheus`/`expose-grafana` are for the case where you're driving `scripts/lab` from a GCE VM directly and want the service reachable at that VM's own public IP without a tunnel: each opens a GCP firewall rule for `tcp:PORT` and starts a `0.0.0.0`-bound `kubectl port-forward` in the background, then prints the reachable URL (`http://EXTERNAL_IP:PORT/fhir` for FHIR, `http://EXTERNAL_IP:PORT` for Prometheus's/Grafana's UI). They're independent -- exposing one doesn't affect the others, and each tracks its own state/firewall rule, so you can run any subset of them. Grafana's actual Service port is `80`, but `--port` defaults to `3000` (Grafana's own conventional port) rather than `80` -- binding a port below 1024 needs root, which `scripts/lab` normally doesn't run as; the port-forward still correctly targets the Service's real port `80` internally regardless of the external `--port` chosen.
+`kubectl port-forward` (Step 7 of the [GCP T3 runbook](gcp-echis-t3-lab-runbook.md), and the ad hoc `kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090` used to reach Prometheus) only binds `127.0.0.1`, reachable via an SSH/VS Code Remote tunnel. `expose-fhir`/`expose-prometheus`/`expose-grafana` are for the case where you're driving `scripts/lab` from a GCE VM directly and want the service reachable at that VM's own public IP without a tunnel: each opens a GCP firewall rule for `tcp:PORT` and starts a `0.0.0.0`-bound `kubectl port-forward` in the background, then prints the reachable URL (`http://EXTERNAL_IP:PORT/fhir` for FHIR, `http://EXTERNAL_IP:PORT` for Prometheus's/Grafana's UI). They're independent -- exposing one doesn't affect the others, and each tracks its own state/firewall rule, so you can run any subset of them. Grafana's actual Service port is `80`, but `--port` defaults to `3001` rather than `80` -- binding a port below 1024 needs root, which `scripts/lab` normally doesn't run as. Not Grafana's own conventional `3000` either: when `scripts/lab` runs inside the Lab Control UI's `app` container (`network_mode: host`, see `lab-control-ui/docker-compose.yml`), the UI backend itself already owns host port `3000` (`LAB_UI_PORT`), so `expose-grafana` would otherwise fail with "address already in use" every time it's triggered from the UI. The port-forward still correctly targets the Service's real port `80` internally regardless of the external `--port` chosen.
 
 **FHIR and Prometheus have no authentication in front of them in this lab; Grafana does.** kube-prometheus-stack's bundled Grafana (installed when `install_grafana: true`, the `00-install-addons.yml` default) requires login -- user `admin`, password from `kubectl -n monitoring get secret prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d`. Regardless, `--source-ranges` defaults to `0.0.0.0/0` — the whole internet — for all three. This is deliberate, not an oversight: `scripts/lab` normally runs *on* the GCE VM itself (via SSH/VS Code Remote), so auto-detecting "the caller's IP" from that same VM would detect the VM's own address, not the browser/laptop actually trying to reach it — a restrictive default that doesn't match the real client just breaks access silently (this is exactly what happened before this default changed). Pass `--source-ranges CIDR` (e.g. your own IP as a `/32`) if you want it restricted instead. Whatever range you choose can read (and, for FHIR, write) for as long as the exposure is up.
 

@@ -11,6 +11,19 @@ export interface AppConfig {
   labCliPath: string;
   dbPath: string;
   runsDir: string;
+  /** Where `scripts/lab seed`/`benchmark`/`report --run {cliRunLabel}`
+   * write result artifacts (dataset-metadata.json, k6-summary.json,
+   * report.md, ...) -- scripts/lab's own RUN_ROOT, NOT `runsDir` above
+   * (that's this UI's own per-actionRun *log* directory, a distinct
+   * concept; see cli-action-map.md's cliRunLabel-vs-actionRunId note).
+   * Same env var name as scripts/lab's LAB_RUNS_DIR so one override
+   * affects both. */
+  cliRunsDir: string;
+  /** Where `scripts/lab report`'s default publisher (scripts/publish_results.rb)
+   * writes the human-readable report tree (report.md, environment.json,
+   * summary.csv, raw/) -- scripts/lab's own RESULT_ROOT. Same env var name
+   * so one override affects both. */
+  resultsDir: string;
   secureCookies: boolean;
   /**
    * Where the built frontend (lab-control-ui/frontend/dist) lives. Defaults
@@ -66,6 +79,8 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       env.LAB_UI_DB_PATH ??
       resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'lab-control-ui.db'),
     runsDir: env.LAB_UI_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'runs'),
+    cliRunsDir: env.LAB_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'runs'),
+    resultsDir: env.LAB_RESULTS_DIR ?? resolve(repoRoot, 'results'),
     secureCookies: env.LAB_UI_COOKIE_SECURE === 'true',
     frontendDistPath:
       env.LAB_UI_FRONTEND_DIST ?? resolve(repoRoot, 'lab-control-ui', 'frontend', 'dist'),

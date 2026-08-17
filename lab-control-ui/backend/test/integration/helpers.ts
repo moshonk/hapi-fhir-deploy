@@ -17,6 +17,8 @@ export interface TestContext {
   db: DatabaseSync;
   config: AppConfig;
   runsDir: string;
+  cliRunsDir: string;
+  resultsDir: string;
 }
 
 export function buildTestApp(overrides: Partial<AppConfig> = {}): TestContext {
@@ -24,6 +26,8 @@ export function buildTestApp(overrides: Partial<AppConfig> = {}): TestContext {
   _resetRunnerStateForTests();
 
   const runsDir = mkdtempSync(join(tmpdir(), 'lab-ui-runs-'));
+  const cliRunsDir = mkdtempSync(join(tmpdir(), 'lab-ui-cli-runs-'));
+  const resultsDir = mkdtempSync(join(tmpdir(), 'lab-ui-results-'));
   const db = new DatabaseSync(':memory:');
   initSchema(db);
 
@@ -34,6 +38,8 @@ export function buildTestApp(overrides: Partial<AppConfig> = {}): TestContext {
     labCliPath: join(process.cwd(), 'test', 'fixtures', 'stub-lab.sh'),
     dbPath: ':memory:',
     runsDir,
+    cliRunsDir,
+    resultsDir,
     secureCookies: false,
     // Deliberately non-existent in the test context (same as before this
     // field existed, when it was computed inline from repoRoot) -- the
@@ -44,7 +50,7 @@ export function buildTestApp(overrides: Partial<AppConfig> = {}): TestContext {
   };
 
   const app = createApp({ db, config });
-  return { app, db, config, runsDir };
+  return { app, db, config, runsDir, cliRunsDir, resultsDir };
 }
 
 /** Logs in and returns the Set-Cookie header value to reuse on subsequent requests. */
