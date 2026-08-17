@@ -10,6 +10,23 @@ const PROFILE = "load";
 const WORKLOAD = "echis";
 
 export const options = {
+  // Diagnosed live (run hapi-lab-t3-20260817-143105): with connection
+  // reuse (k6's default), Kubernetes' Service load-balances at the TCP
+  // *connection* level (kube-proxy), not per-request -- each VU's
+  // long-lived keep-alive connection stays pinned to whichever pod it
+  // first landed on, largely decided during the early ramp when only 1-2
+  // replicas existed. KEDA correctly scaled the deployment 2->5 replicas,
+  // but 4 of them sat almost idle (~0.04 CPU cores avg) while 1 pod
+  // absorbed essentially all traffic, pegged at its 2-core limit
+  // (avg 1.93 cores) with its own Hikari pool saturated (9.58/10 active)
+  // and up to 191 threads queued for a connection -- fully explaining the
+  // 7-10s p50/p95/p99 latency this threshold had to be recalibrated for.
+  // Disabling connection reuse forces a fresh connection per request, so
+  // kube-proxy's per-connection balancing actually gets exercised
+  // per-request instead of pinned once per VU for the run's duration --
+  // letting all replicas share real load, which is what "1000 VUs against
+  // an autoscaled deployment" is supposed to measure in the first place.
+  noConnectionReuse: true,
   summaryTrendStats: ["avg", "min", "med", "p(50)", "p(95)", "p(99)", "max"],
   scenarios: {
     fhir_workload: {

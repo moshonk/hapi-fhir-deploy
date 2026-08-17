@@ -17,6 +17,14 @@ const PROFILE = "stress";
 const WORKLOAD = "echis";
 
 export const options = {
+  // Connection reuse (k6's default) plus Kubernetes' per-connection
+  // (not per-request) Service load balancing pins each VU's traffic to
+  // whichever pod its keep-alive connection first landed on, largely
+  // deciding "which replica does the work" during the early ramp rather
+  // than letting KEDA-added replicas actually share load -- see
+  // echis_load_1000.js's options comment for the full diagnosis (found
+  // live against T3, applies equally here).
+  noConnectionReuse: true,
   summaryTrendStats: ["avg", "min", "med", "p(50)", "p(95)", "p(99)", "max"],
   scenarios: {
     fhir_workload: {
