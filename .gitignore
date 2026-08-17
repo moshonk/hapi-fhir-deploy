@@ -34,4 +34,6 @@ lab-control-ui/*/dist/
 lab-control-ui/*/coverage/
 lab-control-ui/*/tsconfig.tsbuildinfo
 lab-control-ui/.env
+# Real TLS material -- never committed, see lab-control-ui/README.md's TLS section
+lab-control-ui/nginx/certs/
 ansible/artifacts/lab/ui/

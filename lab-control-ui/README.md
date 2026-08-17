@@ -87,12 +87,29 @@ Ansible, Node) is pinned to an exact version — see the
 `gcloud`/`gke-gcloud-auth-plugin` are the one documented exception (Google's
 apt repo doesn't retain old versions the way Terraform's does).
 
-**TLS**: nginx serves plain HTTP by default (matching this feature's scope —
-automated certificate provisioning is out of scope). To serve real HTTPS,
-bring your own certificate, mount it into the nginx container, and uncomment
-the HTTPS `server` block in [`nginx/nginx.conf`](nginx/nginx.conf) — see that
-file's comments for the exact steps, and set `LAB_UI_COOKIE_SECURE=true`
-once you do.
+**TLS**: `nginx.conf` runs a real HTTPS server block by default (plain HTTP
+on port 80 is redirect-only) — bring your own certificate, since automated
+provisioning (ACME/Let's Encrypt) is out of scope for this feature. Drop
+your certificate and key at:
+
+```
+lab-control-ui/nginx/certs/fullchain.pem   # leaf cert + intermediate(s), NOT the root
+lab-control-ui/nginx/certs/privkey.pem
+```
+
+This path is gitignored and mounted read-only into the `nginx` container by
+`docker-compose.yml`'s `TLS_CERT_DIR` (default `./nginx/certs`). Update
+`nginx.conf`'s `server_name` to match your certificate's domain, set
+`LAB_UI_COOKIE_SECURE=true` in `.env` (already the default), and rebuild.
+If your cert's private key ships encrypted (e.g. `openssl aes-256-cbc`),
+decrypt it before placing it — nginx does not prompt for a passphrase.
+
+**Running `docker compose` via `sudo`**: sudo resets `$HOME` to `/root`, so
+`GCLOUD_CONFIG_DIR`'s `${HOME}` default silently resolves to the wrong
+directory (see `.env.example`'s note) — set `GCLOUD_CONFIG_DIR` explicitly
+in `.env`, or use `sudo -E` to preserve your shell's `$HOME`. Prefer adding
+your user to the `docker` group (`sudo usermod -aG docker $USER`, then a
+fresh login) over `sudo` for day-to-day use.
 
 **Known limitation**: `docker compose down`/host shutdown does not
 gracefully signal any `scripts/lab` step (e.g. a k6 benchmark) that happens

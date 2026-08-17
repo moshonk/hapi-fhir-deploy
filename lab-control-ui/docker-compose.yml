@@ -45,8 +45,9 @@ services:
         condition: service_healthy
     ports:
       - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      # Uncomment to serve real HTTPS -- see nginx/nginx.conf's commented-out
-      # server block and lab-control-ui/README.md's TLS section.
-      # - ${TLS_CERT_DIR:-./nginx/certs}:/etc/nginx/certs:ro
+      # fullchain.pem + privkey.pem for hapilab.intellisoftkenya.com --
+      # gitignored (lab-control-ui/nginx/certs/), see README.md's TLS section.
+      - ${TLS_CERT_DIR:-./nginx/certs}:/etc/nginx/certs:ro
