@@ -1,6 +1,6 @@
-// T039 (US3): triggering up/down/expose-fhir/expose-prometheus without
-// confirmed:true returns 409 with a confirmationMessage naming the concrete
-// consequence; nothing is spawned.
+// T039 (US3): triggering up/down/expose-fhir/expose-prometheus/expose-grafana
+// without confirmed:true returns 409 with a confirmationMessage naming the
+// concrete consequence; nothing is spawned.
 
 import { existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,7 +15,7 @@ describe('confirmation gating on costly/destructive actions', () => {
     process.env = { ...savedEnv };
   });
 
-  for (const action of ['up', 'down', 'expose-fhir', 'expose-prometheus']) {
+  for (const action of ['up', 'down', 'expose-fhir', 'expose-prometheus', 'expose-grafana']) {
     it(`blocks ${action} without confirmed:true and spawns nothing`, async () => {
       const recordFile = join('/tmp', `stub-record-${action}-${Date.now()}.txt`);
       process.env.STUB_LAB_RECORD_FILE = recordFile;
@@ -45,7 +45,11 @@ describe('confirmation gating on costly/destructive actions', () => {
       if (action === 'up' || action === 'down') {
         expect(res.body.confirmationMessage).toContain('hapi-fhir-lab'); // the default lab_name
       }
-      if (action === 'expose-fhir' || action === 'expose-prometheus') {
+      if (
+        action === 'expose-fhir' ||
+        action === 'expose-prometheus' ||
+        action === 'expose-grafana'
+      ) {
         expect(res.body.confirmationMessage).toContain('0.0.0.0/0'); // the default expose_source_ranges
       }
 

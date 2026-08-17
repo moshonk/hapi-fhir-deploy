@@ -259,6 +259,30 @@ export const GCP_ACTIONS: ActionDef[] = [
     requiredPrerequisiteIds: [],
   },
   {
+    name: 'expose-grafana',
+    label: 'Expose Grafana publicly',
+    cliSubcommand: 'expose-grafana',
+    scope: 'provider',
+    requiresConfirmation: true,
+    // Unlike expose-fhir/expose-prometheus, Grafana does require a login
+    // (kube-prometheus-stack's default admin/<generated password> --
+    // docs/lab-cli.md's "Public exposure (GCP only)" section) -- named here
+    // so the confirmation dialog doesn't overstate the exposure the way a
+    // copy-pasted FHIR/Prometheus message would.
+    confirmationMessage:
+      "This opens a public GCP firewall rule for Grafana, reachable from {expose_source_ranges}. Login is required (user 'admin'; run `kubectl -n monitoring get secret prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d` for the password).",
+    requiredPrerequisiteIds: ['kubectl', 'gcloud'],
+  },
+  {
+    name: 'unexpose-grafana',
+    label: 'Close public Grafana exposure',
+    cliSubcommand: 'unexpose-grafana',
+    scope: 'provider',
+    requiresConfirmation: false,
+    confirmationMessage: null,
+    requiredPrerequisiteIds: [],
+  },
+  {
     name: 'pause-autoscaling',
     label: 'Pin replicas for bulk-load window',
     cliSubcommand: 'pause-autoscaling',
@@ -446,6 +470,36 @@ export function gcpBuildCommand(
       return {
         argv: [
           'unexpose-prometheus',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          '--var',
+          `project_id=${projectId}`,
+        ],
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
+      };
+
+    case 'expose-grafana':
+      return {
+        argv: [
+          'expose-grafana',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          '--var',
+          `project_id=${projectId}`,
+          '--source-ranges',
+          f('expose_source_ranges'),
+        ],
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
+      };
+
+    case 'unexpose-grafana':
+      return {
+        argv: [
+          'unexpose-grafana',
           '--cloud',
           'gcp',
           '--name',

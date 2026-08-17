@@ -143,6 +143,36 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
+  it('expose-grafana (requires KUBECONFIG)', () => {
+    const cmd = run('expose-grafana');
+    expect(cmd.argv).toEqual([
+      'expose-grafana',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--var',
+      'project_id=my-project',
+      '--source-ranges',
+      '0.0.0.0/0',
+    ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
+  });
+
+  it('unexpose-grafana (requires KUBECONFIG)', () => {
+    const cmd = run('unexpose-grafana');
+    expect(cmd.argv).toEqual([
+      'unexpose-grafana',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--var',
+      'project_id=my-project',
+    ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
+  });
+
   it('pause-autoscaling', () => {
     const cmd = run('pause-autoscaling');
     expect(cmd.argv).toEqual(['pause-autoscaling', '--replicas', '5']);
@@ -291,5 +321,18 @@ describe('resolveConfirmationMessage (FR-012 -- name the actual configured value
 
   it('returns null for actions with no confirmation message', () => {
     expect(resolveConfirmationMessage(deployAction, {})).toBeNull();
+  });
+
+  it('expose-grafana: interpolates expose_source_ranges and leaves the jsonpath braces in the login hint untouched', () => {
+    const exposeGrafanaAction = gcpProvider.actions.find((a) => a.name === 'expose-grafana')!;
+    const message = resolveConfirmationMessage(exposeGrafanaAction, {
+      expose_source_ranges: '203.0.113.7/32',
+    })!;
+    expect(message).toContain('203.0.113.7/32');
+    expect(message).not.toContain('{expose_source_ranges}');
+    // {.data.admin-password} isn't a {field_key} placeholder (dots/hyphens
+    // aren't valid field-key characters) -- must survive interpolation
+    // verbatim as the real kubectl jsonpath expression it is.
+    expect(message).toContain('{.data.admin-password}');
   });
 });

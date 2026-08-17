@@ -61,7 +61,7 @@ As an operator, before I can trigger an action that would fail or cost money, th
 
 1. **Given** the UI loads, **When** prerequisite checks run, **Then** each required tool/credential is shown with a pass, warn, or fail status, matching what `scripts/lab up`'s own preflight check already verifies.
 2. **Given** one or more prerequisites are failing, **When** the operator attempts an action that needs them, **Then** the UI blocks or requires explicit confirmation, and states which prerequisite is the blocker.
-3. **Given** the operator is about to trigger `expose-fhir`/`expose-prometheus` with its default 0.0.0.0/0 exposure, **When** they click the action, **Then** the UI shows an explicit warning naming the exposure scope and requires confirmation before proceeding.
+3. **Given** the operator is about to trigger `expose-fhir`/`expose-prometheus`/`expose-grafana` with its default 0.0.0.0/0 exposure, **When** they click the action, **Then** the UI shows an explicit warning naming the exposure scope and requires confirmation before proceeding.
 4. **Given** the operator is about to trigger `up` (billable resource creation) or `down` (destructive teardown), **When** they click the action, **Then** the UI requires explicit confirmation naming what will happen before proceeding.
 
 ---
@@ -93,7 +93,7 @@ As a maintainer, when a non-GCP provider (AWS, Azure — both already modeled by
 **Acceptance Scenarios**:
 
 1. **Given** the configuration schema, **When** a maintainer inspects it, **Then** GCP-specific fields are clearly separated from fields common to every provider.
-2. **Given** the action list, **When** a maintainer inspects it, **Then** provider-only actions (e.g., `expose-fhir`, `expose-prometheus`, which the CLI documents as GCP-only) are marked as such rather than assumed universal.
+2. **Given** the action list, **When** a maintainer inspects it, **Then** provider-only actions (e.g., `expose-fhir`, `expose-prometheus`, `expose-grafana`, which the CLI documents as GCP-only) are marked as such rather than assumed universal.
 
 ---
 
@@ -113,7 +113,7 @@ As a maintainer, when a non-GCP provider (AWS, Azure — both already modeled by
 - **FR-001**: The system MUST present a lab configuration form covering the fields used by the documented GCP lab lifecycle (provider, lab name, region/zone, node size, cluster min/max nodes, DB edition/SKU/disk size, ttl_hours, eCHIS tier or households/individuals-per-household/seed, k6 profile), with every field pre-filled with a default value derived from this repository's existing documented examples.
 - **FR-002**: The system MUST require only fields that cannot be reasonably defaulted (at minimum, the GCP project ID) before a configuration is considered launchable; all other fields MUST be editable but not blocking.
 - **FR-003**: The system MUST let the operator preview the exact underlying `scripts/lab` command a given configuration will produce, before the action is triggered.
-- **FR-004**: The system MUST expose each lab lifecycle step documented in `docs/lab-cli.md` and `docs/gcp-echis-t3-lab-runbook.md` (provision/`up`, `deploy`, `expose-fhir`/`unexpose-fhir`, `expose-prometheus`/`unexpose-prometheus`, `pause-autoscaling`/`resume-autoscaling`, `seed`, `benchmark`, `report`, `down`) as a distinct, individually-triggerable action in the UI.
+- **FR-004**: The system MUST expose each lab lifecycle step documented in `docs/lab-cli.md` and `docs/gcp-echis-t3-lab-runbook.md` (provision/`up`, `deploy`, `expose-fhir`/`unexpose-fhir`, `expose-prometheus`/`unexpose-prometheus`, `expose-grafana`/`unexpose-grafana`, `pause-autoscaling`/`resume-autoscaling`, `seed`, `benchmark`, `report`, `down`) as a distinct, individually-triggerable action in the UI.
 - **FR-005**: The system MUST execute each triggered action by invoking the existing `scripts/lab` CLI (or its documented environment-variable contract) rather than re-implementing the CLI's own validation, sequencing, or default-resolution logic in a second, independent form.
 - **FR-006**: The system MUST surface the CLI's own success/failure/refusal outcome for an action (including sequencing refusals such as the T2-before-T3 eCHIS tier guard) to the operator, rather than presenting a separately-derived status.
 - **FR-007**: The system MUST stream an in-progress action's output to the browser incrementally as it is produced, not only after the action completes.
@@ -121,12 +121,12 @@ As a maintainer, when a non-GCP provider (AWS, Azure — both already modeled by
 - **FR-009**: The system MUST retain the captured output of completed actions, associated with the lab and the configuration that produced them, and MUST let the operator browse and view this run history after the fact.
 - **FR-010**: The system MUST check, on load and before allowing prerequisite-dependent actions, the presence and basic usability of each tool/credential the lab lifecycle depends on (at minimum: Terraform, Helm, kubectl, Ruby, k6, Java, the `gcloud` CLI, `gke-gcloud-auth-plugin`, the pinned Ansible virtualenv/collections, and an active `gcloud`/application-default credential with a project set), and present each as pass, warn, or fail.
 - **FR-011**: The system MUST prevent, or require explicit confirmation before, triggering an action whose required prerequisite is in a failing state.
-- **FR-012**: The system MUST require explicit operator confirmation, with a stated description of the consequence, before triggering an action that provisions billable cloud resources (`up`), destroys infrastructure (`down`), or opens a public network exposure (`expose-fhir`, `expose-prometheus`).
+- **FR-012**: The system MUST require explicit operator confirmation, with a stated description of the consequence, before triggering an action that provisions billable cloud resources (`up`), destroys infrastructure (`down`), or opens a public network exposure (`expose-fhir`, `expose-prometheus`, `expose-grafana`).
 - **FR-013**: The system MUST NOT allow any lab configuration, action trigger, log, or run-history view to be accessed without an authenticated session.
 - **FR-014**: The system MUST authenticate operators via a single shared secret configured at deployment time, establishing a session upon successful submission.
 - **FR-015**: The system MUST reject an incorrect shared secret without revealing whether the submitted value was partially correct.
 - **FR-016**: The system MUST prevent two concurrent triggers of the same action against the same lab; a second trigger attempt while one is already running MUST be refused with a message identifying the in-progress action.
-- **FR-017**: The system's configuration schema and action set MUST represent provider-specific fields and provider-specific actions (e.g., GCP's `expose-fhir`/`expose-prometheus`, region/zone, DB SKU/edition) as distinct from fields and actions common to every provider, so that a future non-GCP provider can be added by declaring its own fields/actions without modifying shared configuration, action-triggering, or log-streaming behavior.
+- **FR-017**: The system's configuration schema and action set MUST represent provider-specific fields and provider-specific actions (e.g., GCP's `expose-fhir`/`expose-prometheus`/`expose-grafana`, region/zone, DB SKU/edition) as distinct from fields and actions common to every provider, so that a future non-GCP provider can be added by declaring its own fields/actions without modifying shared configuration, action-triggering, or log-streaming behavior.
 - **FR-018**: For this feature's scope, the system MUST implement only the GCP provider's fields and actions; other providers (`--cloud aws|azure`, already accepted by `scripts/lab` itself) are out of scope for implementation but MUST NOT be precluded by the design (see FR-017).
 - **FR-019**: The system MUST continue running a triggered action to completion on the server independent of the operator's browser connection state, and MUST record its outcome regardless of whether anyone was watching when it finished.
 
@@ -142,7 +142,7 @@ As a maintainer, when a non-GCP provider (AWS, Azure — both already modeled by
 ### Measurable Outcomes
 
 - **SC-001**: A first-time operator with prerequisites already satisfied can go from opening the UI to having triggered lab provisioning in under 5 minutes, entering only their GCP project ID and accepting defaults for everything else.
-- **SC-002**: 100% of documented lab lifecycle actions (provision, deploy, expose/unexpose FHIR, expose/unexpose Prometheus, pause/resume autoscaling, seed, benchmark, report, destroy) are triggerable from the UI without the operator needing a separate terminal session.
+- **SC-002**: 100% of documented lab lifecycle actions (provision, deploy, expose/unexpose FHIR, expose/unexpose Prometheus, expose/unexpose Grafana, pause/resume autoscaling, seed, benchmark, report, destroy) are triggerable from the UI without the operator needing a separate terminal session.
 - **SC-003**: An operator watching a running action sees new output appear in the browser within a few seconds of it being produced, matching what they would see watching the same command in a terminal.
 - **SC-004**: 100% of prerequisite failures that would cause a lab lifecycle action to fail are visible in the UI's prerequisite status before the operator triggers that action, not discovered only from the action's failure output.
 - **SC-005**: Every action that creates billable resources, destroys infrastructure, or opens a public network exposure requires an explicit confirmation step naming the consequence, with zero such actions triggerable by a single accidental click.

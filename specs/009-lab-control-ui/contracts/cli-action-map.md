@@ -17,6 +17,8 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 | `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
 | `unexpose-prometheus` | `unexpose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
+| `expose-grafana` | `expose-grafana --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope and notes Grafana (unlike FHIR/Prometheus) requires login |
+| `unexpose-grafana` | `unexpose-grafana --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `pause-autoscaling` | `pause-autoscaling --replicas {pause_replicas}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `resume-autoscaling` | `resume-autoscaling` (env: `KUBECONFIG` as above) | No |
 | `seed` | `seed --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`) | No |
@@ -59,8 +61,12 @@ Notes:
   `benchmark` run. If neither resolves, the trigger is refused with `400`
   rather than silently generating a label that doesn't exist on disk.
 - `ActionDef.confirmationMessage` (`up`, `down`, `expose-fhir`,
-  `expose-prometheus`) may contain `{field_key}` placeholders referencing
-  this provider's own `ConfigField` keys (e.g. `{expose_source_ranges}`).
+  `expose-prometheus`, `expose-grafana`) may contain `{field_key}`
+  placeholders referencing this provider's own `ConfigField` keys (e.g.
+  `{expose_source_ranges}`). `expose-grafana`'s message also contains a
+  literal `{.data.admin-password}` kubectl jsonpath expression, which is
+  **not** a placeholder — the interpolation regex only matches
+  `[a-zA-Z0-9_]+` between braces, so dots/hyphens pass through untouched.
   `GET /api/providers` serves the raw, unresolved template; only the
   trigger endpoint's `409` response carries the value interpolated against
   the triggering lab's live field values (FR-012 — name the actual

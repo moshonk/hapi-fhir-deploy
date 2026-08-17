@@ -54,7 +54,7 @@ GCP adapter's `configFields` (defaults sourced from
 | `db_edition` | provider | `"ENTERPRISE"` |
 | `db_sku` | provider | `"db-custom-2-7680"` |
 | `db_disk_size_gb` | provider | `256` |
-| `expose_source_ranges` | provider | `"0.0.0.0/0"` (matches the CLI's own default; the confirmation dialog for `expose-fhir`/`expose-prometheus` names this value explicitly per FR-012) |
+| `expose_source_ranges` | provider | `"0.0.0.0/0"` (matches the CLI's own default; the confirmation dialog for `expose-fhir`/`expose-prometheus`/`expose-grafana` names this value explicitly per FR-012) |
 
 ### ActionDef
 
@@ -63,8 +63,8 @@ GCP adapter's `configFields` (defaults sourced from
 | `name` | string | e.g. `"up"`, `"expose-fhir"`. |
 | `label` | string | Display name/verb, e.g. "Provision infrastructure". |
 | `cliSubcommand` | string | The literal `scripts/lab` subcommand invoked. |
-| `scope` | `"common" \| "provider"` | `expose-fhir`/`expose-prometheus`/`unexpose-fhir`/`unexpose-prometheus` are `"provider"` (GCP-only per `docs/lab-cli.md`); the rest are `"common"`. |
-| `requiresConfirmation` | boolean | True for `up`, `down`, `expose-fhir`, `expose-prometheus` (FR-012). |
+| `scope` | `"common" \| "provider"` | `expose-fhir`/`expose-prometheus`/`expose-grafana`/`unexpose-fhir`/`unexpose-prometheus`/`unexpose-grafana` are `"provider"` (GCP-only per `docs/lab-cli.md`); the rest are `"common"`. |
+| `requiresConfirmation` | boolean | True for `up`, `down`, `expose-fhir`, `expose-prometheus`, `expose-grafana` (FR-012). |
 | `confirmationMessage` | string \| `null` | States the concrete consequence (billable resources / destructive teardown / public 0.0.0.0/0 exposure), populated with the live config values (e.g. actual `source_ranges`) at confirm time. |
 | `requiredPrerequisiteIds` | string[] | Which `PrerequisiteCheckDef`s must be passing (or explicitly overridden) before this action is triggerable (FR-011). |
 
