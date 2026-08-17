@@ -317,6 +317,43 @@ def resources_for_household(household_index, individuals_per_household)
   resources
 end
 
+PROGRESS_BAR_WIDTH = 24
+
+def progress_bar(percent)
+  filled = ((PROGRESS_BAR_WIDTH * percent) / 100.0).round.clamp(0, PROGRESS_BAR_WIDTH)
+  ("#" * filled) + ("." * (PROGRESS_BAR_WIDTH - filled))
+end
+
+# Renders a "count and percentage" progress update for the current batch.
+# Throttled to at most one line per whole percentage point crossed (plus
+# always on the final batch), so a run of thousands of batches doesn't
+# flood the log regardless of --batch-size. On a real terminal, updates
+# overwrite the same line via \r for a live-looking progress bar; anywhere
+# else (piped to a file, captured by `scripts/lab`, streamed through the
+# Lab Control UI's SSE log -- none of which interpret \r as "overwrite
+# the previous line") each update is emitted as its own line instead.
+def report_progress(verb, done, total, shard_index, shard_count, last_reported_percent)
+  percent = total.positive? ? ((done * 100.0) / total) : 100.0
+  floor_percent = percent.floor
+  finished = done >= total
+  return last_reported_percent unless finished || floor_percent > last_reported_percent
+
+  line = format(
+    "%s households %d/%d [%s] %3d%% (shard %d/%d)",
+    verb, done, total, progress_bar(percent), floor_percent, shard_index, shard_count
+  )
+
+  if $stdout.tty?
+    print "\r#{line}"
+    print "\n" if finished
+    $stdout.flush
+  else
+    puts line
+  end
+
+  floor_percent
+end
+
 started_at = Time.now.utc
 http_status_counts = Hash.new(0)
 fhir_response_status_counts = Hash.new(0)
@@ -325,6 +362,7 @@ imported_entry_count = 0
 transaction_bundle_count = 0
 resource_counts = Hash.new(0)
 emitted_chw_indices = Set.new
+last_reported_percent = -1
 
 (start_index...end_index).each_slice(batch_size) do |household_indices|
   transaction_bundle_count += 1
@@ -357,7 +395,7 @@ emitted_chw_indices = Set.new
 
   if metadata_only
     imported_entry_count += entries.length
-    puts "Would import households #{progress_done}/#{progress_total} (shard #{shard_index}/#{shard_count})" if (transaction_bundle_count % 10).zero? || progress_done == progress_total
+    last_reported_percent = report_progress("Would import", progress_done, progress_total, shard_index, shard_count, last_reported_percent)
     next
   end
 
@@ -385,7 +423,7 @@ emitted_chw_indices = Set.new
     imported_entry_count += 1 if status_success?(status)
   end
 
-  puts "Imported households #{progress_done}/#{progress_total} (shard #{shard_index}/#{shard_count})" if (transaction_bundle_count % 10).zero? || progress_done == progress_total
+  last_reported_percent = report_progress("Imported", progress_done, progress_total, shard_index, shard_count, last_reported_percent)
 rescue StandardError => e
   errors << { "batch" => transaction_bundle_count, "message" => "#{e.class}: #{e.message}" }
 end
