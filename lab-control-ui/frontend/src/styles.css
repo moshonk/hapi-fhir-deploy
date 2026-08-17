@@ -120,3 +120,32 @@ fieldset {
 .launchable-warning {
   color: var(--warn);
 }
+
+.loading-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 2rem 0;
+  opacity: 0.8;
+}
+
+.spinner {
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

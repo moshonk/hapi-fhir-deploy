@@ -8,6 +8,7 @@ import { Login } from './pages/Login.js';
 import { ConfigureLab } from './pages/ConfigureLab.js';
 import { LabDashboard } from './pages/LabDashboard.js';
 import { RunHistory } from './pages/RunHistory.js';
+import { LoadingIndicator } from './components/LoadingIndicator.js';
 import { hasValidSession } from './api/session.js';
 import { fetchLabs, fetchProviders, fetchRunsForLab, logout } from './api/client.js';
 import type { ActionRunSummary, LabConfiguration, ProviderPublicShape } from './api/types.js';
@@ -18,6 +19,11 @@ export function App() {
   const [session, setSession] = useState<SessionState>('checking');
   const [providers, setProviders] = useState<ProviderPublicShape[]>([]);
   const [lab, setLab] = useState<LabConfiguration | null>(null);
+  // Distinct from `lab === null`, which is also the legitimate "no saved
+  // lab yet" resting state -- without this, a returning operator with a
+  // saved config would briefly see the empty/default form flash before
+  // fetchLabs resolves and repopulates it.
+  const [labsLoaded, setLabsLoaded] = useState(false);
   const [runs, setRuns] = useState<ActionRunSummary[]>([]);
   const [runsRefreshKey, setRunsRefreshKey] = useState(0);
 
@@ -36,7 +42,8 @@ export function App() {
     // so a returning operator doesn't start from scratch every visit.
     fetchLabs()
       .then((labs) => setLab(labs[0] ?? null))
-      .catch(() => setLab(null));
+      .catch(() => setLab(null))
+      .finally(() => setLabsLoaded(true));
   }, [session]);
 
   const labId = lab?.id;
@@ -50,11 +57,11 @@ export function App() {
       .catch(() => setRuns([]));
   }, [labId, runsRefreshKey]);
 
-  if (session === 'checking') return <p>Loading...</p>;
+  if (session === 'checking') return <LoadingIndicator label="Checking session…" />;
   if (session === 'loggedOut') return <Login onLoggedIn={() => setSession('loggedIn')} />;
 
   const provider = providers[0];
-  if (!provider) return <p>Loading provider configuration...</p>;
+  if (!provider || !labsLoaded) return <LoadingIndicator label="Loading provider configuration…" />;
 
   return (
     <div className="app">
