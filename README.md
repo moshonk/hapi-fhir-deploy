@@ -75,7 +75,8 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `scripts/lab`: ephemeral benchmark lab wrapper for provision, deploy, seed, benchmark, report, and destroy workflows.
 - `scripts/publish_results.rb`: local benchmark result publisher for ignored `results/YYYYMMDD-HHMMSS-provider-profile/` artifacts.
 - `scripts/synthea_loader.rb`: FHIR R4 transaction-bundle loader and dataset metadata writer.
-- `scripts/echis_seed.rb`: deterministic, shardable household/CHW FHIR dataset generator for the eCHIS progressive benchmark (spec 008).
+- `scripts/echis_seed.rb`: deterministic, shardable household/CHW FHIR dataset generator for the eCHIS progressive benchmark (spec 008), extended with a facility/sub-region/region `Location` hierarchy, catchment tags, `Organization`/`Practitioner` reference data, and an optional `Specimen` dataset (spec 010).
+- `scripts/verify_echis_catchment_data.rb`: post-seed, read-only verification script confirming spec 010's facility hierarchy, catchment tags, and reference data are reachable on a live FHIR server after `scripts/echis_seed.rb` has loaded a dataset.
 - `scripts/merge_seed_shards.rb`, `scripts/merge_k6_shards.rb`: combine per-shard dataset/k6 summary output from `manifests/seed-job/`, `manifests/k6-shard-job/` Indexed Jobs into one comparable result.
 - `results/`: ignored local benchmark report publications; do not commit generated result artifacts.
 - `docs/benchmark-lab-epic.md`: issue #18 acceptance mapping for the full benchmark lab workflow.
@@ -88,7 +89,7 @@ This repository implements the Rev2 handoff tracked by issue #1 through a Helm-f
 - `docs/runtime-rollout.md`: JVM flags, graceful shutdown, topology spread, PDB alignment, and rollout verification.
 - `docs/indexing-strategy.md`: D6 decision memo for disabled advanced indexing.
 - `docs/echis-benchmark-tiers.md`: progressive eCHIS household/CHW benchmark tier definitions (T2-T5), `scripts/lab --echis-tier` sequencing guard, and known gaps (spec 008).
-- `docs/echis-data-model.md`: eCHIS FHIR resource shape memo for `scripts/echis_seed.rb`'s generated dataset (spec 008).
+- `docs/echis-data-model.md`: eCHIS FHIR resource shape memo for `scripts/echis_seed.rb`'s generated dataset (spec 008; facility hierarchy/tags/Organization/Practitioner/Specimen additions, spec 010).
 - `specs/`: Spec Kit workstream specs for the Rev2 child issues.
 
 ## Prerequisites
