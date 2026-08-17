@@ -1698,13 +1698,19 @@ cmd_unexpose_prometheus() {
 
 cmd_expose_grafana() {
   # target_port 80 is the Grafana Service's real port; default_external_port
-  # 3000 (Grafana's own conventional UI port) is what --port defaults to
-  # locally, since binding the literal privileged port 80 needs root.
-  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana" "" 3000
+  # 3001 is what --port defaults to locally, since binding the literal
+  # privileged port 80 needs root. Deliberately not Grafana's own
+  # conventional 3000: when scripts/lab runs inside the Lab Control UI's
+  # `app` container (network_mode: host, see lab-control-ui/docker-compose.yml),
+  # the UI backend itself already owns host port 3000 (LAB_UI_PORT) --
+  # `kubectl port-forward --address 0.0.0.0 ... 3000:80` would then fail
+  # with "address already in use" (found live running expose-grafana
+  # through the UI).
+  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana" "" 3001
 }
 
 cmd_unexpose_grafana() {
-  unexpose_public_service grafana grafana 3000
+  unexpose_public_service grafana grafana 3001
 }
 
 # Read-only status query for the Lab Control UI's "once exposed, show a
