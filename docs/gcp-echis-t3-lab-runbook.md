@@ -96,7 +96,7 @@ Provision, deploy, and run T2 end-to-end first (small — ~33K households,
 scripts/lab up --cloud gcp --name hapi-echis-t2 --auto-approve \
   --var project_id="$PROJECT_ID" \
   --var region="$REGION" --var zone="$ZONE" \
-  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var kubernetes_version=1.35.6-gke.1250000 \
   --var node_size=e2-standard-4 \
   --var db_edition=ENTERPRISE \
   --var db_sku=db-custom-2-7680 \
@@ -123,7 +123,7 @@ scripts/lab report --run echis-t2 --cloud gcp --name hapi-echis-t2 --profile loa
 kill "$PF_PID"
 scripts/lab down --cloud gcp --name hapi-echis-t2 --yes \
   --var project_id="$PROJECT_ID" --var region="$REGION" --var zone="$ZONE" \
-  --var kubernetes_version=1.35.6-gke.1258000
+  --var kubernetes_version=1.35.6-gke.1250000
 ```
 
 Confirm the guard is now satisfied:
@@ -148,7 +148,7 @@ scale `cluster_max_nodes`/`node_size`/`db_sku` up if you see saturation.
 scripts/lab up --cloud gcp --name "$LAB_NAME" --auto-approve \
   --var project_id="$PROJECT_ID" \
   --var region="$REGION" --var zone="$ZONE" \
-  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var kubernetes_version=1.35.6-gke.1250000 \
   --var node_size=c3-standard-8 \
   --var cluster_node_count=3 \
   --var cluster_min_nodes=3 \
@@ -368,7 +368,7 @@ failed:
 ```sh
 scripts/lab down --cloud gcp --name "$LAB_NAME" --yes \
   --var project_id="$PROJECT_ID" --var region="$REGION" --var zone="$ZONE" \
-  --var kubernetes_version=1.35.6-gke.1258000
+  --var kubernetes_version=1.35.6-gke.1250000
 ```
 
 This also removes any `expose-fhir`/`expose-prometheus`/`expose-grafana`

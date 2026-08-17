@@ -46,7 +46,7 @@ GCP adapter's `configFields` (defaults sourced from
 | `project_id` | provider | `null` (blocking) |
 | `region` | provider | `"us-central1"` |
 | `zone` | provider | `"us-central1-a"` |
-| `kubernetes_version` | provider | `"1.35.6-gke.1258000"` |
+| `kubernetes_version` | provider | `"1.35.6-gke.1250000"` |
 | `node_size` | provider | `"e2-standard-4"` |
 | `cluster_node_count` | provider | `3` |
 | `cluster_min_nodes` | provider | `3` |

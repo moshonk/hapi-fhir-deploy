@@ -29,7 +29,7 @@ variable "zone" {
 variable "kubernetes_version" {
   description = "GKE Kubernetes version."
   type        = string
-  default     = "1.35.6-gke.1258000"
+  default     = "1.35.6-gke.1250000"
 }
 
 variable "cluster_node_count" {

@@ -137,7 +137,7 @@ scripts/lab up --cloud "$CLOUD" --name "$LAB_NAME" --auto-approve \
   --var project_id=PROJECT_ID \
   --var region=us-central1 \
   --var zone=us-central1-a \
-  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var kubernetes_version=1.35.6-gke.1250000 \
   --var node_size=c3-standard-8 \
   --var cluster_node_count=6 \
   --var cluster_min_nodes=6 \
@@ -155,7 +155,7 @@ scripts/lab up --cloud "$CLOUD" --name "$LAB_NAME" --auto-approve \
   --var project_id=PROJECT_ID \
   --var region=us-central1 \
   --var zone=us-central1-a \
-  --var kubernetes_version=1.35.6-gke.1258000 \
+  --var kubernetes_version=1.35.6-gke.1250000 \
   --var node_size=c3-standard-8 \
   --var cluster_node_count=3 \
   --var cluster_min_nodes=3 \
@@ -195,7 +195,7 @@ scripts/lab down --cloud "$CLOUD" --name "$LAB_NAME" --yes \
   --var project_id=PROJECT_ID \
   --var region=us-central1 \
   --var zone=us-central1-a \
-  --var kubernetes_version=1.35.6-gke.1258000
+  --var kubernetes_version=1.35.6-gke.1250000
 ```
 
 ### eCHIS Progressive Household/CHW Benchmark

@@ -106,7 +106,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     label: 'Kubernetes version',
     scope: 'provider',
     type: 'string',
-    default: '1.35.6-gke.1258000',
+    default: '1.35.6-gke.1250000',
     helpText: '',
     cliMapping: '--var kubernetes_version={value}',
   },
