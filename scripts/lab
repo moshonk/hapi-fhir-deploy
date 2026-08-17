@@ -32,11 +32,13 @@ GENERATE_ONLY=false
 TF_VARS=()
 ANSIBLE_EXTRA_VARS=()
 SEED_GENERATOR_MODE="${LAB_SEED_GENERATOR_MODE:-synthea}"
+FORMAT=""
 
 usage() {
   cat <<'USAGE'
 Usage:
   scripts/lab up --cloud aws|azure|gcp --name NAME [--auto-approve] [--var key=value]
+  scripts/lab doctor --cloud aws|azure|gcp [--format text|json]
   scripts/lab deploy --cloud aws|azure|gcp --name NAME [--extra-vars key=value]
   scripts/lab seed --patients N --seed S [--run RUN_ID] [--generate-only]
   scripts/lab seed --households N --seed S [--individuals-per-household N] [--run RUN_ID] [--generate-only]
@@ -56,9 +58,18 @@ Usage:
   scripts/lab unexpose-prometheus --cloud gcp --name NAME --var project_id=P
   scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3000] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
+  scripts/lab exposures --cloud gcp --name NAME [--format text|json]
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
+  doctor               Read-only, always-succeeds check of the whole lab lifecycle's toolchain
+                       (the same checks `up` runs before provisioning) -- pass/warn/fail per
+                       tool/credential, without attempting to provision anything. Never dies,
+                       ignores LAB_SKIP_PREFLIGHT. --format json emits one {id,label,status,detail}
+                       record per check instead of the default human-readable text. Used by both
+                       operators wanting a fast "can I even start" check and by the Lab Control UI's
+                       prerequisite panel (specs/009-lab-control-ui) -- one check implementation,
+                       reused by `up` and `doctor` alike, so the two can never silently drift apart.
   deploy               Run the provider-neutral Ansible deployment workflow.
   seed                 Generate deterministic Synthea FHIR data and optionally invoke a loader.
   benchmark            Run a k6 FHIR benchmark profile.
@@ -92,6 +103,15 @@ Commands:
                        jsonpath='{.data.admin-password}' | base64 -d`.
   unexpose-grafana     GCP only. Reverse of expose-grafana. Safe to run even if nothing is
                        currently exposed.
+  exposures            GCP only. Read-only status query: which of fhir/prometheus/grafana are
+                       currently exposed (verifying the tracked port-forward is still alive, not
+                       just that a state file exists), each with its URL, port, and firewall rule
+                       name. Grafana additionally fetches its admin password live via kubectl on
+                       every call (never written to disk by this command) when exposed. Never
+                       mutates anything -- use expose-*/unexpose-* to change exposure state, this
+                       only reports it. --format json emits one {id,label,exposed,...} record per
+                       service; used by the Lab Control UI (specs/009-lab-control-ui) to show a
+                       link (and credentials, if applicable) once a service is exposed.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -259,6 +279,12 @@ parse_args() {
       --source-ranges)
         [[ -n "${2:-}" ]] || die "--source-ranges requires a value"
         SOURCE_RANGES="$2"
+        shift 2
+        ;;
+      --format)
+        [[ -n "${2:-}" ]] || die "--format requires a value (text or json)"
+        [[ "$2" == "text" || "$2" == "json" ]] || die "--format must be text or json"
+        FORMAT="$2"
         shift 2
         ;;
       --auto-approve)
@@ -595,6 +621,24 @@ terraform_apply_reusing_existing() {
   die "terraform apply still failing after $max_attempts auto-import attempts; see $log_file"
 }
 
+# Single source of truth for what the lab lifecycle's toolchain needs --
+# consumed by both check_lab_prerequisites() (below, used by `up`, which
+# dies on a missing required tool) and cmd_doctor() (a read-only, always-
+# zero-exit view of the same checks, for the Lab Control UI's prerequisite
+# panel per specs/009-lab-control-ui/research.md §5). Neither caller
+# re-derives what to check; they only differ in what they do with the
+# result. Populates the global PREREQ_CHECKS array with one
+# "id<US>label<US>status<US>detail" record per check, where <US> is the
+# ASCII unit separator (0x1F) and status is pass|warn|fail. Requires
+# $CLOUD to already be set by the caller (empty is fine -- the cloud-
+# specific block below is simply skipped).
+PREREQ_US=$'\x1f'
+PREREQ_CHECKS=()
+
+add_prereq_check() {
+  PREREQ_CHECKS+=("$1${PREREQ_US}$2${PREREQ_US}$3${PREREQ_US}$4")
+}
+
 # `up` provisions billable cloud infrastructure (a GKE/EKS/AKS cluster, a
 # managed database, ...) *before* `deploy`/`seed`/`benchmark` ever run. A
 # missing tool those later stages need -- helm, kubectl, the GKE kubeconfig
@@ -604,48 +648,160 @@ terraform_apply_reusing_existing() {
 # front instead, reporting every gap at once rather than one discovery-by-
 # failure at a time. See docs/getting-started-benchmark-lab.md#prerequisites
 # for install links and version-pinning notes behind each of these.
+collect_prerequisite_checks() {
+  PREREQ_CHECKS=()
+  local tf_bin kbin
+  tf_bin="$(terraform_bin)"
+  kbin="$(kubectl_bin)"
+
+  if command -v "$tf_bin" >/dev/null 2>&1; then
+    add_prereq_check "terraform" "Terraform" "pass" "$("$tf_bin" version | head -1)"
+  else
+    add_prereq_check "terraform" "Terraform" "fail" "$tf_bin not found -- https://developer.hashicorp.com/terraform/install"
+  fi
+
+  if command -v helm >/dev/null 2>&1; then
+    add_prereq_check "helm" "Helm" "pass" "$(helm version --short 2>/dev/null || echo present)"
+  else
+    add_prereq_check "helm" "Helm" "fail" "helm not found -- Helm 3.x, used by 'deploy': https://helm.sh/docs/intro/install/"
+  fi
+
+  if command -v "$kbin" >/dev/null 2>&1; then
+    add_prereq_check "kubectl" "kubectl" "pass" "present at $kbin"
+  else
+    add_prereq_check "kubectl" "kubectl" "fail" "$kbin not found -- used by 'deploy' readiness checks and cluster access: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/"
+  fi
+
+  local ansible_playbook_bin="${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook}"
+  local ansible_galaxy_bin="${ANSIBLE_GALAXY_BIN:-ansible-galaxy}"
+
+  if command -v "$ansible_playbook_bin" >/dev/null 2>&1; then
+    add_prereq_check "ansible-playbook" "ansible-playbook" "pass" "present at $ansible_playbook_bin"
+  else
+    add_prereq_check "ansible-playbook" "ansible-playbook" "fail" "$ansible_playbook_bin not found -- Ansible, used by 'deploy': https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html"
+  fi
+
+  if command -v "$ansible_galaxy_bin" >/dev/null 2>&1; then
+    add_prereq_check "ansible-galaxy" "ansible-galaxy" "pass" "present at $ansible_galaxy_bin"
+
+    # Binary presence alone can't tell you the pinned collections were ever
+    # installed (specs/009-lab-control-ui FR-010 / research.md §5) -- check
+    # the project-local path 'deploy' actually installs into and scopes
+    # ANSIBLE_COLLECTIONS_PATH to (see cmd_deploy above). Deliberately a
+    # direct filesystem check (does <path>/ansible_collections/<ns>/<name>
+    # exist?) rather than `ansible-galaxy collection list -p PATH`: that
+    # command's `-p` *adds* PATH to Ansible's other configured collections
+    # paths instead of restricting the listing to only PATH, so it can
+    # report a collection as "installed" because it's sitting in some
+    # unrelated default location (e.g. ~/.ansible/collections) -- passing
+    # this check while `deploy`'s ANSIBLE_COLLECTIONS_PATH, scoped to only
+    # the project-local path, would still fail to find it. This mirrors
+    # exactly how Ansible itself resolves a collection from a given
+    # collections path at runtime.
+    local collections_path="$ROOT_DIR/.ansible/collections"
+    local missing_collections=() name version
+    while IFS=: read -r name version; do
+      [[ -n "$name" ]] || continue
+      local ns="${name%%.*}" cname="${name#*.}"
+      if [[ ! -d "$collections_path/ansible_collections/$ns/$cname" ]]; then
+        missing_collections+=("$name${version:+ ($version)}")
+      fi
+    done < <(python3 - "$ROOT_DIR/ansible/requirements.yml" <<'PYEOF' 2>/dev/null || true
+import sys, re
+path = sys.argv[1]
+name = None
+for line in open(path):
+    m = re.match(r'^\s*-\s*name:\s*(\S+)', line)
+    if m:
+        name = m.group(1)
+        continue
+    m = re.match(r'^\s*version:\s*"?([^"\s]+)"?', line)
+    if m and name:
+        print(f"{name}:{m.group(1)}")
+        name = None
+PYEOF
+    )
+    if ((${#missing_collections[@]})); then
+      add_prereq_check "ansible-collections" "Ansible collections (ansible/requirements.yml)" "fail" "not installed in $collections_path: ${missing_collections[*]} -- run: $ansible_galaxy_bin collection install -r ansible/requirements.yml -p $collections_path --force"
+    else
+      add_prereq_check "ansible-collections" "Ansible collections (ansible/requirements.yml)" "pass" "installed in $collections_path"
+    fi
+  else
+    add_prereq_check "ansible-galaxy" "ansible-galaxy" "fail" "$ansible_galaxy_bin not found -- bundled with Ansible"
+    add_prereq_check "ansible-collections" "Ansible collections (ansible/requirements.yml)" "fail" "cannot check -- ansible-galaxy not found"
+  fi
+
+  if command -v "${RUBY_BIN:-ruby}" >/dev/null 2>&1; then
+    add_prereq_check "ruby" "Ruby" "pass" "$("${RUBY_BIN:-ruby}" -v)"
+  else
+    add_prereq_check "ruby" "Ruby" "fail" "${RUBY_BIN:-ruby} not found -- used by 'seed'/'benchmark'/'report': https://www.ruby-lang.org/en/documentation/installation/"
+  fi
+
+  if command -v "${K6_BIN:-k6}" >/dev/null 2>&1; then
+    add_prereq_check "k6" "k6" "pass" "present at ${K6_BIN:-k6}"
+  else
+    add_prereq_check "k6" "k6" "fail" "${K6_BIN:-k6} not found -- used by 'benchmark': https://grafana.com/docs/k6/latest/set-up/install-k6/"
+  fi
+
+  if command -v java >/dev/null 2>&1; then
+    add_prereq_check "java" "Java 17+" "pass" "present"
+  else
+    add_prereq_check "java" "Java 17+" "fail" "java not found -- used by Synthea seed generation: https://adoptium.net/installation/"
+  fi
+
+  case "$CLOUD" in
+    gcp)
+      if command -v gcloud >/dev/null 2>&1; then
+        add_prereq_check "gcloud" "gcloud CLI" "pass" "present"
+      else
+        add_prereq_check "gcloud" "gcloud CLI" "fail" "gcloud not found -- GCP CLI: https://cloud.google.com/sdk/docs/install"
+      fi
+      if command -v gke-gcloud-auth-plugin >/dev/null 2>&1; then
+        add_prereq_check "gke-gcloud-auth-plugin" "gke-gcloud-auth-plugin" "pass" "present"
+      else
+        add_prereq_check "gke-gcloud-auth-plugin" "gke-gcloud-auth-plugin" "fail" "not found -- required for kubectl/deploy to authenticate to the GKE cluster 'up' creates: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin"
+      fi
+      if command -v gcloud >/dev/null 2>&1 && gcloud auth application-default print-access-token >/dev/null 2>&1; then
+        add_prereq_check "gcloud-adc" "gcloud Application Default Credentials" "pass" "active"
+      else
+        add_prereq_check "gcloud-adc" "gcloud Application Default Credentials" "warn" "no ADC token -- Terraform will fail to authenticate. Run: gcloud auth application-default login"
+      fi
+      ;;
+    aws)
+      if command -v aws >/dev/null 2>&1; then
+        add_prereq_check "aws" "AWS CLI" "pass" "present"
+      else
+        add_prereq_check "aws" "AWS CLI" "fail" "aws not found -- https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+      fi
+      ;;
+    azure)
+      if command -v az >/dev/null 2>&1; then
+        add_prereq_check "az" "Azure CLI" "pass" "present"
+      else
+        add_prereq_check "az" "Azure CLI" "fail" "az not found -- https://learn.microsoft.com/en-us/cli/azure/install-azure-cli"
+      fi
+      ;;
+  esac
+}
+
 check_lab_prerequisites() {
   if [[ "$LAB_SKIP_PREFLIGHT" == true ]]; then
     log "Skipping prerequisites check (LAB_SKIP_PREFLIGHT=true)"
     return 0
   fi
 
-  local missing=() warnings=()
-  local tf_bin kbin
-  tf_bin="$(terraform_bin)"
-  kbin="$(kubectl_bin)"
+  collect_prerequisite_checks
 
-  command -v "$tf_bin" >/dev/null 2>&1 || missing+=("$tf_bin -- Terraform: https://developer.hashicorp.com/terraform/install")
-  command -v helm >/dev/null 2>&1 || missing+=("helm -- Helm 3.x, used by 'deploy': https://helm.sh/docs/intro/install/")
-  command -v "$kbin" >/dev/null 2>&1 || missing+=("$kbin -- used by 'deploy' readiness checks and cluster access: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/")
-  command -v "${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook}" >/dev/null 2>&1 || missing+=("${ANSIBLE_PLAYBOOK_BIN:-ansible-playbook} -- Ansible, used by 'deploy': https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html")
-  command -v "${ANSIBLE_GALAXY_BIN:-ansible-galaxy}" >/dev/null 2>&1 || missing+=("${ANSIBLE_GALAXY_BIN:-ansible-galaxy} -- bundled with Ansible")
-  command -v "${RUBY_BIN:-ruby}" >/dev/null 2>&1 || missing+=("${RUBY_BIN:-ruby} -- used by 'seed'/'benchmark'/'report': https://www.ruby-lang.org/en/documentation/installation/")
-  command -v "${K6_BIN:-k6}" >/dev/null 2>&1 || missing+=("${K6_BIN:-k6} -- used by 'benchmark': https://grafana.com/docs/k6/latest/set-up/install-k6/")
-  command -v java >/dev/null 2>&1 || missing+=("java 17+ -- used by Synthea seed generation: https://adoptium.net/installation/")
-
-  case "$CLOUD" in
-    gcp)
-      command -v gcloud >/dev/null 2>&1 || missing+=("gcloud -- GCP CLI: https://cloud.google.com/sdk/docs/install")
-      command -v gke-gcloud-auth-plugin >/dev/null 2>&1 || missing+=("gke-gcloud-auth-plugin -- required for kubectl/deploy to authenticate to the GKE cluster 'up' creates: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin")
-      if command -v gcloud >/dev/null 2>&1 && ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
-        warnings+=("gcloud has no Application Default Credentials -- Terraform will fail to authenticate. Run: gcloud auth application-default login")
-      fi
-      ;;
-    aws)
-      command -v aws >/dev/null 2>&1 || missing+=("aws -- AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html")
-      ;;
-    azure)
-      command -v az >/dev/null 2>&1 || missing+=("az -- Azure CLI: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli")
-      ;;
-  esac
-
-  local w
-  for w in "${warnings[@]}"; do
-    log "WARNING: $w"
+  local missing=() entry id label status detail any_fail=false
+  for entry in "${PREREQ_CHECKS[@]}"; do
+    IFS="$PREREQ_US" read -r id label status detail <<<"$entry"
+    case "$status" in
+      warn) log "WARNING: $label -- $detail" ;;
+      fail) missing+=("$label -- $detail"); any_fail=true ;;
+    esac
   done
 
-  if ((${#missing[@]})); then
+  if [[ "$any_fail" == true ]]; then
     log "Missing prerequisites for the '$CLOUD' lab lifecycle (up/deploy/seed/benchmark):"
     local item
     for item in "${missing[@]}"; do
@@ -657,6 +813,37 @@ check_lab_prerequisites() {
       die "install the missing tools above (or set LAB_SKIP_PREFLIGHT=true to bypass this check) before running 'up'"
     fi
   fi
+}
+
+# Read-only, always-zero-exit view of collect_prerequisite_checks() for the
+# Lab Control UI's prerequisite panel (specs/009-lab-control-ui) and for
+# operators who want a "can I even start" check without attempting `up`.
+# Never dies, regardless of LAB_SKIP_PREFLIGHT or --dry-run.
+cmd_doctor() {
+  require_cloud
+  collect_prerequisite_checks
+
+  if [[ "$FORMAT" == "json" ]]; then
+    local entry id label status detail first=true
+    printf '['
+    for entry in "${PREREQ_CHECKS[@]}"; do
+      IFS="$PREREQ_US" read -r id label status detail <<<"$entry"
+      [[ "$first" == true ]] || printf ','
+      first=false
+      local esc_label="${label//\\/\\\\}"; esc_label="${esc_label//\"/\\\"}"
+      local esc_detail="${detail//\\/\\\\}"; esc_detail="${esc_detail//\"/\\\"}"
+      printf '{"id":"%s","label":"%s","status":"%s","detail":"%s"}' "$id" "$esc_label" "$status" "$esc_detail"
+    done
+    printf ']\n'
+  else
+    local entry id label status detail
+    for entry in "${PREREQ_CHECKS[@]}"; do
+      IFS="$PREREQ_US" read -r id label status detail <<<"$entry"
+      printf '%-4s %-45s %s\n' "[$status]" "$label" "$detail"
+    done
+  fi
+
+  return 0
 }
 
 cmd_up() {
@@ -1427,16 +1614,24 @@ expose_public_service() {
   sleep 2
   kill -0 "$pf_pid" 2>/dev/null || die "port-forward failed to start; see $pf_log"
 
+  # Computed before writing the state file (not just for the log line below)
+  # so `exposures` (a read-only status query the Lab Control UI polls,
+  # specs/009-lab-control-ui) can report the same URL without redoing the
+  # public-IP lookup itself -- one computation, persisted, per FR-005's
+  # single-source-of-truth rule.
+  local display_ip
+  display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
+  local url="http://${display_ip}:${port}${url_path}"
+
   {
     printf 'FIREWALL_RULE=%s\n' "$firewall_rule"
     printf 'PORT=%s\n' "$port"
     printf 'PORT_FORWARD_PID=%s\n' "$pf_pid"
     printf 'PROJECT_ID=%s\n' "$project_id"
+    printf 'URL=%s\n' "$url"
   } >"$state_file"
 
-  local display_ip
-  display_ip="$(detect_public_ip 2>/dev/null || echo '<this host'"'"'s public IP>')"
-  log "$display_name is reachable at http://${display_ip}:${port}${url_path} (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
+  log "$display_name is reachable at $url (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
   log "Run 'scripts/lab unexpose-$state_slug --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
 }
 
@@ -1510,6 +1705,115 @@ cmd_expose_grafana() {
 
 cmd_unexpose_grafana() {
   unexpose_public_service grafana grafana 3000
+}
+
+# Read-only status query for the Lab Control UI's "once exposed, show a
+# link (and credentials, if applicable)" panel (specs/009-lab-control-ui) --
+# and equally usable from a terminal to check what's currently open without
+# re-running an expose-* command. Never mutates anything (no firewall calls,
+# no port-forward management -- that's expose-*/unexpose-*'s job), and never
+# dies: a single service's state being unreadable is reported as
+# exposed:false for that service, not a hard failure for the whole command.
+#
+# One JSON/text record per service (fhir, prometheus, grafana), each:
+#   id, label, exposed (bool), and when exposed: url, port, firewallRule.
+# Grafana additionally includes credentialsAvailable (bool) and, when true,
+# username/password -- fetched live via kubectl each call, never persisted
+# to disk by this command (docs/lab-cli.md's login-required note). A
+# fetch failure (cluster unreachable, secret renamed, ...) is reported as
+# credentialsAvailable:false with a human-readable reason, not a die.
+cmd_exposures() {
+  require_cloud
+  require_name
+  [[ "$CLOUD" == "gcp" ]] || die "exposures is currently GCP-only; see docs/gcp-echis-t3-lab-runbook.md for the manual steps to check public exposure on other clouds"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+
+  local ids=(fhir prometheus grafana)
+  local labels=("HAPI FHIR" "Prometheus" "Grafana")
+  local i esc_id esc_label esc_url esc_rule esc_port
+  local first=true
+  if [[ "$FORMAT" == "json" ]]; then printf '['; fi
+
+  for i in "${!ids[@]}"; do
+    local id="${ids[$i]}" label="${labels[$i]}"
+    local state_file url="" port="" firewall_rule="" pf_pid="" exposed=false
+    state_file="$(public_exposure_state_file "$id")"
+    if [[ -f "$state_file" ]]; then
+      url="$(grep -m1 '^URL=' "$state_file" | cut -d= -f2-)" || true
+      port="$(grep -m1 '^PORT=' "$state_file" | cut -d= -f2)" || true
+      firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
+      pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
+      # A state file with a dead port-forward pid is stale (e.g. the host
+      # rebooted without an unexpose-* ever running) -- report not-exposed
+      # rather than showing a link that won't actually connect. Cleanup of
+      # the stale firewall rule/file itself is unexpose-*'s/down's job, not
+      # this read-only command's.
+      if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
+        exposed=true
+      fi
+    fi
+
+    local username="" password="" creds_available=false creds_reason=""
+    if [[ "$id" == grafana && "$exposed" == true ]]; then
+      local ns="${GRAFANA_NAMESPACE:-monitoring}"
+      if command -v "$kbin" >/dev/null 2>&1; then
+        local raw
+        if raw="$(timeout 10s "$kbin" -n "$ns" get secret prometheus-grafana \
+          -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null)" && [[ -n "$raw" ]]; then
+          username="admin"
+          password="$raw"
+          creds_available=true
+        else
+          creds_reason="could not read the 'prometheus-grafana' Secret in namespace '$ns' -- run \`$kbin -n $ns get secret prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d\` manually"
+        fi
+      else
+        creds_reason="$kbin not found"
+      fi
+    fi
+
+    if [[ "$FORMAT" == "json" ]]; then
+      [[ "$first" == true ]] || printf ','
+      first=false
+      esc_id="${id//\\/\\\\}"; esc_id="${esc_id//\"/\\\"}"
+      esc_label="${label//\\/\\\\}"; esc_label="${esc_label//\"/\\\"}"
+      printf '{"id":"%s","label":"%s","exposed":%s' "$esc_id" "$esc_label" "$exposed"
+      if [[ "$exposed" == true ]]; then
+        esc_url="${url//\\/\\\\}"; esc_url="${esc_url//\"/\\\"}"
+        esc_rule="${firewall_rule//\\/\\\\}"; esc_rule="${esc_rule//\"/\\\"}"
+        esc_port="${port//\\/\\\\}"; esc_port="${esc_port//\"/\\\"}"
+        printf ',"url":"%s","port":"%s","firewallRule":"%s"' "$esc_url" "$esc_port" "$esc_rule"
+      fi
+      if [[ "$id" == grafana ]]; then
+        printf ',"credentialsAvailable":%s' "$creds_available"
+        if [[ "$creds_available" == true ]]; then
+          local esc_user="${username//\\/\\\\}"; esc_user="${esc_user//\"/\\\"}"
+          local esc_pass="${password//\\/\\\\}"; esc_pass="${esc_pass//\"/\\\"}"
+          printf ',"username":"%s","password":"%s"' "$esc_user" "$esc_pass"
+        elif [[ -n "$creds_reason" ]]; then
+          local esc_reason="${creds_reason//\\/\\\\}"; esc_reason="${esc_reason//\"/\\\"}"
+          printf ',"credentialsReason":"%s"' "$esc_reason"
+        fi
+      fi
+      printf '}'
+    else
+      if [[ "$exposed" == true ]]; then
+        printf '%-12s exposed at %s (firewall rule %s)\n' "$label" "$url" "$firewall_rule"
+        if [[ "$id" == grafana ]]; then
+          if [[ "$creds_available" == true ]]; then
+            printf '%-12s login: %s / %s\n' "" "$username" "$password"
+          else
+            printf '%-12s login: %s\n' "" "$creds_reason"
+          fi
+        fi
+      else
+        printf '%-12s not exposed\n' "$label"
+      fi
+    fi
+  done
+
+  if [[ "$FORMAT" == "json" ]]; then printf ']\n'; fi
 }
 
 cmd_down() {
@@ -1599,6 +1903,7 @@ parse_args "$@"
 
 case "$COMMAND" in
   up) cmd_up ;;
+  doctor) cmd_doctor ;;
   deploy) cmd_deploy ;;
   seed) cmd_seed ;;
   benchmark) cmd_benchmark ;;
@@ -1612,6 +1917,7 @@ case "$COMMAND" in
   unexpose-prometheus) cmd_unexpose_prometheus ;;
   expose-grafana) cmd_expose_grafana ;;
   unexpose-grafana) cmd_unexpose_grafana ;;
+  exposures) cmd_exposures ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac
