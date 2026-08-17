@@ -70,6 +70,25 @@ fieldset {
   text-align: center;
 }
 
+.run-duration {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* Still ticking -- the run hasn't ended yet. */
+.run-duration-live {
+  color: var(--warn);
+}
+
+/* Locked at the final elapsed time once the run ended. */
+.run-duration-final {
+  opacity: 0.75;
+}
+
 .prerequisite-panel {
   border-collapse: collapse;
   width: 100%;

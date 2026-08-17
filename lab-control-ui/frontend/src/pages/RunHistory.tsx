@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { fetchRun, fetchRunsForLab } from '../api/client.js';
 import type { ActionRunDetail, ActionRunSummary } from '../api/types.js';
 import { LogViewer } from '../components/LogViewer.js';
+import { DURATION_TRACKED_ACTIONS, RunDuration } from '../components/RunDuration.js';
 
 export interface RunHistoryProps {
   labId: string;
@@ -36,6 +37,9 @@ export function RunHistory({ labId, refreshKey }: RunHistoryProps) {
             <button type="button" onClick={() => void select(run.id)}>
               {run.action_name} — {run.status}
               {run.started_at ? ` (${new Date(run.started_at).toLocaleString()})` : ''}
+              {DURATION_TRACKED_ACTIONS.has(run.action_name) && (
+                <RunDuration startedAt={run.started_at} endedAt={run.ended_at} />
+              )}
             </button>
           </li>
         ))}
@@ -44,6 +48,9 @@ export function RunHistory({ labId, refreshKey }: RunHistoryProps) {
         <div className="run-detail">
           <h3>
             {selected.action_name} ({selected.status})
+            {DURATION_TRACKED_ACTIONS.has(selected.action_name) && (
+              <RunDuration startedAt={selected.started_at} endedAt={selected.ended_at} />
+            )}
           </h3>
           <pre className="command-preview">{selected.command_preview}</pre>
           <LogViewer key={selected.id} runId={selected.id} />
