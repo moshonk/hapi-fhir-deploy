@@ -39,6 +39,16 @@ describe('confirmation gating on costly/destructive actions', () => {
       expect(typeof res.body.confirmationMessage).toBe('string');
       expect(res.body.confirmationMessage.length).toBeGreaterThan(0);
 
+      // FR-012: the message is resolved against this lab's live field
+      // values, never a raw {field_key} template left unresolved.
+      expect(res.body.confirmationMessage).not.toMatch(/\{[a-zA-Z0-9_]+\}/);
+      if (action === 'up' || action === 'down') {
+        expect(res.body.confirmationMessage).toContain('hapi-fhir-lab'); // the default lab_name
+      }
+      if (action === 'expose-fhir' || action === 'expose-prometheus') {
+        expect(res.body.confirmationMessage).toContain('0.0.0.0/0'); // the default expose_source_ranges
+      }
+
       // Nothing spawned: the stub never wrote its record file.
       expect(existsSync(recordFile)).toBe(false);
       if (existsSync(recordFile)) unlinkSync(recordFile);

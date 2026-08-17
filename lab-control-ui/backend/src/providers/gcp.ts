@@ -203,8 +203,11 @@ export const GCP_ACTIONS: ActionDef[] = [
     cliSubcommand: 'up',
     scope: 'common',
     requiresConfirmation: true,
+    // {field_key} placeholders are resolved against the triggering lab's
+    // live field values by resolveConfirmationMessage (commandBuilder.ts)
+    // at trigger time -- never shown as raw templates to the operator.
     confirmationMessage:
-      'This creates real, billable GCP resources (GKE cluster, Cloud SQL instance).',
+      "This creates real, billable GCP resources (GKE cluster, Cloud SQL instance) for lab '{lab_name}'.",
     requiredPrerequisiteIds: ['terraform', 'gcloud', 'gcloud-adc'],
   },
   {
@@ -224,7 +227,7 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'provider',
     requiresConfirmation: true,
     confirmationMessage:
-      'This opens a public GCP firewall rule for the FHIR endpoint. HAPI FHIR has no authentication in front of it.',
+      'This opens a public GCP firewall rule for the FHIR endpoint, reachable from {expose_source_ranges}. HAPI FHIR has no authentication in front of it.',
     requiredPrerequisiteIds: ['kubectl', 'gcloud'],
   },
   {
@@ -242,7 +245,8 @@ export const GCP_ACTIONS: ActionDef[] = [
     cliSubcommand: 'expose-prometheus',
     scope: 'provider',
     requiresConfirmation: true,
-    confirmationMessage: 'This opens a public GCP firewall rule for the Prometheus UI.',
+    confirmationMessage:
+      'This opens a public GCP firewall rule for the Prometheus UI, reachable from {expose_source_ranges}.',
     requiredPrerequisiteIds: ['kubectl', 'gcloud'],
   },
   {
@@ -309,7 +313,7 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'common',
     requiresConfirmation: true,
     confirmationMessage:
-      'This destroys all provisioned infrastructure for this lab (GKE cluster, Cloud SQL instance).',
+      "This destroys all provisioned infrastructure for lab '{lab_name}' (GKE cluster, Cloud SQL instance).",
     requiredPrerequisiteIds: ['terraform', 'gcloud'],
   },
 ];
@@ -402,7 +406,10 @@ export function gcpBuildCommand(
           '--source-ranges',
           f('expose_source_ranges'),
         ],
-        env: {},
+        // Requires KUBECONFIG, same as pause-autoscaling/resume-autoscaling
+        // (docs/lab-cli.md's "Public exposure (GCP only)" section) --
+        // without it kubectl falls back to its no-config default and fails.
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
       };
 
     case 'unexpose-fhir':
@@ -416,7 +423,7 @@ export function gcpBuildCommand(
           '--var',
           `project_id=${projectId}`,
         ],
-        env: {},
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
       };
 
     case 'expose-prometheus':
@@ -432,7 +439,7 @@ export function gcpBuildCommand(
           '--source-ranges',
           f('expose_source_ranges'),
         ],
-        env: {},
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
       };
 
     case 'unexpose-prometheus':
@@ -446,7 +453,7 @@ export function gcpBuildCommand(
           '--var',
           `project_id=${projectId}`,
         ],
-        env: {},
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
       };
 
     case 'pause-autoscaling':

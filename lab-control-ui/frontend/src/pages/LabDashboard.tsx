@@ -25,9 +25,17 @@ export interface LabDashboardProps {
   onRunTriggered: () => void;
 }
 
+interface PendingConfirm {
+  action: ActionDef;
+  /** Resolved against this lab's live field values by the server (FR-012)
+   * -- e.g. names the actual configured expose_source_ranges, not a
+   * generic warning. Never the raw {field_key}-templated ActionDef string. */
+  message: string;
+}
+
 export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboardProps) {
   const { checks, error: prereqError } = usePrerequisites(provider.id);
-  const [pendingConfirm, setPendingConfirm] = useState<ActionDef | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [runningActionName, setRunningActionName] = useState<string | null>(null);
   const [triggerError, setTriggerError] = useState<string | null>(null);
@@ -47,7 +55,9 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
       ) {
         const body = err.body as { confirmationMessage?: string };
         if (body.confirmationMessage) {
-          setPendingConfirm(action);
+          // Show the dialog with the SERVER-RESOLVED message (live field
+          // values already interpolated) rather than a static template.
+          setPendingConfirm({ action, message: body.confirmationMessage });
           return;
         }
       }
@@ -62,17 +72,18 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
       setTriggerError('Fill in every required field before triggering actions.');
       return;
     }
-    if (action.requiresConfirmation) {
-      setPendingConfirm(action);
-      return;
-    }
+    // Always attempt unconfirmed first -- for actions requiring confirmation
+    // this deliberately gets refused with a 409 carrying the server-resolved
+    // confirmationMessage, which fire()'s catch block turns into the dialog
+    // above. There's no local shortcut using the (unresolved) static
+    // ActionDef.confirmationMessage from GET /api/providers.
     void fire(action, false);
   }
 
   function handleConfirm() {
-    const action = pendingConfirm;
+    const pending = pendingConfirm;
     setPendingConfirm(null);
-    if (action) void fire(action, true);
+    if (pending) void fire(pending.action, true);
   }
 
   function handleRunStatus() {
@@ -99,10 +110,10 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
         onTrigger={handleTrigger}
       />
 
-      {pendingConfirm && pendingConfirm.confirmationMessage && (
+      {pendingConfirm && (
         <ConfirmDialog
-          actionLabel={pendingConfirm.label}
-          message={pendingConfirm.confirmationMessage}
+          actionLabel={pendingConfirm.action.label}
+          message={pendingConfirm.message}
           onConfirm={handleConfirm}
           onCancel={() => setPendingConfirm(null)}
         />

@@ -10,6 +10,7 @@ import {
 import {
   createLabConfiguration,
   getLabConfiguration,
+  latestSucceededActionRun,
   listActionRunsForLab,
   listLabConfigurations,
   updateLabConfiguration,
@@ -118,8 +119,18 @@ export function createLabsRouter(db: DatabaseSync): Router {
       return;
     }
 
+    // `report` targets a PRIOR benchmark run's artifacts -- preview the
+    // same cliRunLabel the trigger endpoint would actually resolve to
+    // (labs.ts and actions.ts intentionally share this fallback rule:
+    // "report" -> latest succeeded "benchmark" run), so the preview can't
+    // show a different --run than what triggering it actually uses.
+    const cliRunLabel =
+      actionName === 'report'
+        ? latestSucceededActionRun(db, row.id, 'benchmark')?.cli_run_label
+        : undefined;
+
     try {
-      const cmd = buildCommand(provider, actionName, row.fields);
+      const cmd = buildCommand(provider, actionName, row.fields, { cliRunLabel });
       res.json({ command: formatCommandPreview(cmd) });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

@@ -21,6 +21,11 @@ export interface ActionRunRow {
   status: ActionRunStatus;
   command_preview: string;
   log_file_path: string;
+  /** The cliRunLabel this run's scripts/lab invocation used (distinct from
+   * `id`/`actionRunId` -- see commandBuilder.ts's ResolvedCommand doc). A
+   * later `report` trigger targeting this run reuses this value so it
+   * points at the same run directory `seed`/`benchmark` actually wrote to. */
+  cli_run_label: string;
   started_at: string | null;
   ended_at: string | null;
   exit_code: number | null;
@@ -49,6 +54,7 @@ function rowToActionRun(row: Record<string, unknown>): ActionRunRow {
     status: row.status as ActionRunStatus,
     command_preview: row.command_preview as string,
     log_file_path: row.log_file_path as string,
+    cli_run_label: (row.cli_run_label as string) ?? '',
     started_at: (row.started_at as string) ?? null,
     ended_at: (row.ended_at as string) ?? null,
     exit_code: (row.exit_code as number) ?? null,
@@ -116,13 +122,21 @@ export function createActionRun(
     actionName: string;
     commandPreview: string;
     logFilePath: string;
+    cliRunLabel: string;
   },
 ): ActionRunRow {
   const id = input.id ?? randomUUID();
   db.prepare(
-    `INSERT INTO action_runs (id, lab_configuration_id, action_name, status, command_preview, log_file_path)
-     VALUES (?, ?, ?, 'pending', ?, ?)`,
-  ).run(id, input.labConfigurationId, input.actionName, input.commandPreview, input.logFilePath);
+    `INSERT INTO action_runs (id, lab_configuration_id, action_name, status, command_preview, log_file_path, cli_run_label)
+     VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
+  ).run(
+    id,
+    input.labConfigurationId,
+    input.actionName,
+    input.commandPreview,
+    input.logFilePath,
+    input.cliRunLabel,
+  );
   return {
     id,
     lab_configuration_id: input.labConfigurationId,
@@ -130,6 +144,7 @@ export function createActionRun(
     status: 'pending',
     command_preview: input.commandPreview,
     log_file_path: input.logFilePath,
+    cli_run_label: input.cliRunLabel,
     started_at: null,
     ended_at: null,
     exit_code: null,
@@ -190,6 +205,22 @@ export function latestActionRun(
   const row = db
     .prepare(
       'SELECT * FROM action_runs WHERE lab_configuration_id = ? AND action_name = ? ORDER BY rowid DESC LIMIT 1',
+    )
+    .get(labConfigurationId, actionName) as Record<string, unknown> | undefined;
+  return row ? rowToActionRun(row) : undefined;
+}
+
+/** Most recent SUCCEEDED run of `actionName` for a lab -- used by `report`
+ * to default to reporting on the last successful `benchmark` run's
+ * artifacts when the caller doesn't explicitly pass a targetRunId. */
+export function latestSucceededActionRun(
+  db: DatabaseSync,
+  labConfigurationId: string,
+  actionName: string,
+): ActionRunRow | undefined {
+  const row = db
+    .prepare(
+      "SELECT * FROM action_runs WHERE lab_configuration_id = ? AND action_name = ? AND status = 'succeeded' ORDER BY rowid DESC LIMIT 1",
     )
     .get(labConfigurationId, actionName) as Record<string, unknown> | undefined;
   return row ? rowToActionRun(row) : undefined;

@@ -13,10 +13,10 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 |---|---|---|
 | `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours}` | Yes — billable resource creation |
 | `deploy` | `deploy --cloud gcp --name {lab_name}` | No |
-| `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` | Yes — names the exposure scope |
-| `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` | No |
-| `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` | Yes — names the exposure scope |
-| `unexpose-prometheus` | `unexpose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id}` | No |
+| `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | Yes — names the exposure scope |
+| `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
+| `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
+| `unexpose-prometheus` | `unexpose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `pause-autoscaling` | `pause-autoscaling --replicas {pause_replicas}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `resume-autoscaling` | `resume-autoscaling` (env: `KUBECONFIG` as above) | No |
 | `seed` | `seed --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`) | No |
@@ -50,3 +50,19 @@ Notes:
   `benchmark` (`echis_load_100.js` for T2, `echis_load_1000.js` for T3, per
   `docs/echis-benchmark-tiers.md`) — this mapping lives in the GCP
   `ProviderAdapter`, not hardcoded in the generic action-trigger code.
+- `report`'s `{cliRunLabel}` is **not** freshly generated like `seed`/
+  `benchmark`'s — it MUST reuse the `cliRunLabel` of the run whose artifacts
+  it's reporting on (a fresh label would point `--run` at a directory that
+  was never written). The trigger endpoint resolves it, in order: an
+  explicit `targetRunId` in the request body (that run's stored
+  `cli_run_label`), or, if omitted, the lab's most recent **succeeded**
+  `benchmark` run. If neither resolves, the trigger is refused with `400`
+  rather than silently generating a label that doesn't exist on disk.
+- `ActionDef.confirmationMessage` (`up`, `down`, `expose-fhir`,
+  `expose-prometheus`) may contain `{field_key}` placeholders referencing
+  this provider's own `ConfigField` keys (e.g. `{expose_source_ranges}`).
+  `GET /api/providers` serves the raw, unresolved template; only the
+  trigger endpoint's `409` response carries the value interpolated against
+  the triggering lab's live field values (FR-012 — name the actual
+  configured value, e.g. the real source-range CIDR, not a generic
+  warning). The frontend never shows the raw template.

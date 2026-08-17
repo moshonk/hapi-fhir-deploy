@@ -112,10 +112,18 @@ export interface TriggerResult {
   streamUrl: string;
 }
 
+export interface TriggerActionOptions {
+  confirmed?: boolean;
+  overridePrerequisites?: boolean;
+  /** For `report`: which prior run's artifacts to report on. Omit to default
+   * to the lab's most recent succeeded `benchmark` run. */
+  targetRunId?: string;
+}
+
 export async function triggerAction(
   labId: string,
   actionName: string,
-  options: { confirmed?: boolean; overridePrerequisites?: boolean } = {},
+  options: TriggerActionOptions = {},
 ): Promise<TriggerResult> {
   return request<TriggerResult>(`/labs/${labId}/actions/${actionName}`, {
     method: 'POST',

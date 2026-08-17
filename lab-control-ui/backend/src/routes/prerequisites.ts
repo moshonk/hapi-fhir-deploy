@@ -48,11 +48,9 @@ export function createPrerequisitesRouter(config: AppConfig): Router {
       const checks = await runDoctor(config, provider);
       res.json({ checks });
     } catch (err) {
-      res
-        .status(502)
-        .json({
-          error: `doctor check failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
+      res.status(502).json({
+        error: `doctor check failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
   });
 

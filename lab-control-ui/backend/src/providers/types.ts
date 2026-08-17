@@ -51,6 +51,12 @@ export interface ActionDef {
   /**
    * States the concrete consequence (billable resources / destructive
    * teardown / public exposure). Required when requiresConfirmation is true.
+   * May contain `{field_key}` placeholders referencing this provider's own
+   * ConfigField keys (e.g. `{expose_source_ranges}`); resolveConfirmationMessage
+   * (commandBuilder.ts) interpolates them against a specific lab's live field
+   * values at trigger time (FR-012 -- name the actual configured value, not
+   * a generic warning). The raw template is what `/api/providers` serves;
+   * only the trigger endpoint's 409 response carries the resolved text.
    */
   confirmationMessage: string | null;
   /** PrerequisiteCheckDef ids that must be passing (or explicitly overridden)

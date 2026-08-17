@@ -5,7 +5,11 @@
 
 import { describe, expect, it } from 'vitest';
 import { gcpProvider } from '../../src/providers/gcp.js';
-import { buildCommand, formatCommandPreview } from '../../src/actions/commandBuilder.js';
+import {
+  buildCommand,
+  formatCommandPreview,
+  resolveConfirmationMessage,
+} from '../../src/actions/commandBuilder.js';
 
 const FIELDS = {
   lab_name: 'hapi-fhir-lab',
@@ -79,8 +83,9 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     expect(run('deploy').argv).toEqual(['deploy', '--cloud', 'gcp', '--name', 'hapi-fhir-lab']);
   });
 
-  it('expose-fhir', () => {
-    expect(run('expose-fhir').argv).toEqual([
+  it('expose-fhir (requires KUBECONFIG, same as pause/resume-autoscaling)', () => {
+    const cmd = run('expose-fhir');
+    expect(cmd.argv).toEqual([
       'expose-fhir',
       '--cloud',
       'gcp',
@@ -91,10 +96,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       '--source-ranges',
       '0.0.0.0/0',
     ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
-  it('unexpose-fhir', () => {
-    expect(run('unexpose-fhir').argv).toEqual([
+  it('unexpose-fhir (requires KUBECONFIG)', () => {
+    const cmd = run('unexpose-fhir');
+    expect(cmd.argv).toEqual([
       'unexpose-fhir',
       '--cloud',
       'gcp',
@@ -103,10 +110,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       '--var',
       'project_id=my-project',
     ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
-  it('expose-prometheus', () => {
-    expect(run('expose-prometheus').argv).toEqual([
+  it('expose-prometheus (requires KUBECONFIG)', () => {
+    const cmd = run('expose-prometheus');
+    expect(cmd.argv).toEqual([
       'expose-prometheus',
       '--cloud',
       'gcp',
@@ -117,10 +126,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       '--source-ranges',
       '0.0.0.0/0',
     ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
-  it('unexpose-prometheus', () => {
-    expect(run('unexpose-prometheus').argv).toEqual([
+  it('unexpose-prometheus (requires KUBECONFIG)', () => {
+    const cmd = run('unexpose-prometheus');
+    expect(cmd.argv).toEqual([
       'unexpose-prometheus',
       '--cloud',
       'gcp',
@@ -129,6 +140,7 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       '--var',
       'project_id=my-project',
     ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
   it('pause-autoscaling', () => {
@@ -240,5 +252,44 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
 
   it('rejects an unknown action', () => {
     expect(() => run('not-a-real-action')).toThrow(/unknown action/);
+  });
+
+  it('returns the cliRunLabel actually used, whether auto-generated or overridden', () => {
+    expect(run('seed').cliRunLabel).toBe('hapi-fhir-lab-20260101-000000');
+
+    const overridden = buildCommand(gcpProvider, 'report', FIELDS, {
+      cliRunLabel: 'hapi-fhir-lab-some-prior-run',
+    });
+    expect(overridden.cliRunLabel).toBe('hapi-fhir-lab-some-prior-run');
+    expect(overridden.argv).toContain('hapi-fhir-lab-some-prior-run');
+    expect(overridden.argv).not.toContain('hapi-fhir-lab-20260101-000000');
+  });
+});
+
+describe('resolveConfirmationMessage (FR-012 -- name the actual configured value)', () => {
+  const upAction = gcpProvider.actions.find((a) => a.name === 'up')!;
+  const exposeFhirAction = gcpProvider.actions.find((a) => a.name === 'expose-fhir')!;
+  const deployAction = gcpProvider.actions.find((a) => a.name === 'deploy')!;
+
+  it('interpolates {field_key} placeholders against live field values', () => {
+    const message = resolveConfirmationMessage(exposeFhirAction, {
+      expose_source_ranges: '203.0.113.7/32',
+    });
+    expect(message).toContain('203.0.113.7/32');
+    expect(message).not.toContain('{expose_source_ranges}');
+  });
+
+  it('interpolates lab_name for up/down', () => {
+    const message = resolveConfirmationMessage(upAction, { lab_name: 'my-real-lab' });
+    expect(message).toContain("'my-real-lab'");
+  });
+
+  it('leaves an unresolvable placeholder visibly unresolved rather than silently dropping it', () => {
+    const message = resolveConfirmationMessage(exposeFhirAction, {});
+    expect(message).toContain('{expose_source_ranges}');
+  });
+
+  it('returns null for actions with no confirmation message', () => {
+    expect(resolveConfirmationMessage(deployAction, {})).toBeNull();
   });
 });

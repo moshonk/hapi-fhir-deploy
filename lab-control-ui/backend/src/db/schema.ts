@@ -35,6 +35,7 @@ export function initSchema(db: DatabaseSync): void {
       status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
       command_preview TEXT NOT NULL,
       log_file_path TEXT NOT NULL,
+      cli_run_label TEXT NOT NULL DEFAULT '',
       started_at TEXT,
       ended_at TEXT,
       exit_code INTEGER
@@ -45,4 +46,22 @@ export function initSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_action_runs_lab
       ON action_runs (lab_configuration_id, started_at DESC);
   `);
+
+  migrateAddColumnIfMissing(db, 'action_runs', 'cli_run_label', "TEXT NOT NULL DEFAULT ''");
+}
+
+/** CREATE TABLE IF NOT EXISTS is a no-op against an already-existing table
+ * (SQLite doesn't diff column lists), so a DB file created by an earlier
+ * version of this schema would otherwise silently lack a newly-added
+ * column. Adds it if missing; a fresh DB already has it from the CREATE
+ * TABLE above, so this is a no-op there. */
+function migrateAddColumnIfMissing(
+  db: DatabaseSync,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (columns.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
 }

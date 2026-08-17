@@ -77,10 +77,15 @@ actually runs, so the preview can never drift from what executing it does.
 
 ### `POST /api/labs/:id/actions/:actionName`
 
-Body: `{ "confirmed": boolean }`. If `ActionDef.requiresConfirmation` is true
-for this action and `confirmed` is not `true`, responds `409` with
+Body: `{ "confirmed": boolean, "overridePrerequisites"?: boolean, "targetRunId"?: string }`.
+If `ActionDef.requiresConfirmation` is true for this action and `confirmed`
+is not `true`, responds `409` with
 `{ "error": "confirmation required", "confirmationMessage": string }`
-instead of running anything (FR-012) — the frontend is expected to have
+instead of running anything (FR-012) — `confirmationMessage` here is
+`ActionDef.confirmationMessage` with any `{field_key}` placeholders resolved
+against this lab's live field values (e.g. the real configured
+`expose_source_ranges`), computed fresh on every call, never the raw
+template `GET /api/providers` serves. The frontend is expected to have
 already shown this message and only sends `confirmed: true` after the
 operator accepts, but the backend re-enforces it so confirmation can't be
 bypassed by calling the API directly.
@@ -90,6 +95,13 @@ currently `fail`, responds `412` with
 `{ "error": "prerequisite not satisfied", "failing": [...ids] }` unless the
 request includes `"overridePrerequisites": true` (FR-011 allows explicit
 confirmation past a failing prerequisite, not just a hard block).
+
+`targetRunId` is only meaningful for `report` (contracts/cli-action-map.md):
+an `actionRunId` of a prior run belonging to this same lab, whose
+`cliRunLabel` `report` should target instead of the default (this lab's
+most recent succeeded `benchmark` run). Responds `400` if `targetRunId`
+doesn't resolve to a run on this lab, or if omitted and no succeeded
+`benchmark` run exists yet to default to.
 
 If the same `(labId, actionName)` pair already has a `running` row, responds
 `409` with `{ "error": "action already running", "actionRunId": string }`
