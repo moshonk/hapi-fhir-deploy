@@ -195,6 +195,10 @@ Environment:
                           Used by expose-grafana and unexpose-grafana.
   GRAFANA_SERVICE_NAME    Grafana Kubernetes Service name; defaults to prometheus-grafana.
                           Used by expose-grafana.
+  LAB_PORTFORWARD_WATCHDOG_INTERVAL
+                          Seconds between liveness checks for the auto-reconnect
+                          watchdog every expose-*/benchmark's own remote-write
+                          port-forward runs alongside its tunnel; defaults to 15.
 USAGE
 }
 
@@ -406,6 +410,95 @@ resolve_kubeconfig_file() {
     printf '%s' "$KUBECONFIG"
   elif [[ -n "$CLOUD" && -n "$NAME" ]]; then
     printf '%s/kubeconfig' "$(state_dir)"
+  fi
+}
+
+# Keeps ONE `kubectl port-forward` alive for as long as this watchdog
+# itself runs. kubectl port-forward has no built-in reconnect -- confirmed
+# live against this exact lab: the long-lived SPDY/websocket-style tunnel
+# it holds through the Kubernetes API server gets dropped after roughly
+# 30-40 minutes (a GKE control-plane/load-balancer session limit, not a
+# pod-health issue -- every backing pod stayed Running with zero restarts
+# across two separate drops caught mid-benchmark), and kubectl just exits
+# with "error: lost connection to pod" rather than reconnecting. Both
+# expose_public_service (long-lived, hours) and
+# ensure_local_prometheus_remote_write (one benchmark run, up to ~80
+# minutes) are long enough to hit this.
+#
+# kubeconfig: pass "" to rely on an already-exported ambient KUBECONFIG
+# (expose_public_service's own callers always have one); pass an explicit
+# path to set KUBECONFIG= just for the reconnect attempt (needed by
+# ensure_local_prometheus_remote_write, which doesn't require --cloud/
+# --name and so can't assume one is exported).
+# port: reused as-is on every reconnect (never re-randomized), so a
+# caller relying on a specific local port -- e.g. k6's
+# K6_PROMETHEUS_RW_SERVER_URL, resolved once and never re-read after k6
+# starts -- keeps pointing at a working tunnel across a reconnect.
+# pid_file: plain-text file holding the CURRENT port-forward PID -- both
+# this watchdog and the caller read/write it, so anything checking
+# liveness (cmd_exposures, cmd_benchmark's own cleanup) always sees the
+# live PID even after a reconnect. Caller must have already written the
+# first PID there before calling this.
+# watchdog_pid_file: separate file holding the watchdog LOOP's own PID, so
+# the caller can stop it later via stop_portforward_watchdog -- without
+# this, the watchdog would keep resurrecting a port-forward the operator
+# explicitly asked to close, or one belonging to a run that already ended.
+start_portforward_watchdog() {
+  local kbin="$1" kubeconfig="$2" address="$3" ns="$4" svc="$5" port="$6" target_port="$7"
+  local pf_log="$8" pid_file="$9" watchdog_pid_file="${10}"
+  local interval="${LAB_PORTFORWARD_WATCHDOG_INTERVAL:-15}"
+
+  nohup bash -c '
+    kbin="$1" kubeconfig="$2" address="$3" ns="$4" svc="$5" port="$6" target_port="$7"
+    pf_log="$8" pid_file="$9" interval="${10}"
+    while true; do
+      sleep "$interval"
+      current_pid="$(cat "$pid_file" 2>/dev/null || true)"
+      if [[ -n "$current_pid" ]] && kill -0 "$current_pid" 2>/dev/null; then
+        continue
+      fi
+      printf "\n==> watchdog: port-forward (pid %s) is no longer running -- reconnecting %s -> %s:%s\n" \
+        "${current_pid:-none}" "$svc" "$port" "$target_port" >>"$pf_log"
+      if [[ -n "$kubeconfig" ]]; then
+        KUBECONFIG="$kubeconfig" "$kbin" -n "$ns" port-forward --address "$address" "svc/$svc" "$port:$target_port" >>"$pf_log" 2>&1 &
+      else
+        "$kbin" -n "$ns" port-forward --address "$address" "svc/$svc" "$port:$target_port" >>"$pf_log" 2>&1 &
+      fi
+      new_pid=$!
+      disown
+      echo "$new_pid" >"$pid_file"
+    done
+  ' bash "$kbin" "$kubeconfig" "$address" "$ns" "$svc" "$port" "$target_port" "$pf_log" "$pid_file" "$interval" \
+    >>"$pf_log" 2>&1 &
+  local watchdog_pid=$!
+  disown
+  echo "$watchdog_pid" >"$watchdog_pid_file"
+}
+
+# Reverse of start_portforward_watchdog: stops the watchdog loop (not the
+# port-forward it's currently tracking -- kill that PID, read from
+# pid_file, separately). Safe to call when no watchdog is running (no-op).
+stop_portforward_watchdog() {
+  local watchdog_pid_file="$1"
+  local watchdog_pid
+  watchdog_pid="$(cat "$watchdog_pid_file" 2>/dev/null || true)"
+  if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill "$watchdog_pid" 2>/dev/null || true
+  fi
+  rm -f "$watchdog_pid_file"
+}
+
+# Kills whatever PID a start_portforward_watchdog-managed pid_file
+# currently names -- read fresh each call, never a value captured before a
+# possible reconnect. Safe to call on an empty/missing/already-dead
+# pid_file (no-op).
+kill_portforward_pid_file() {
+  local pid_file="$1"
+  [[ -n "$pid_file" ]] || return 0
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
   fi
 }
 
@@ -1387,14 +1480,20 @@ cmd_benchmark_in_cluster() {
 # is purely local, for the k6 process running alongside `scripts/lab`
 # itself to reach.
 #
-# Sets K6_PROMETHEUS_RW_SERVER_URL (exported) and PROMETHEUS_RW_PF_PID on
-# success, leaves both empty otherwise. Never dies: cmd_benchmark doesn't
-# require --cloud/--name (only FHIR_BASE_URL), so a resolvable kubeconfig
-# is often simply unavailable, and a missing/not-yet-installed monitoring
-# stack must never block a benchmark run -- this just falls back to
-# running without live metrics, same as before this existed.
+# Sets K6_PROMETHEUS_RW_SERVER_URL (exported), PROMETHEUS_RW_PID_FILE, and
+# PROMETHEUS_RW_WATCHDOG_PID_FILE on success (all empty otherwise) --
+# cmd_benchmark's own cleanup reads the CURRENT pid from
+# PROMETHEUS_RW_PID_FILE (not a variable captured once here) since a
+# reconnect can change it, and stops the watchdog via
+# PROMETHEUS_RW_WATCHDOG_PID_FILE so it doesn't outlive this run. Never
+# dies: cmd_benchmark doesn't require --cloud/--name (only FHIR_BASE_URL),
+# so a resolvable kubeconfig is often simply unavailable, and a
+# missing/not-yet-installed monitoring stack must never block a benchmark
+# run -- this just falls back to running without live metrics, same as
+# before this existed.
 ensure_local_prometheus_remote_write() {
-  PROMETHEUS_RW_PF_PID=""
+  PROMETHEUS_RW_PID_FILE=""
+  PROMETHEUS_RW_WATCHDOG_PID_FILE=""
 
   local kbin
   kbin="$(kubectl_bin)"
@@ -1433,15 +1532,25 @@ ensure_local_prometheus_remote_write() {
   fi
 
   export K6_PROMETHEUS_RW_SERVER_URL="http://127.0.0.1:${local_port}/api/v1/write"
-  PROMETHEUS_RW_PF_PID="$pf_pid"
   log "Streaming live k6 metrics to Prometheus remote-write at $K6_PROMETHEUS_RW_SERVER_URL (local only, no firewall rule opened)"
+
+  # Reconnects on this SAME local_port if the tunnel drops mid-run (see
+  # start_portforward_watchdog's doc comment) -- K6_PROMETHEUS_RW_SERVER_URL
+  # above is resolved once and never re-read by k6 after it starts, so the
+  # reconnect target must stay on the exact port k6 already has.
+  PROMETHEUS_RW_PID_FILE="$dir/prometheus-remote-write-portforward.pid"
+  PROMETHEUS_RW_WATCHDOG_PID_FILE="$dir/prometheus-remote-write-watchdog.pid"
+  printf '%s' "$pf_pid" >"$PROMETHEUS_RW_PID_FILE"
+  start_portforward_watchdog "$kbin" "$kubeconfig_file" "127.0.0.1" "$ns" "$svc" "$local_port" 9090 \
+    "$pf_log" "$PROMETHEUS_RW_PID_FILE" "$PROMETHEUS_RW_WATCHDOG_PID_FILE"
 }
 
 cmd_benchmark() {
-  # Always defined by the time it's checked after the k6 run below, even
-  # when ensure_local_prometheus_remote_write is never called (set -u
-  # would otherwise error on referencing it unset in that case).
-  PROMETHEUS_RW_PF_PID=""
+  # Always defined by the time they're checked after the k6 run below,
+  # even when ensure_local_prometheus_remote_write is never called (set -u
+  # would otherwise error on referencing them unset in that case).
+  PROMETHEUS_RW_PID_FILE=""
+  PROMETHEUS_RW_WATCHDOG_PID_FILE=""
 
   require_profile
   if [[ -n "$ECHIS_TIER" ]]; then
@@ -1509,12 +1618,15 @@ cmd_benchmark() {
   # always wins and skips the auto-detection below entirely.
   if [[ -z "${K6_PROMETHEUS_RW_SERVER_URL:-}" && "$DRY_RUN" != true && "$NO_PROMETHEUS_RW" != true ]]; then
     ensure_local_prometheus_remote_write
-    if [[ -n "$PROMETHEUS_RW_PF_PID" ]]; then
+    if [[ -n "$PROMETHEUS_RW_PID_FILE" ]]; then
       # EXIT (not RETURN): a failing k6 run (e.g. threshold breach) must
-      # still stop this port-forward even though `set -e` ends the whole
-      # script right after the `run` call below, before reaching the
-      # explicit kill further down.
-      trap 'kill "$PROMETHEUS_RW_PF_PID" 2>/dev/null || true' EXIT
+      # still stop the port-forward and its watchdog even though `set -e`
+      # ends the whole script right after the `run` call below, before
+      # reaching the explicit cleanup further down. kill_portforward_pid_file
+      # re-reads PROMETHEUS_RW_PID_FILE at trap time (not a PID captured
+      # now), so this still stops the right process even if the watchdog
+      # has since reconnected it under a new PID.
+      trap 'kill_portforward_pid_file "$PROMETHEUS_RW_PID_FILE"; stop_portforward_watchdog "$PROMETHEUS_RW_WATCHDOG_PID_FILE"' EXIT
     fi
   fi
 
@@ -1532,8 +1644,9 @@ cmd_benchmark() {
     --summary-export "$dir/k6-summary.json" \
     "$script"
 
-  if [[ -n "$PROMETHEUS_RW_PF_PID" ]]; then
-    kill "$PROMETHEUS_RW_PF_PID" 2>/dev/null || true
+  if [[ -n "$PROMETHEUS_RW_PID_FILE" ]]; then
+    kill_portforward_pid_file "$PROMETHEUS_RW_PID_FILE"
+    stop_portforward_watchdog "$PROMETHEUS_RW_WATCHDOG_PID_FILE"
     trap - EXIT
   fi
 
@@ -1625,6 +1738,23 @@ confirm_destroy() {
 public_exposure_state_file() {
   local slug="$1"
   printf '%s/%s-public-exposure.env' "$(state_dir)" "$slug"
+}
+
+# Live PID tracking for expose_public_service's port-forward, kept
+# separate from public_exposure_state_file's FIREWALL_RULE/PORT/
+# PROJECT_ID/URL fields (which never change once written) because
+# start_portforward_watchdog rewrites this file on every reconnect --
+# state_file's own PORT_FORWARD_PID= field is written once at expose-*
+# time and is informational only, not to be relied on for liveness after
+# this. cmd_exposures/unexpose_public_service read PID liveness from here.
+public_portforward_pid_file() {
+  local slug="$1"
+  printf '%s/%s-public-portforward.pid' "$(state_dir)" "$slug"
+}
+
+public_portforward_watchdog_pid_file() {
+  local slug="$1"
+  printf '%s/%s-public-portforward-watchdog.pid' "$(state_dir)" "$slug"
 }
 
 # Best-effort public-IP self-lookup of *this host* (where scripts/lab is
@@ -1727,10 +1857,18 @@ expose_public_service() {
       --description="scripts/lab expose-$state_slug: public access to $display_name ($svc) in lab '$NAME'. Run 'scripts/lab unexpose-$state_slug' or 'scripts/lab down' to remove."
   fi
 
-  local state_file
+  local state_file pid_file watchdog_pid_file
   state_file="$(public_exposure_state_file "$state_slug")"
+  pid_file="$(public_portforward_pid_file "$state_slug")"
+  watchdog_pid_file="$(public_portforward_watchdog_pid_file "$state_slug")"
+
+  # Stop any previous watchdog FIRST -- otherwise it can "helpfully"
+  # resurrect the port-forward we're about to kill the instant we kill it,
+  # racing the fresh one started below.
+  stop_portforward_watchdog "$watchdog_pid_file"
   local old_pid
-  old_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
+  old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$old_pid" ]] || old_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
   if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
     log "Stopping previous exposed port-forward (pid $old_pid)"
     run kill "$old_pid"
@@ -1749,6 +1887,13 @@ expose_public_service() {
   disown
   sleep 2
   kill -0 "$pf_pid" 2>/dev/null || die "port-forward failed to start; see $pf_log"
+  printf '%s' "$pf_pid" >"$pid_file"
+
+  # Reconnects on drop -- kubectl port-forward has no built-in reconnect,
+  # and this is meant to stay up for hours (see start_portforward_watchdog's
+  # doc comment for why/how this was confirmed live, not theoretical).
+  start_portforward_watchdog "$kbin" "" "0.0.0.0" "$ns" "$svc" "$port" "$target_port" \
+    "$pf_log" "$pid_file" "$watchdog_pid_file"
 
   # Computed before writing the state file (not just for the log line below)
   # so `exposures` (a read-only status query the Lab Control UI polls,
@@ -1762,12 +1907,15 @@ expose_public_service() {
   {
     printf 'FIREWALL_RULE=%s\n' "$firewall_rule"
     printf 'PORT=%s\n' "$port"
+    # Informational only (the pid at expose-* time) -- a reconnect
+    # rewrites $pid_file, not this. Liveness checks (cmd_exposures,
+    # unexpose_public_service) read $pid_file, never this field.
     printf 'PORT_FORWARD_PID=%s\n' "$pf_pid"
     printf 'PROJECT_ID=%s\n' "$project_id"
     printf 'URL=%s\n' "$url"
   } >"$state_file"
 
-  log "$display_name is reachable at $url (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
+  log "$display_name is reachable at $url (firewall rule '$firewall_rule', port-forward pid $pf_pid, auto-reconnect watchdog on)"
   log "Run 'scripts/lab unexpose-$state_slug --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
 }
 
@@ -1787,15 +1935,22 @@ unexpose_public_service() {
     return 0
   fi
 
-  local state_file
+  local state_file pid_file watchdog_pid_file
   state_file="$(public_exposure_state_file "$state_slug")"
+  pid_file="$(public_portforward_pid_file "$state_slug")"
+  watchdog_pid_file="$(public_portforward_watchdog_pid_file "$state_slug")"
+
+  # Stop the watchdog BEFORE killing the port-forward it's tracking --
+  # otherwise it just reconnects the thing we're trying to close.
+  stop_portforward_watchdog "$watchdog_pid_file"
 
   local firewall_rule="" pf_pid="" project_id=""
   if [[ -f "$state_file" ]]; then
     firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
-    pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
     project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
   fi
+  pf_pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$pf_pid" ]] || pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
   [[ -n "$project_id" ]] || project_id="$(tf_var_get project_id)" || true
   [[ -n "$firewall_rule" ]] || firewall_rule="allow-${rule_prefix}-${PORT:-$default_external_port}-${NAME}"
 
@@ -1813,7 +1968,7 @@ unexpose_public_service() {
     run gcloud compute firewall-rules delete "$firewall_rule" "${project_flag[@]}" --quiet
   fi
 
-  rm -f "$state_file"
+  rm -f "$state_file" "$pid_file"
 }
 
 cmd_expose_fhir() {
@@ -1880,17 +2035,24 @@ cmd_exposures() {
 
   for i in "${!ids[@]}"; do
     local id="${ids[$i]}" label="${labels[$i]}"
-    local state_file url="" port="" firewall_rule="" pf_pid="" exposed=false
+    local state_file pid_file url="" port="" firewall_rule="" pf_pid="" exposed=false
     state_file="$(public_exposure_state_file "$id")"
+    pid_file="$(public_portforward_pid_file "$id")"
     if [[ -f "$state_file" ]]; then
       url="$(grep -m1 '^URL=' "$state_file" | cut -d= -f2-)" || true
       port="$(grep -m1 '^PORT=' "$state_file" | cut -d= -f2)" || true
       firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
-      pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
-      # A state file with a dead port-forward pid is stale (e.g. the host
-      # rebooted without an unexpose-* ever running) -- report not-exposed
-      # rather than showing a link that won't actually connect. Cleanup of
-      # the stale firewall rule/file itself is unexpose-*'s/down's job, not
+      # $pid_file (kept live by the auto-reconnect watchdog, see
+      # start_portforward_watchdog) is the liveness source of truth, not
+      # state_file's own PORT_FORWARD_PID= field -- that's only the pid at
+      # expose-* time and goes stale the moment a reconnect happens.
+      # Falls back to it for a state file written before this existed.
+      pf_pid="$(cat "$pid_file" 2>/dev/null || true)"
+      [[ -n "$pf_pid" ]] || pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
+      # A dead port-forward pid means stale (e.g. the host rebooted
+      # without an unexpose-* ever running) -- report not-exposed rather
+      # than showing a link that won't actually connect. Cleanup of the
+      # stale firewall rule/file itself is unexpose-*'s/down's job, not
       # this read-only command's.
       if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
         exposed=true
