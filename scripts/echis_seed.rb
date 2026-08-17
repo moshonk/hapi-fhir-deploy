@@ -9,6 +9,18 @@ require "set"
 require "time"
 require "uri"
 
+# When stdout isn't a real terminal (piped through `scripts/lab`, captured
+# by the Lab Control UI's child_process spawn into a log file/SSE stream --
+# the normal case), Ruby fully buffers writes instead of line-buffering
+# them. Progress output then sits invisible in the process's internal
+# buffer for however long it takes to fill (observed live: tens of minutes
+# of real progress with zero new log lines, confirmed lagging by ~12
+# percentage points against the FHIR server's own resource count) rather
+# than appearing as it happens. Forcing sync mode makes every `puts`/`print`
+# flush immediately regardless of TTY-ness, which is what "live progress"
+# actually requires.
+$stdout.sync = true
+
 class SeedError < StandardError; end
 
 options = {
