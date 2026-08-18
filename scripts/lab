@@ -1568,13 +1568,24 @@ cmd_benchmark_in_cluster() {
   local prometheus_rw_url="http://${prom_svc}.${prom_ns}.svc.cluster.local:9090/api/v1/write"
   log "Streaming live k6 metrics from each in-cluster shard pod to Prometheus remote-write at $prometheus_rw_url"
 
+  # Tolerates up to ~30% of shards failing (e.g. a genuine k6 threshold
+  # breach under heavy load -- expected at stress scale) before the whole
+  # Job is marked Failed, rather than one bad shard discarding every other
+  # shard's already-complete, valid results (see the manifest's own
+  # backoffLimitPerIndex/maxFailedIndexes comment for the root-caused
+  # incident this fixes). Always at least 1 so a lone shard failing doesn't
+  # nuke a --parallel-shards 1 run's only result either.
+  local max_failed_shards=$(((shard_count * 3 + 9) / 10))
+  ((max_failed_shards >= 1)) || max_failed_shards=1
+
   log "Rendering $manifest_template for $shard_count shard(s)"
   render_job_manifest "$manifest_template" "$rendered" \
     "<SHARD_COUNT>" "$shard_count" \
     "<FHIR_BASE_URL>" "$FHIR_BASE_URL" \
     "<K6_SCRIPTS_CONFIGMAP>" "$configmap_name" \
     "<SHARD_OUTPUT_PVC>" "$pvc_name" \
-    "<PROMETHEUS_REMOTE_WRITE_URL>" "$prometheus_rw_url"
+    "<PROMETHEUS_REMOTE_WRITE_URL>" "$prometheus_rw_url" \
+    "<MAX_FAILED_SHARDS>" "$max_failed_shards"
 
   local kbin
   kbin="$(kubectl_bin)"

@@ -37,7 +37,22 @@ spec:
   completionMode: Indexed
   parallelism: <SHARD_COUNT>
   completions: <SHARD_COUNT>
-  backoffLimit: 1
+  # backoffLimitPerIndex (not the old single job-wide backoffLimit): each
+  # shard index gets its own retry budget, so one shard's k6 threshold
+  # breach (a REAL, expected outcome under heavy load -- the whole point of
+  # a stress-scale run) doesn't invalidate the other N-1 shards' results.
+  # Root-caused live: a 10-shard run where 3 shards legitimately breached
+  # their http_req_duration/http_req_failed thresholds under sustained
+  # overload hit the OLD job-wide backoffLimit, which marked the ENTIRE Job
+  # Failed and deleted the other 7 shards' pods -- discarding their
+  # already-complete, perfectly valid results along with the 3 that failed.
+  # maxFailedIndexes tolerates that many shards failing before the overall
+  # Job is marked Failed; <MAX_FAILED_SHARDS> is ~30% of shard count
+  # (scripts/lab's cmd_benchmark_in_cluster), reflecting "some shards
+  # breaching thresholds under stress is expected and shouldn't discard
+  # everyone else's data" without masking a truly systemic failure.
+  backoffLimitPerIndex: 1
+  maxFailedIndexes: <MAX_FAILED_SHARDS>
   template:
     metadata:
       labels:
@@ -45,6 +60,22 @@ spec:
         app.kubernetes.io/part-of: hapi-fhir
     spec:
       restartPolicy: Never
+      # Root-caused live: the grafana/k6 image runs as a non-root user, and
+      # a fresh Filestore NFS export's root directory is owned root:root
+      # mode 0755 -- no write access for a non-root process. Every shard
+      # failed with "permission denied" writing its own summary JSON,
+      # discovered only after a full 42-minute run, discarding all 10
+      # shards' results. This initContainer (running as root, the default
+      # for a bare image with no securityContext) makes the mount
+      # world-writable ONCE before any k6 container starts, rather than
+      # weakening the k6 containers' own security context.
+      initContainers:
+        - name: fix-shard-output-permissions
+          image: docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629
+          command: ["sh", "-c", "chmod 0777 /shard-output"]
+          volumeMounts:
+            - name: shard-output
+              mountPath: /shard-output
       containers:
         - name: k6
           image: docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629
