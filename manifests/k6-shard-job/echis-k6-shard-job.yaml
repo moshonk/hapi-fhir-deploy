@@ -60,19 +60,32 @@ spec:
         app.kubernetes.io/part-of: hapi-fhir
     spec:
       restartPolicy: Never
-      # Root-caused live: the grafana/k6 image runs as a non-root user, and
-      # a fresh Filestore NFS export's root directory is owned root:root
-      # mode 0755 -- no write access for a non-root process. Every shard
-      # failed with "permission denied" writing its own summary JSON,
-      # discovered only after a full 42-minute run, discarding all 10
-      # shards' results. This initContainer (running as root, the default
-      # for a bare image with no securityContext) makes the mount
-      # world-writable ONCE before any k6 container starts, rather than
-      # weakening the k6 containers' own security context.
+      # Root-caused live, in two layers:
+      #   1. The grafana/k6 image bakes in `USER k6` (uid 12345) -- NOT
+      #      root, contrary to this comment's original (wrong) assumption
+      #      that a bare image with no securityContext defaults to root.
+      #      A fresh Filestore export's root directory is owned root:root
+      #      mode 0755, so uid 12345 had no write access at all -- nothing
+      #      to do with NFS behavior, just an ordinary POSIX permission
+      #      check. `securityContext.runAsUser/runAsGroup: 0` below
+      #      overrides the image's own USER directive so this
+      #      initContainer actually runs as root.
+      #   2. Separately (and still worth keeping): Filestore's default NFS
+      #      export also squashes root -- remaps client uid 0 to an
+      #      unprivileged anonymous user server-side -- which would have
+      #      blocked a genuinely-root process too. infra/terraform/gcp
+      #      main.tf's nfs_export_options sets NO_ROOT_SQUASH for this
+      #      share so (1)'s fix actually has an effect.
+      # Every shard failed with a permission error writing its own summary
+      # JSON, discovered only after a full 42-minute run, discarding all
+      # 10 shards' results, until both layers were fixed.
       initContainers:
         - name: fix-shard-output-permissions
           image: docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629
           command: ["sh", "-c", "chmod 0777 /shard-output"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
           volumeMounts:
             - name: shard-output
               mountPath: /shard-output
