@@ -150,6 +150,25 @@ resource "google_filestore_instance" "shard_output" {
   file_shares {
     name        = "shard_output"
     capacity_gb = var.shard_output_capacity_gb
+
+    # Root-caused live: Filestore's default export squashes root (client
+    # UID 0 is remapped to an unprivileged anonymous user on the NFS
+    # server side) -- so even a k6 shard pod's initContainer running AS
+    # root got "Operation not permitted" trying to chmod the freshly
+    # mounted, root:root-owned share, and every shard failed to write its
+    # results. NO_ROOT_SQUASH removes that remapping for this share, which
+    # is fine here: it's a throwaway, single-purpose benchmark-output
+    # volume with no sensitive data, not a general-purpose one.
+    # ip_ranges scopes this to the lab's own node subnet (google_compute
+    # subnetwork.lab's primary CIDR) -- NFS mounts happen at the GKE NODE
+    # level (kubelet mounts once, then bind-mounts into each pod), so the
+    # node's own subnet range is what needs export access, not the pods/
+    # services secondary ranges.
+    nfs_export_options {
+      ip_ranges   = [google_compute_subnetwork.lab.ip_cidr_range]
+      access_mode = "READ_WRITE"
+      squash_mode = "NO_ROOT_SQUASH"
+    }
   }
 
   networks {
