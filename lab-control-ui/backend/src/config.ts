@@ -24,6 +24,17 @@ export interface AppConfig {
    * summary.csv, raw/) -- scripts/lab's own RESULT_ROOT. Same env var name
    * so one override affects both. */
   resultsDir: string;
+  /** Cap on how many of a run's log lines the SSE stream replays as its
+   * initial connect/reconnect burst (routes/runs.ts's readLogTail). A run
+   * that logs at a very high rate for even a few minutes -- a real one
+   * hit ~2,300 lines/sec during a connectivity outage, 544K lines total --
+   * turns "replay the whole log as individual SSE events" into hundreds
+   * of thousands of separate browser-side state updates, an O(n^2)
+   * rendering pattern that froze the tab for minutes on every page
+   * reload. Only bounds the replay burst; live-appended lines after
+   * connecting are unaffected, and the full untruncated log always stays
+   * on disk. */
+  logReplayMaxLines: number;
   secureCookies: boolean;
   /**
    * Where the built frontend (lab-control-ui/frontend/dist) lives. Defaults
@@ -70,6 +81,13 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new ConfigError(`LAB_UI_PORT must be a positive integer, got: ${env.LAB_UI_PORT}`);
   }
 
+  const logReplayMaxLines = Number.parseInt(env.LAB_UI_LOG_REPLAY_MAX_LINES ?? '2000', 10);
+  if (!Number.isInteger(logReplayMaxLines) || logReplayMaxLines <= 0) {
+    throw new ConfigError(
+      `LAB_UI_LOG_REPLAY_MAX_LINES must be a positive integer, got: ${env.LAB_UI_LOG_REPLAY_MAX_LINES}`,
+    );
+  }
+
   return {
     sharedSecret,
     port,
@@ -81,6 +99,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     runsDir: env.LAB_UI_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'runs'),
     cliRunsDir: env.LAB_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'runs'),
     resultsDir: env.LAB_RESULTS_DIR ?? resolve(repoRoot, 'results'),
+    logReplayMaxLines,
     secureCookies: env.LAB_UI_COOKIE_SECURE === 'true',
     frontendDistPath:
       env.LAB_UI_FRONTEND_DIST ?? resolve(repoRoot, 'lab-control-ui', 'frontend', 'dist'),

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve as resolvePath, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { getActionRun } from '../db/queries.js';
-import { getRunEmitter, readLogSoFar } from '../actions/runner.js';
+import { getRunEmitter, readLogSoFar, readLogTail } from '../actions/runner.js';
 
 export interface RunsRouterDeps {
   db: DatabaseSync;
@@ -14,6 +14,9 @@ export interface RunsRouterDeps {
   /** scripts/lab report's default publisher's RESULT_ROOT (report.md,
    * environment.json, summary.csv). */
   resultsDir: string;
+  /** Cap on the SSE stream's replay-on-connect burst -- see
+   * readLogTail's doc comment for why this exists. */
+  logReplayMaxLines: number;
 }
 
 /** Known result-artifact basenames worth surfacing in the UI, checked
@@ -73,7 +76,7 @@ function resolveReportResultDir(logContent: string, resultsDir: string): string 
 }
 
 export function createRunsRouter(deps: RunsRouterDeps): Router {
-  const { db, cliRunsDir, resultsDir } = deps;
+  const { db, cliRunsDir, resultsDir, logReplayMaxLines } = deps;
   const router = Router();
 
   router.get('/:runId', (req, res) => {
@@ -142,9 +145,11 @@ export function createRunsRouter(deps: RunsRouterDeps): Router {
     res.json({ cliRunLabel: run.cli_run_label, files });
   });
 
-  // SSE (T027, research.md §2): replays the full log on connect, then tails
-  // appended content. FR-008 -- reconnecting after a drop is just reopening
-  // this same endpoint, no client-tracked offset needed.
+  // SSE (T027, research.md §2): replays the log on connect (capped to
+  // logReplayMaxLines -- see readLogTail's doc comment; FULL content
+  // remains available via /log above), then tails appended content live,
+  // uncapped. FR-008 -- reconnecting after a drop is just reopening this
+  // same endpoint, no client-tracked offset needed.
   router.get('/:runId/stream', async (req, res) => {
     const run = getActionRun(db, req.params.runId);
     if (!run) {
@@ -163,7 +168,7 @@ export function createRunsRouter(deps: RunsRouterDeps): Router {
       }
     };
 
-    const initial = await readLogSoFar(run.log_file_path);
+    const initial = await readLogTail(run.log_file_path, logReplayMaxLines);
     if (initial) sendLog(initial);
 
     if (run.status === 'succeeded' || run.status === 'failed') {

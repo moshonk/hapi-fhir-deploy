@@ -40,6 +40,7 @@ export function buildTestApp(overrides: Partial<AppConfig> = {}): TestContext {
     runsDir,
     cliRunsDir,
     resultsDir,
+    logReplayMaxLines: 2000,
     secureCookies: false,
     // Deliberately non-existent in the test context (same as before this
     // field existed, when it was computed inline from repoRoot) -- the

@@ -155,6 +155,12 @@ fieldset {
   font-size: 0.85em;
 }
 
+.log-truncated-notice {
+  font-size: 0.8em;
+  opacity: 0.75;
+  margin: 0.25rem 0;
+}
+
 .error {
   color: var(--fail);
 }

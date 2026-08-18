@@ -49,6 +49,7 @@ export function createApp(deps: AppDeps): Express {
       db: deps.db,
       cliRunsDir: deps.config.cliRunsDir,
       resultsDir: deps.config.resultsDir,
+      logReplayMaxLines: deps.config.logReplayMaxLines,
     }),
   );
   app.use('/api/prerequisites', createPrerequisitesRouter(deps.config));
