@@ -51,7 +51,18 @@ spec:
   # (scripts/lab's cmd_benchmark_in_cluster), reflecting "some shards
   # breaching thresholds under stress is expected and shouldn't discard
   # everyone else's data" without masking a truly systemic failure.
-  backoffLimitPerIndex: 1
+  #
+  # backoffLimitPerIndex is deliberately 0, not 1: root-caused live (a
+  # second incident, after the one above) that a threshold-breach exit
+  # after a shard's FULL 42-minute run already IS a complete, valid result
+  # -- k6 already wrote its summary JSON before exiting non-zero. A retry
+  # doesn't "fix" anything here (there's nothing broken to fix), it just
+  # re-runs an already-answered 42-minute question from scratch AND races
+  # a fresh pod's own SIGTERM-triggered partial summary against the
+  # original complete one on the SAME output path -- whoever's operator
+  # deletes the Job to collect results loses the good data to the retry
+  # pod's ~100-second partial one. 0 retries removes that race entirely.
+  backoffLimitPerIndex: 0
   maxFailedIndexes: <MAX_FAILED_SHARDS>
   template:
     metadata:
