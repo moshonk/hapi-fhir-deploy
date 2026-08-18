@@ -244,6 +244,46 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     expect(cmd.env.K6_SCRIPT).toBeUndefined();
   });
 
+  it('benchmark (in_cluster -> --in-cluster/--parallel-shards, cluster-DNS FHIR_BASE_URL, no --echis-tier/K6_SCRIPT)', () => {
+    const cmd = run('benchmark', { in_cluster: true, parallel_shards: 5 });
+    expect(cmd.argv).toEqual([
+      'benchmark',
+      '--profile',
+      'load',
+      '--in-cluster',
+      '--parallel-shards',
+      '5',
+      '--run',
+      'hapi-fhir-lab-20260101-000000',
+    ]);
+    expect(cmd.env).toEqual({
+      // Not localhost:8080 -- that would resolve to the k6 shard pod
+      // itself, not FHIR, from inside the cluster.
+      FHIR_BASE_URL: 'http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir',
+      KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig',
+    });
+    // T3 tier is set in FIELDS -- confirms in_cluster suppresses BOTH
+    // --echis-tier and K6_SCRIPT even when a tier is configured, since
+    // cmd_benchmark_in_cluster (scripts/lab) always targets
+    // echis_load_100.js and dies if K6_SCRIPT names anything else.
+    expect(cmd.argv).not.toContain('--echis-tier');
+    expect(cmd.env.K6_SCRIPT).toBeUndefined();
+  });
+
+  it('benchmark (in_cluster, no parallel_shards override -> defaults to 1)', () => {
+    const cmd = run('benchmark', { in_cluster: true });
+    expect(cmd.argv).toEqual([
+      'benchmark',
+      '--profile',
+      'load',
+      '--in-cluster',
+      '--parallel-shards',
+      '1',
+      '--run',
+      'hapi-fhir-lab-20260101-000000',
+    ]);
+  });
+
   it('report', () => {
     expect(run('report').argv).toEqual([
       'report',

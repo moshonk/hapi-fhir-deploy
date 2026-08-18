@@ -61,6 +61,71 @@ describe('POST /api/labs/:id/actions/:actionName', () => {
     expect(log.text).toContain('Rollout complete');
   });
 
+  it('benchmark + inCluster threads --in-cluster/--parallel-shards and the cluster-DNS FHIR_BASE_URL into the command preview, suppressing --echis-tier', async () => {
+    process.env.STUB_LAB_LINES = 'ok';
+    process.env.STUB_LAB_EXIT_CODE = '0';
+
+    const { app } = buildTestApp();
+    const cookie = await loginAndGetCookie(app);
+    const labRes = await request(app)
+      .post('/api/labs')
+      .set('Cookie', cookie)
+      .send({ provider: 'gcp', fields: { project_id: 'my-project', echis_tier: 'T3' } });
+    const labId = labRes.body.id as string;
+
+    const trigger = await request(app)
+      .post(`/api/labs/${labId}/actions/benchmark`)
+      .set('Cookie', cookie)
+      .send({ inCluster: true, parallelShards: 5 });
+    expect(trigger.status).toBe(202);
+    const runId = trigger.body.actionRunId as string;
+
+    const detail = await request(app).get(`/api/runs/${runId}`).set('Cookie', cookie);
+    expect(detail.body.command_preview).toContain('--in-cluster');
+    expect(detail.body.command_preview).toContain('--parallel-shards 5');
+    expect(detail.body.command_preview).toContain(
+      'FHIR_BASE_URL=http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir',
+    );
+    // echis_tier is T3 on this lab -- a non-inCluster trigger would include
+    // --echis-tier T3 (see the next test's sibling case in
+    // commandBuilder.test.ts); confirms inCluster suppresses it, since
+    // cmd_benchmark_in_cluster always targets echis_load_100.js and dies if
+    // K6_SCRIPT/tier machinery tries to point it elsewhere.
+    expect(detail.body.command_preview).not.toContain('--echis-tier');
+  });
+
+  it('benchmark without inCluster defaults to the local kubectl-port-forward FHIR_BASE_URL, no --in-cluster', async () => {
+    process.env.STUB_LAB_LINES = 'ok';
+    process.env.STUB_LAB_EXIT_CODE = '0';
+
+    const { app } = buildTestApp();
+    const cookie = await loginAndGetCookie(app);
+    const labId = await createLaunchableLab(app, cookie);
+
+    const trigger = await request(app)
+      .post(`/api/labs/${labId}/actions/benchmark`)
+      .set('Cookie', cookie)
+      .send({});
+    const runId = trigger.body.actionRunId as string;
+
+    const detail = await request(app).get(`/api/runs/${runId}`).set('Cookie', cookie);
+    expect(detail.body.command_preview).not.toContain('--in-cluster');
+    expect(detail.body.command_preview).toContain('FHIR_BASE_URL=http://localhost:8080/fhir');
+  });
+
+  it('rejects a non-positive-integer parallelShards with 400 before creating a run', async () => {
+    const { app } = buildTestApp();
+    const cookie = await loginAndGetCookie(app);
+    const labId = await createLaunchableLab(app, cookie);
+
+    const trigger = await request(app)
+      .post(`/api/labs/${labId}/actions/benchmark`)
+      .set('Cookie', cookie)
+      .send({ inCluster: true, parallelShards: 0 });
+    expect(trigger.status).toBe(400);
+    expect(trigger.body.error).toMatch(/parallelShards must be a positive integer/);
+  });
+
   it('surfaces a refusal-style nonzero exit (e.g. the T2-before-T3 guard) verbatim as a failed run', async () => {
     process.env.STUB_LAB_LINES = 'scripts/lab: T3 requires a prior successful T2 run';
     process.env.STUB_LAB_EXIT_CODE = '1';

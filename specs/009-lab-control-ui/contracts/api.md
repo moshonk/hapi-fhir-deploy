@@ -77,7 +77,7 @@ actually runs, so the preview can never drift from what executing it does.
 
 ### `POST /api/labs/:id/actions/:actionName`
 
-Body: `{ "confirmed": boolean, "overridePrerequisites"?: boolean, "targetRunId"?: string }`.
+Body: `{ "confirmed": boolean, "overridePrerequisites"?: boolean, "targetRunId"?: string, "inCluster"?: boolean, "parallelShards"?: number }`.
 If `ActionDef.requiresConfirmation` is true for this action and `confirmed`
 is not `true`, responds `409` with
 `{ "error": "confirmation required", "confirmationMessage": string }`
@@ -102,6 +102,24 @@ an `actionRunId` of a prior run belonging to this same lab, whose
 most recent succeeded `benchmark` run). Responds `400` if `targetRunId`
 doesn't resolve to a run on this lab, or if omitted and no succeeded
 `benchmark` run exists yet to default to.
+
+`inCluster`/`parallelShards` are only meaningful for `benchmark`: `inCluster:
+true` runs `scripts/lab benchmark --in-cluster --parallel-shards N` (a
+Kubernetes Job of k6 shard pod(s) hitting the FHIR Service by its
+cluster-DNS name, load-balanced across every backing pod by real kube-proxy
+routing) instead of the default local `kubectl port-forward`-based run
+(which pins all traffic to a single backing pod — see docs/lab-cli.md).
+`parallelShards` defaults to `1` and must be a positive integer (`400` if
+not); more than 1 shard requires a `ReadWriteMany` PVC named
+`echis-shard-output` in the `fhir` namespace (e.g. GCP Filestore) — plain
+GCE PD storage classes only support `ReadWriteOnce`, i.e. `parallelShards:
+1`. `inCluster: true` also suppresses `--echis-tier` and `K6_SCRIPT`
+regardless of the lab's configured `echis_tier`, since
+`cmd_benchmark_in_cluster` (`scripts/lab`) always targets
+`benchmarks/k6/echis_load_100.js` and dies if `K6_SCRIPT` names anything
+else (`manifests/k6-shard-job/README.md`'s sharding strategy: aggregate
+concurrency is that script's own VU target — ~100 — multiplied by
+`parallelShards`).
 
 If the same `(labId, actionName)` pair already has a `running` row, responds
 `409` with `{ "error": "action already running", "actionRunId": string }`
@@ -131,8 +149,7 @@ after a page reload or an exposure closed some other way (`unexpose-*`,
     {
       "id": "prometheus",
       "label": "Prometheus",
-      "exposed": true,
-      "url": "http://203.0.113.5:9090",
+      "exposed": false,
       "port": "9090",
       "firewallRule": "allow-prometheus-9090-hapi-fhir-lab"
     },
@@ -152,16 +169,27 @@ after a page reload or an exposure closed some other way (`unexpose-*`,
 ```
 
 `exposed` reflects the tracked port-forward process actually still being
-alive, not merely a state file existing (a stale file left by e.g. a host
-reboot without a matching `unexpose-*` reports `exposed: false`). Only the
-`grafana` record ever carries `credentialsAvailable`/`username`/`password` —
-FHIR and Prometheus have no auth in front of them in this lab
-(`docs/lab-cli.md`'s login-required note). Grafana's password is fetched
-live via `kubectl` on every call and never persisted by this endpoint or by
-`scripts/lab exposures` itself; when the fetch fails, `credentialsAvailable`
-is `false` and `credentialsReason` explains why. `502` with `{ "error":
-string }` if the CLI invocation itself fails (not to be confused with an
-individual service simply being `exposed: false`, which is a normal `200`).
+alive, not merely a state file existing. `port`/`firewallRule` are present
+whenever a state file exists AT ALL, regardless of `exposed` — this is the
+one signal that distinguishes "never exposed" (`fhir` above: no
+`firewallRule`) from "was exposed but the tunnel isn't alive right now"
+(`prometheus` above: `firewallRule` present, `exposed: false` — e.g. a
+container restart killed the port-forward while the GCP firewall rule
+survived). `url` is only ever included when `exposed` is `true` — showing a
+URL that won't currently connect would be actively misleading, unlike
+`port`/`firewallRule` which are just facts about what's on disk. The Lab
+Control UI's boot-time exposure-recovery hook
+(`lab-control-ui/backend/src/actions/exposureRecovery.ts`) is exactly this
+endpoint's second consumer: it re-runs `expose-*` for any record with
+`firewallRule` set and `exposed: false`. Only the `grafana` record ever
+carries `credentialsAvailable`/`username`/`password` — FHIR and Prometheus
+have no auth in front of them in this lab (`docs/lab-cli.md`'s
+login-required note). Grafana's password is fetched live via `kubectl` on
+every call and never persisted by this endpoint or by `scripts/lab
+exposures` itself; when the fetch fails, `credentialsAvailable` is `false`
+and `credentialsReason` explains why. `502` with `{ "error": string }` if
+the CLI invocation itself fails (not to be confused with an individual
+service simply being `exposed: false`, which is a normal `200`).
 
 ## Runs
 

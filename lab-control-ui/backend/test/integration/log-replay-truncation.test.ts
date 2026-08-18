@@ -10,7 +10,7 @@
 // /log endpoint, and the log file itself).
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { createServer, type Server } from 'node:http';
+import { createServer } from 'node:http';
 import request from 'supertest';
 import { buildTestApp, loginAndGetCookie } from './helpers.js';
 

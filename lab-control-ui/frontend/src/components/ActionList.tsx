@@ -7,14 +7,20 @@
 //       run succeeded -- derived from run history the UI already owns via
 //       ActionDef.sequenceAfter, never a re-implementation of CLI validation.
 
+import { useState } from 'react';
 import type { ActionDef, ActionRunSummary, PrereqCheck } from '../api/types.js';
+
+export interface BenchmarkTriggerOptions {
+  inCluster?: boolean;
+  parallelShards?: number;
+}
 
 export interface ActionListProps {
   actions: ActionDef[];
   runs: ActionRunSummary[];
   prereqChecks: PrereqCheck[];
   runningActionName: string | null;
-  onTrigger: (action: ActionDef) => void;
+  onTrigger: (action: ActionDef, benchmarkOptions?: BenchmarkTriggerOptions) => void;
 }
 
 function latestStatusFor(
@@ -31,6 +37,12 @@ export function ActionList({
   runningActionName,
   onTrigger,
 }: ActionListProps) {
+  // Trigger-time-only, not persisted lab config (gcp.ts's 'benchmark' case
+  // doc comment) -- one benchmark action exists per provider, so a single
+  // pair of hooks here (rather than per-list-item) is sufficient.
+  const [inCluster, setInCluster] = useState(false);
+  const [parallelShards, setParallelShards] = useState(1);
+
   return (
     <ul className="action-list">
       {actions.map((action) => {
@@ -52,12 +64,52 @@ export function ActionList({
         else if (failingPrereq) reason = `blocked: ${failingPrereq.label} is not available`;
         else if (sequenceBlocked) reason = `run ${action.sequenceAfter} successfully first`;
 
+        const isBenchmark = action.name === 'benchmark';
+
         return (
           <li key={action.name} className="action-item">
+            {isBenchmark && (
+              <div className="benchmark-options">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={inCluster}
+                    onChange={(e) => setInCluster(e.target.checked)}
+                  />
+                  Run in-cluster
+                </label>
+                {inCluster && (
+                  <label className="benchmark-shards">
+                    Parallel shards
+                    <input
+                      type="number"
+                      min={1}
+                      value={parallelShards}
+                      onChange={(e) => setParallelShards(Math.max(1, Number(e.target.value) || 1))}
+                    />
+                  </label>
+                )}
+                {inCluster && (
+                  <p className="help-text">
+                    Runs as Kubernetes Job shard(s) inside the cluster, hitting the FHIR Service by
+                    its cluster-DNS name so traffic is load-balanced across every backing pod
+                    (unlike the default local `kubectl port-forward` run, which pins all traffic to
+                    one pod). Each shard runs the T2-scale script (~100 VUs); more than 1 shard
+                    requires a ReadWriteMany PVC (e.g. GCP Filestore) backing `echis-shard-output` --
+                    plain GCE PD storage only supports 1.
+                  </p>
+                )}
+              </div>
+            )}
             <button
               type="button"
               disabled={disabled}
-              onClick={() => onTrigger(action)}
+              onClick={() =>
+                onTrigger(
+                  action,
+                  isBenchmark ? { inCluster, parallelShards } : undefined,
+                )
+              }
               title={reason ?? undefined}
             >
               {action.label}

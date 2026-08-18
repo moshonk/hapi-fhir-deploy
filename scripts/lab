@@ -2083,11 +2083,25 @@ cmd_exposures() {
       esc_id="${id//\\/\\\\}"; esc_id="${esc_id//\"/\\\"}"
       esc_label="${label//\\/\\\\}"; esc_label="${esc_label//\"/\\\"}"
       printf '{"id":"%s","label":"%s","exposed":%s' "$esc_id" "$esc_label" "$exposed"
-      if [[ "$exposed" == true ]]; then
-        esc_url="${url//\\/\\\\}"; esc_url="${esc_url//\"/\\\"}"
+      # firewallRule/port describe the STATE FILE (does an exposure exist
+      # to potentially recover?) and are emitted whenever one is present,
+      # regardless of exposed -- this is the one signal that distinguishes
+      # "never exposed" from "was exposed, tunnel just isn't alive right
+      # now" (e.g. a container restart killed the port-forward but the GCP
+      # firewall rule survived), which callers need even when exposed is
+      # false (e.g. the Lab Control UI's boot-time exposure-recovery hook,
+      # exposureRecovery.ts). url is kept conditional on exposed == true:
+      # showing a URL that won't currently connect would be actively
+      # misleading, unlike port/firewallRule which are just facts about
+      # what's on disk.
+      if [[ -n "$firewall_rule" ]]; then
         esc_rule="${firewall_rule//\\/\\\\}"; esc_rule="${esc_rule//\"/\\\"}"
         esc_port="${port//\\/\\\\}"; esc_port="${esc_port//\"/\\\"}"
-        printf ',"url":"%s","port":"%s","firewallRule":"%s"' "$esc_url" "$esc_port" "$esc_rule"
+        printf ',"port":"%s","firewallRule":"%s"' "$esc_port" "$esc_rule"
+      fi
+      if [[ "$exposed" == true ]]; then
+        esc_url="${url//\\/\\\\}"; esc_url="${esc_url//\"/\\\"}"
+        printf ',"url":"%s"' "$esc_url"
       fi
       if [[ "$id" == grafana ]]; then
         printf ',"credentialsAvailable":%s' "$creds_available"
@@ -2111,6 +2125,9 @@ cmd_exposures() {
             printf '%-12s login: %s\n' "" "$creds_reason"
           fi
         fi
+      elif [[ -n "$firewall_rule" ]]; then
+        printf '%-12s not exposed (firewall rule %s is still open, but the tunnel is down -- re-run expose-%s to restore it)\n' \
+          "$label" "$firewall_rule" "$id"
       else
         printf '%-12s not exposed\n' "$label"
       fi

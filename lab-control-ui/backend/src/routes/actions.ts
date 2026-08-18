@@ -83,10 +83,27 @@ export function createActionsRouter(deps: AppDeps): Router {
       confirmed?: unknown;
       overridePrerequisites?: unknown;
       targetRunId?: unknown;
+      inCluster?: unknown;
+      parallelShards?: unknown;
     };
     const confirmed = body.confirmed === true;
     const overridePrerequisites = body.overridePrerequisites === true;
     const targetRunId = typeof body.targetRunId === 'string' ? body.targetRunId : undefined;
+
+    // `benchmark`-only, ephemeral trigger-time options -- not a persisted
+    // ConfigField (see gcp.ts's 'benchmark' case doc comment). Validated
+    // here rather than left to the CLI's own argument parsing so a bad
+    // value is rejected before a run is ever created.
+    const inCluster = body.inCluster === true;
+    let parallelShards = 1;
+    if (inCluster && body.parallelShards !== undefined) {
+      const n = Number(body.parallelShards);
+      if (!Number.isInteger(n) || n < 1) {
+        res.status(400).json({ error: 'parallelShards must be a positive integer' });
+        return;
+      }
+      parallelShards = n;
+    }
 
     // FR-016: refuse a second concurrent trigger before anything else.
     const already = currentlyRunning(lab.id, actionName);
@@ -140,9 +157,16 @@ export function createActionsRouter(deps: AppDeps): Router {
       return;
     }
 
+    // Only threaded onto fieldValues for `benchmark` -- harmless no-ops for
+    // every other action, since none of them read in_cluster/parallel_shards.
+    const fieldValues =
+      actionName === 'benchmark' && inCluster
+        ? { ...lab.fields, in_cluster: true, parallel_shards: parallelShards }
+        : lab.fields;
+
     let cmd;
     try {
-      cmd = buildCommand(provider, actionName, lab.fields, { cliRunLabel: cliRunLabelOverride });
+      cmd = buildCommand(provider, actionName, fieldValues, { cliRunLabel: cliRunLabelOverride });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
       return;

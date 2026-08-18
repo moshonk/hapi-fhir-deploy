@@ -133,6 +133,16 @@ export interface TriggerActionOptions {
   /** For `report`: which prior run's artifacts to report on. Omit to default
    * to the lab's most recent succeeded `benchmark` run. */
   targetRunId?: string;
+  /** `benchmark` only: run as Kubernetes Job shard(s) inside the cluster
+   * (real Service-DNS traffic, load-balanced across every backing pod) in
+   * place of the default `kubectl port-forward`-based local run (which
+   * pins all traffic to a single pod -- see docs/lab-cli.md). */
+  inCluster?: boolean;
+  /** `benchmark` + inCluster only: number of parallel k6 shard pods.
+   * Defaults to 1 server-side. >1 requires a ReadWriteMany PVC backing
+   * `echis-shard-output` (e.g. GCP Filestore) -- plain GCE PD storage
+   * classes only support ReadWriteOnce, i.e. shards=1. */
+  parallelShards?: number;
 }
 
 export async function triggerAction(

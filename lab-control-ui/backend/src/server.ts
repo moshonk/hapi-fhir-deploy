@@ -4,6 +4,7 @@
 import { openDatabase } from './db/schema.js';
 import { resolveConfig, ConfigError } from './config.js';
 import { createApp } from './app.js';
+import { recoverExposuresOnBoot } from './actions/exposureRecovery.js';
 
 function main(): void {
   let config;
@@ -22,6 +23,18 @@ function main(): void {
 
   app.listen(config.port, () => {
     console.log(`[lab-control-ui] listening on :${config.port} (repo root: ${config.repoRoot})`);
+  });
+
+  // Fire-and-forget: restores any expose-fhir/expose-prometheus/
+  // expose-grafana tunnel that a prior container's cgroup teardown killed
+  // while its GCP firewall rule stayed open (exposureRecovery.ts's doc
+  // comment). Never blocks the health check above, never crashes the
+  // process on failure.
+  void recoverExposuresOnBoot(db, config).catch((err) => {
+    console.warn(
+      `[lab-control-ui] boot recovery: unexpected error, continuing without it: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
   });
 }
 

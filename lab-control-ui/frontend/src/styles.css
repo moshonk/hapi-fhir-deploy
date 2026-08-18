@@ -70,6 +70,30 @@ fieldset {
   text-align: center;
 }
 
+.benchmark-options {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85em;
+}
+
+.benchmark-shards {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.benchmark-shards input[type='number'] {
+  width: 4rem;
+}
+
+.benchmark-options .help-text {
+  max-width: 16rem;
+  text-align: center;
+}
+
 .run-duration {
   font-family: ui-monospace, monospace;
   font-size: 0.85em;

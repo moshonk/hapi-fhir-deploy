@@ -556,8 +556,24 @@ export function gcpBuildCommand(
 
     case 'benchmark': {
       const tier = f('echis_tier');
+      // Ephemeral per-trigger options (routes/actions.ts), not a persisted
+      // ConfigField -- an operator picks this at the moment they click
+      // "Run k6 benchmark", not when configuring the lab.
+      const inCluster = fieldValues.in_cluster === true;
       const env: Record<string, string> = {
-        FHIR_BASE_URL: f('fhir_base_url', 'http://localhost:8080/fhir'),
+        FHIR_BASE_URL: inCluster
+          ? // A local kubectl-port-forward URL (localhost:8080) is
+            // meaningless from inside a k6 shard pod running in-cluster --
+            // it would resolve to the shard pod itself, not FHIR. Use the
+            // Service's cluster-DNS name instead, matching scripts/lab's
+            // own HAPI_NAMESPACE/HAPI_SERVICE_NAME defaults (fhir /
+            // hapi-fhir-hapi-fhir-jpaserver) -- neither is a configurable
+            // ConfigField here, same as scripts/lab itself.
+            f(
+              'fhir_base_url_in_cluster',
+              'http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir',
+            )
+          : f('fhir_base_url', 'http://localhost:8080/fhir'),
         // Not required by benchmark itself (only FHIR_BASE_URL is), but
         // ensure_local_prometheus_remote_write (scripts/lab) uses it to
         // open a local-only port-forward to Prometheus so this run's live
@@ -567,10 +583,23 @@ export function gcpBuildCommand(
         // "Live k6 metrics in Grafana" section).
         KUBECONFIG: kubeconfigPathFor(labName),
       };
-      const script = ECHIS_TIER_K6_SCRIPT[tier];
-      if (script) env.K6_SCRIPT = script;
       const argv = ['benchmark', '--profile', f('k6_profile')];
-      if (tier && tier !== 'none') argv.push('--echis-tier', tier);
+      if (inCluster) {
+        // scripts/lab's cmd_benchmark_in_cluster always targets
+        // benchmarks/k6/echis_load_100.js -- the k6-shard-job manifest's
+        // ConfigMap mapping is static -- and DIES if K6_SCRIPT names
+        // anything else, so it's deliberately never set here regardless of
+        // echis_tier. --echis-tier is also deliberately omitted: it would
+        // additionally trigger tier-sequence gating (requiring a prior
+        // tier's benchmark to have already succeeded) that has nothing to
+        // do with this standalone in-cluster run.
+        const shards = Number(fieldValues.parallel_shards ?? 1);
+        argv.push('--in-cluster', '--parallel-shards', String(shards));
+      } else {
+        const script = ECHIS_TIER_K6_SCRIPT[tier];
+        if (script) env.K6_SCRIPT = script;
+        if (tier && tier !== 'none') argv.push('--echis-tier', tier);
+      }
       argv.push('--run', cliRunLabel);
       return { argv, env };
     }
