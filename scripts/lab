@@ -1421,6 +1421,11 @@ record_echis_tier_progress() {
 # item mapping is static; retargeting requires updating both together. The
 # final merge step (scripts/merge_k6_shards.rb) is left as a follow-up, same
 # reason as cmd_seed_native_in_cluster.
+#
+# Each shard pod streams its own live metrics to Prometheus remote-write
+# (over cluster-DNS, no port-forward needed -- see the PROMETHEUS_REMOTE_WRITE_URL
+# comment below), so an in-cluster run shows up in Grafana's "k6 Prometheus"
+# dashboard exactly like a local-mode benchmark does.
 cmd_benchmark_in_cluster() {
   local shard_count="${PARALLEL_SHARDS:-1}"
   [[ "$shard_count" =~ ^[0-9]+$ && "$shard_count" -gt 0 ]] || die "--parallel-shards must be a positive integer"
@@ -1441,12 +1446,27 @@ cmd_benchmark_in_cluster() {
     die "K6_SCRIPT is set to '$K6_SCRIPT' but --in-cluster always targets $k6_script (the manifest's ConfigMap items are static, per manifests/k6-shard-job/README.md's sharding strategy); unset K6_SCRIPT, or retarget both the manifest and this command together"
   fi
 
+  # Unlike ensure_local_prometheus_remote_write (local-mode benchmarks),
+  # this needs no port-forward at all: each shard pod already runs inside
+  # the cluster, so it can reach Prometheus by its cluster-DNS Service name
+  # directly. Same PROMETHEUS_NAMESPACE/PROMETHEUS_SERVICE_NAME
+  # override/defaults as local mode; NOT gated on NO_PROMETHEUS_RW (v1 of
+  # this: --no-prometheus-remote-write is documented as a local-mode-only
+  # escape hatch for when a kubeconfig can't be resolved at all -- that
+  # doesn't apply here, since --in-cluster already hard-requires a working
+  # kubectl/kubeconfig to apply the Job manifest itself).
+  local prom_ns="${PROMETHEUS_NAMESPACE:-monitoring}"
+  local prom_svc="${PROMETHEUS_SERVICE_NAME:-prometheus-kube-prometheus-prometheus}"
+  local prometheus_rw_url="http://${prom_svc}.${prom_ns}.svc.cluster.local:9090/api/v1/write"
+  log "Streaming live k6 metrics from each in-cluster shard pod to Prometheus remote-write at $prometheus_rw_url"
+
   log "Rendering $manifest_template for $shard_count shard(s)"
   render_job_manifest "$manifest_template" "$rendered" \
     "<SHARD_COUNT>" "$shard_count" \
     "<FHIR_BASE_URL>" "$FHIR_BASE_URL" \
     "<K6_SCRIPTS_CONFIGMAP>" "$configmap_name" \
-    "<SHARD_OUTPUT_PVC>" "$pvc_name"
+    "<SHARD_OUTPUT_PVC>" "$pvc_name" \
+    "<PROMETHEUS_REMOTE_WRITE_URL>" "$prometheus_rw_url"
 
   local kbin
   kbin="$(kubectl_bin)"

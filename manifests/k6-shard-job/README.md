@@ -21,15 +21,17 @@ concurrency you want, and swap the script filename in this manifest's
 ## Before `kubectl apply`
 
 The manifest uses `<ANGLE_BRACKET>` placeholder tokens that must be
-substituted (e.g. via `envsubst`, or the future `scripts/lab` wiring — task
-T038, not yet implemented):
+substituted. `scripts/lab benchmark --in-cluster --parallel-shards N` (task
+T038) does this automatically — the table below is for applying the
+manifest by hand (e.g. via `envsubst`).
 
 | Token | Meaning |
 | --- | --- |
 | `<SHARD_COUNT>` | Number of parallel k6 shard pods. |
 | `<FHIR_BASE_URL>` | Target FHIR server base URL. |
 | `<K6_SCRIPTS_CONFIGMAP>` | Name of a pre-created ConfigMap containing the k6 script(s) — see below. |
-| `<SHARD_OUTPUT_PVC>` | Name of a pre-created `ReadWriteMany` PVC mounted at `/shard-output`, so every shard's k6 summary JSON is addressable by its index and `scripts/merge_k6_shards.rb` can read them all. |
+| `<SHARD_OUTPUT_PVC>` | Name of a pre-created PVC mounted at `/shard-output`, so every shard's k6 summary JSON is addressable by its index and `scripts/merge_k6_shards.rb` can read them all. `SHARD_COUNT > 1` needs this `ReadWriteMany` (every shard mounts it concurrently); `SHARD_COUNT == 1` only needs `ReadWriteOnce`. |
+| `<PROMETHEUS_REMOTE_WRITE_URL>` | Prometheus remote-write endpoint each shard pod pushes its own live k6 metrics to, reached directly by cluster-DNS (no port-forward needed, unlike a local-mode benchmark) — typically `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/write`. Makes an in-cluster run show up in Grafana's "k6 Prometheus" dashboard exactly like a local-mode run does. |
 
 Create the scripts ConfigMap before applying (name must match
 `<K6_SCRIPTS_CONFIGMAP>`). k6 scripts import `./lib/fhir_benchmark.js` by

@@ -54,6 +54,15 @@ spec:
             - "FHIR_BASE_URL=<FHIR_BASE_URL>"
             - "-e"
             - "K6_FHIR_SUMMARY_PATH=/shard-output/shard-$(SHARD_INDEX)-k6-fhir-summary.json"
+            # Streams this shard's own live metrics to Prometheus remote-write
+            # (K6_PROMETHEUS_RW_SERVER_URL below), same as a local (non
+            # --in-cluster) benchmark's "Live k6 metrics in Grafana" --
+            # except no port-forward is needed here, since this pod already
+            # runs inside the cluster and can reach the Service by its
+            # cluster-DNS name directly (scripts/lab's cmd_benchmark_in_cluster
+            # sets that URL).
+            - "--out"
+            - "experimental-prometheus-rw"
             - "--summary-export"
             - "/shard-output/shard-$(SHARD_INDEX)-k6-summary.json"
             - "/scripts/echis_load_100.js"
@@ -64,6 +73,8 @@ spec:
                   fieldPath: "metadata.annotations['batch.kubernetes.io/job-completion-index']"
             - name: SHARD_COUNT
               value: "<SHARD_COUNT>"
+            - name: K6_PROMETHEUS_RW_SERVER_URL
+              value: "<PROMETHEUS_REMOTE_WRITE_URL>"
           volumeMounts:
             - name: scripts
               mountPath: /scripts

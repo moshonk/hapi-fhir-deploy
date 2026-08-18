@@ -184,6 +184,15 @@ latency, JVM, Hikari pool) are scraped into the same Prometheus
 independently of any of this, so they're visible in Grafana during any run
 regardless.
 
+`--in-cluster` benchmarks stream live metrics the same way, but simpler:
+each k6 shard pod already runs inside the cluster, so
+`cmd_benchmark_in_cluster` points it straight at Prometheus's cluster-DNS
+Service name (`http://<svc>.<namespace>.svc.cluster.local:9090/api/v1/write`)
+-- no port-forward involved at all, and (unlike the local-mode opt-out
+above) there's currently no `--no-prometheus-remote-write` equivalent for
+`--in-cluster`, since applying the shard Job manifest already hard-requires
+a working kubectl/kubeconfig either way.
+
 #### eCHIS progressive tiers
 
 Use `K6_SCRIPT=benchmarks/k6/echis_load_100.js` (or another `echis_load_*.js`
