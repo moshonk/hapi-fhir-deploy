@@ -31,6 +31,15 @@ resource "google_project_service" "servicenetworking" {
   disable_on_destroy = false
 }
 
+# Always enabled (like the other google_project_service resources above) --
+# enabling an unused API costs nothing, unlike the Filestore instance itself
+# (google_filestore_instance.shard_output below), which stays opt-in via
+# var.enable_shard_output_rwx.
+resource "google_project_service" "file" {
+  service            = "file.googleapis.com"
+  disable_on_destroy = false
+}
+
 resource "google_compute_network" "lab" {
   name                    = local.name
   auto_create_subnetworks = false
@@ -118,6 +127,42 @@ resource "google_container_node_pool" "lab" {
       "https://www.googleapis.com/auth/cloud-platform"
     ]
   }
+}
+
+# Backs the ReadWriteMany PVC scripts/lab benchmark --in-cluster
+# --parallel-shards N (N > 1) needs -- see variables.tf's
+# enable_shard_output_rwx doc comment. Statically bound to a
+# PersistentVolume (manifests/k6-shard-job/echis-shard-output-pv.yaml,
+# applied by `scripts/lab provision-shard-storage`) via the core `nfs`
+# volume plugin, NOT the Filestore CSI driver -- no GKE addon/cluster
+# change needed, this is purely additive infrastructure. Zonal (not
+# regional) to match google_container_node_pool.lab's own var.zone.
+resource "google_filestore_instance" "shard_output" {
+  count = var.enable_shard_output_rwx ? 1 : 0
+
+  name = "${local.name}-shard-output"
+  # `zone` is deprecated on this resource (provider warning: "Use `location`
+  # instead") -- `location` takes the same zone string for BASIC_HDD/BASIC_SSD
+  # (zonal) instances, matching google_container_node_pool.lab's own var.zone.
+  location = var.zone
+  tier     = "BASIC_HDD"
+
+  file_shares {
+    name        = "shard_output"
+    capacity_gb = var.shard_output_capacity_gb
+  }
+
+  networks {
+    network      = google_compute_network.lab.name
+    modes        = ["MODE_IPV4"]
+    connect_mode = "DIRECT_PEERING"
+  }
+
+  labels = local.labels
+
+  depends_on = [
+    google_project_service.file
+  ]
 }
 
 resource "google_sql_database_instance" "postgres" {

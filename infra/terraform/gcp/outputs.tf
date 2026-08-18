@@ -92,6 +92,16 @@ output "resource_labels" {
   value       = local.labels
 }
 
+output "shard_output_filestore_ip" {
+  description = "IP address of the optional Filestore instance backing the in-cluster k6 shard-output RWX PVC. Empty string if enable_shard_output_rwx is false (scripts/lab's provision-shard-storage checks for this)."
+  value       = try(google_filestore_instance.shard_output[0].networks[0].ip_addresses[0], "")
+}
+
+output "shard_output_filestore_share_name" {
+  description = "Filestore file share name for the shard-output RWX PVC. Empty string if enable_shard_output_rwx is false."
+  value       = try(google_filestore_instance.shard_output[0].file_shares[0].name, "")
+}
+
 output "ansible_metadata" {
   description = "Non-sensitive metadata for Ansible orchestration."
   value = {

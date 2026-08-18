@@ -124,3 +124,32 @@ variable "db_max_connections" {
   type        = number
   default     = 100
 }
+
+variable "enable_shard_output_rwx" {
+  description = <<-EOT
+    Provisions a Filestore instance (BASIC_HDD tier, the cheapest available --
+    ~$0.20/GB-month, billed hourly) to back a ReadWriteMany PersistentVolume
+    for `scripts/lab benchmark --in-cluster --parallel-shards N` with N > 1:
+    every shard pod mounts the same /shard-output concurrently, which plain
+    GCE PD storage classes (ReadWriteOnce only) cannot support. Opt-in
+    (default false) so a lab that never needs more than 1 shard doesn't pay
+    for storage it doesn't use. `scripts/lab provision-shard-storage`
+    (docs/lab-cli.md) sets this true via a *targeted* apply against an
+    already-`up` lab, rather than requiring a full `up` re-run. Torn down
+    automatically by `scripts/lab down`'s `terraform destroy` like every
+    other resource in this module -- no special-case cleanup needed.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "shard_output_capacity_gb" {
+  description = "Filestore BASIC_HDD capacity in GiB for the RWX shard-output volume (enable_shard_output_rwx). 1024 is BASIC_HDD's minimum; the shard output itself (JSON summaries) is tiny, so this is sized at the tier floor, not for actual usage."
+  type        = number
+  default     = 1024
+
+  validation {
+    condition     = var.shard_output_capacity_gb >= 1024
+    error_message = "shard_output_capacity_gb must be at least 1024 (BASIC_HDD's minimum)."
+  }
+}

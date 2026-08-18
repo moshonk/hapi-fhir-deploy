@@ -21,6 +21,7 @@ ECHIS_TIER=""
 HOUSEHOLDS=""
 INDIVIDUALS_PER_HOUSEHOLD=""
 PARALLEL_SHARDS=""
+SHARD_OUTPUT_CAPACITY_GB=""
 IN_CLUSTER=false
 REPLICAS=""
 PORT=""
@@ -62,6 +63,7 @@ Usage:
   scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3000] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
   scripts/lab exposures --cloud gcp --name NAME [--format text|json]
+  scripts/lab provision-shard-storage --cloud gcp --name NAME --var project_id=P [--capacity-gb N] [--auto-approve]
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
@@ -125,6 +127,17 @@ Commands:
                        only reports it. --format json emits one {id,label,exposed,...} record per
                        service; used by the Lab Control UI (specs/009-lab-control-ui) to show a
                        link (and credentials, if applicable) once a service is exposed.
+  provision-shard-storage
+                       GCP only. Provisions a Filestore instance (BASIC_HDD tier, ~$0.20/GB-month
+                       billed hourly, 1TB floor) via a *targeted* Terraform apply against this
+                       lab's existing workspace -- touches no other resource regardless of which
+                       --var flags this lab was originally `up`'d with -- then applies a static
+                       ReadWriteMany PV/PVC pointing at it (manifests/k6-shard-job/echis-shard-output-pv.yaml).
+                       Required before `benchmark --in-cluster --parallel-shards N` with N > 1
+                       (plain GCE PD storage classes are ReadWriteOnce only, and every shard pod
+                       mounts the output PVC concurrently). Torn down automatically by `down`'s
+                       `terraform destroy` -- no unprovision command, no special-casing needed.
+                       --capacity-gb overrides the 1024 (BASIC_HDD's minimum) default.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -179,7 +192,8 @@ Environment:
   KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster,
                           pause-autoscaling, and resume-autoscaling.
   LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
-                          defaults to echis-shard-output. Used by --in-cluster.
+                          defaults to echis-shard-output. Used by --in-cluster and
+                          provision-shard-storage.
   HAPI_NAMESPACE          Kubernetes namespace for the HAPI FHIR deployment; defaults
                           to fhir. Used by pause-autoscaling, resume-autoscaling,
                           expose-fhir, and unexpose-fhir.
@@ -286,6 +300,11 @@ parse_args() {
       --parallel-shards)
         [[ -n "${2:-}" ]] || die "--parallel-shards requires a value"
         PARALLEL_SHARDS="$2"
+        shift 2
+        ;;
+      --capacity-gb)
+        [[ -n "${2:-}" ]] || die "--capacity-gb requires a value"
+        SHARD_OUTPUT_CAPACITY_GB="$2"
         shift 2
         ;;
       --in-cluster)
@@ -1410,6 +1429,95 @@ record_echis_tier_progress() {
   ' "$progress_file" "$tier"
 }
 
+# Provisions (or reconciles) the ReadWriteMany PVC that `benchmark
+# --in-cluster --parallel-shards N` needs for N > 1 -- every shard pod
+# mounts /shard-output concurrently, which plain GCE PD storage classes
+# (ReadWriteOnce only) cannot support. Two steps:
+#   1. A *targeted* `terraform apply -target=google_filestore_instance
+#      .shard_output -var enable_shard_output_rwx=true` against the lab's
+#      EXISTING workspace -- targeted so it never touches any other
+#      resource regardless of whether every -var this lab was originally
+#      `up`'d with is re-passed here (see infra/terraform/gcp/variables.tf's
+#      enable_shard_output_rwx doc comment). This is the one Terraform
+#      resource in that module that's opt-in rather than part of every
+#      lab's baseline `up` -- Filestore is real money (~$0.20/GB-month,
+#      billed hourly; BASIC_HDD's 1TB floor is still only a few cents/hour)
+#      that a lab never using more than 1 shard shouldn't pay for.
+#   2. Renders and applies manifests/k6-shard-job/echis-shard-output-pv.yaml
+#      (a static PV/PVC pointing at that Filestore instance's IP/share,
+#      via the core `nfs` volume plugin -- no CSI driver/cluster addon
+#      needed) so the PVC `cmd_benchmark_in_cluster` expects
+#      (shard_output_pvc(), default `echis-shard-output`) actually exists.
+#
+# Torn down automatically by `down`'s `terraform destroy` (same module,
+# same workspace) -- no unprovision command, no special-casing in cmd_down.
+cmd_provision_shard_storage() {
+  require_cloud
+  require_name
+  [[ "$CLOUD" == "gcp" ]] || die "provision-shard-storage is currently GCP-only (Filestore is a GCP-specific service); see manifests/k6-shard-job/README.md for the general ReadWriteMany requirement on other clouds"
+
+  local tf_bin
+  tf_bin="$(terraform_bin)"
+  need_command_unless_dry_run "$tf_bin"
+  local tf_dir
+  tf_dir="$(terraform_dir)"
+  [[ -d "$tf_dir" ]] || die "Terraform module not found: $tf_dir"
+
+  log "Provisioning RWX shard-output storage for $CLOUD lab '$NAME' (targeted Terraform apply -- no other resource in this lab is touched)"
+  run "$tf_bin" -chdir="$tf_dir" init
+  terraform_workspace_select "$tf_bin" "$tf_dir"
+
+  local apply_args=(
+    "apply" "-target=google_filestore_instance.shard_output"
+    "-var" "lab_name=$NAME"
+    "-var" "enable_shard_output_rwx=true"
+  )
+  if [[ -n "$SHARD_OUTPUT_CAPACITY_GB" ]]; then
+    apply_args+=("-var" "shard_output_capacity_gb=$SHARD_OUTPUT_CAPACITY_GB")
+  fi
+  if [[ "$AUTO_APPROVE" == true ]]; then
+    apply_args+=("-auto-approve")
+  fi
+  if ((${#TF_VARS[@]})); then
+    apply_args+=("${TF_VARS[@]}")
+  fi
+
+  local dir
+  dir="$(state_dir)"
+  mkdir -p "$dir"
+  terraform_apply_reusing_existing "$tf_bin" "$tf_dir" "$dir/terraform-apply-shard-storage.log" "${apply_args[@]}"
+  write_terraform_outputs "$tf_bin" "$tf_dir" "$dir"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would read the Filestore IP/share name from Terraform output and apply manifests/k6-shard-job/echis-shard-output-pv.yaml"
+    return 0
+  fi
+
+  local filestore_ip filestore_share capacity_gi
+  filestore_ip="$("$tf_bin" -chdir="$tf_dir" output -raw shard_output_filestore_ip)"
+  filestore_share="$("$tf_bin" -chdir="$tf_dir" output -raw shard_output_filestore_share_name)"
+  [[ -n "$filestore_ip" && -n "$filestore_share" ]] ||
+    die "Terraform applied but shard_output_filestore_ip/shard_output_filestore_share_name are empty -- enable_shard_output_rwx may not have taken effect"
+  capacity_gi="${SHARD_OUTPUT_CAPACITY_GB:-1024}"
+
+  local pv_template="$ROOT_DIR/manifests/k6-shard-job/echis-shard-output-pv.yaml"
+  [[ -f "$pv_template" ]] || die "PV/PVC manifest not found: $pv_template"
+  local rendered="$dir/echis-shard-output-pv.rendered.yaml"
+  render_job_manifest "$pv_template" "$rendered" \
+    "<FILESTORE_IP>" "$filestore_ip" \
+    "<FILESTORE_SHARE_NAME>" "$filestore_share" \
+    "<SHARD_OUTPUT_CAPACITY_GI>" "$capacity_gi" \
+    "<SHARD_OUTPUT_PVC>" "$(shard_output_pvc)"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+  log "Applying $(shard_output_pvc) PV/PVC (Filestore $filestore_ip:/$filestore_share)"
+  run "$kbin" apply -f "$rendered"
+
+  log "RWX shard storage ready. 'benchmark --in-cluster --parallel-shards N' with N > 1 will now work; torn down automatically by 'down'."
+}
+
 # Renders manifests/k6-shard-job/echis-k6-shard-job.yaml, applies it, and
 # waits for completion -- distributing k6 load generation across
 # --parallel-shards Kubernetes Job pods instead of one local k6 process, per
@@ -1471,6 +1579,20 @@ cmd_benchmark_in_cluster() {
   local kbin
   kbin="$(kubectl_bin)"
   need_command_unless_dry_run "$kbin"
+
+  # A single shard only needs ReadWriteOnce (only one pod ever mounts it,
+  # since parallelism=completions=1) -- Kubernetes will happily provision
+  # that from the default StorageClass on its own the first time the Job
+  # applies, no pre-provisioning needed. More than one shard needs
+  # ReadWriteMany (every shard pod mounts $pvc_name concurrently), which
+  # plain GCE PD storage classes cannot provide -- fail loudly here with a
+  # concrete next step, rather than letting shard pods hang Pending on an
+  # unschedulable multi-attach RWO volume until the 7200s `kubectl wait`
+  # below times out.
+  if [[ "$shard_count" -gt 1 && "$DRY_RUN" != true ]]; then
+    "$kbin" get pvc "$pvc_name" -n fhir >/dev/null 2>&1 ||
+      die "--parallel-shards $shard_count needs a ReadWriteMany PVC named '$pvc_name' in namespace fhir, which doesn't exist yet -- run 'scripts/lab provision-shard-storage --cloud $CLOUD --name $NAME --var project_id=<id>' first (manifests/k6-shard-job/README.md)"
+  fi
 
   log "Creating/updating ConfigMap $configmap_name from $k6_script"
   run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_load_100.js=\"$k6_script\" --from-file=fhir_benchmark.js=\"$ROOT_DIR/benchmarks/k6/lib/fhir_benchmark.js\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
@@ -2259,6 +2381,7 @@ case "$COMMAND" in
   expose-grafana) cmd_expose_grafana ;;
   unexpose-grafana) cmd_unexpose_grafana ;;
   exposures) cmd_exposures ;;
+  provision-shard-storage) cmd_provision_shard_storage ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

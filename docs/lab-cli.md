@@ -193,6 +193,28 @@ above) there's currently no `--no-prometheus-remote-write` equivalent for
 `--in-cluster`, since applying the shard Job manifest already hard-requires
 a working kubectl/kubeconfig either way.
 
+#### In-cluster benchmarks with more than 1 shard
+
+`benchmark --in-cluster --parallel-shards N` approximates a larger tier by
+running `benchmarks/k6/echis_load_100.js`'s own ~100-VU target across N
+Kubernetes Job shard pods simultaneously (`manifests/k6-shard-job/README.md`'s
+sharding strategy -- e.g. `--parallel-shards 10` approximates T3's ~1,000
+aggregate VUs). Every shard pod mounts the same `/shard-output` PVC at
+once, which needs `ReadWriteMany` -- something plain GCE PD storage
+classes (`ReadWriteOnce` only) can't provide. Run `scripts/lab
+provision-shard-storage --cloud gcp --name NAME --var project_id=P` once
+per lab first: it provisions a GCP Filestore instance (BASIC_HDD tier,
+~$0.20/GB-month billed hourly, a few cents for a typical lab session) via a
+*targeted* Terraform apply (touches no other resource in the lab) and
+applies a static PV/PVC pointing at it. `--parallel-shards 1` needs none of
+this -- only one pod ever mounts the PVC, so Kubernetes provisions a
+`ReadWriteOnce` volume from the default StorageClass on its own.
+`benchmark --in-cluster` with `--parallel-shards N > 1` fails fast with a
+clear message if this hasn't been provisioned yet, rather than hanging for
+up to 2 hours on an unschedulable shard pod. Torn down automatically by
+`down`'s `terraform destroy` (same Terraform module/workspace as
+everything else in the lab) -- no separate cleanup step.
+
 #### eCHIS progressive tiers
 
 Use `K6_SCRIPT=benchmarks/k6/echis_load_100.js` (or another `echis_load_*.js`

@@ -30,7 +30,7 @@ manifest by hand (e.g. via `envsubst`).
 | `<SHARD_COUNT>` | Number of parallel k6 shard pods. |
 | `<FHIR_BASE_URL>` | Target FHIR server base URL. |
 | `<K6_SCRIPTS_CONFIGMAP>` | Name of a pre-created ConfigMap containing the k6 script(s) — see below. |
-| `<SHARD_OUTPUT_PVC>` | Name of a pre-created PVC mounted at `/shard-output`, so every shard's k6 summary JSON is addressable by its index and `scripts/merge_k6_shards.rb` can read them all. `SHARD_COUNT > 1` needs this `ReadWriteMany` (every shard mounts it concurrently); `SHARD_COUNT == 1` only needs `ReadWriteOnce`. |
+| `<SHARD_OUTPUT_PVC>` | Name of a pre-created PVC mounted at `/shard-output`, so every shard's k6 summary JSON is addressable by its index and `scripts/merge_k6_shards.rb` can read them all. `SHARD_COUNT > 1` needs this `ReadWriteMany` (every shard mounts it concurrently); `SHARD_COUNT == 1` only needs `ReadWriteOnce` and Kubernetes provisions it on its own from the default StorageClass -- no pre-creation needed. For `ReadWriteMany`, run `scripts/lab provision-shard-storage` first (provisions a GCP Filestore instance + `echis-shard-output-pv.yaml`'s static PV/PVC; see that file's own header comment). |
 | `<PROMETHEUS_REMOTE_WRITE_URL>` | Prometheus remote-write endpoint each shard pod pushes its own live k6 metrics to, reached directly by cluster-DNS (no port-forward needed, unlike a local-mode benchmark) — typically `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/write`. Makes an in-cluster run show up in Grafana's "k6 Prometheus" dashboard exactly like a local-mode run does. |
 
 Create the scripts ConfigMap before applying (name must match
