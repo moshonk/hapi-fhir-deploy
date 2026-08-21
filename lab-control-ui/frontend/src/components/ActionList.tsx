@@ -95,8 +95,10 @@ export function ActionList({
                     its cluster-DNS name so traffic is load-balanced across every backing pod
                     (unlike the default local `kubectl port-forward` run, which pins all traffic to
                     one pod). Each shard runs the T2-scale script (~100 VUs); more than 1 shard
-                    requires a ReadWriteMany PVC (e.g. GCP Filestore) backing `echis-shard-output` --
-                    plain GCE PD storage only supports 1.
+                    requires a ReadWriteMany PVC (e.g. GCP Filestore) backing `echis-shard-output`
+                    -- plain GCE PD storage only supports 1. Run{' '}
+                    <strong>Provision RWX shard storage</strong> below first if it doesn't exist
+                    yet.
                   </p>
                 )}
               </div>
@@ -105,10 +107,7 @@ export function ActionList({
               type="button"
               disabled={disabled}
               onClick={() =>
-                onTrigger(
-                  action,
-                  isBenchmark ? { inCluster, parallelShards } : undefined,
-                )
+                onTrigger(action, isBenchmark ? { inCluster, parallelShards } : undefined)
               }
               title={reason ?? undefined}
             >

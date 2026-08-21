@@ -52,4 +52,17 @@ describe('ConfigForm', () => {
     expect((screen.getByLabelText(/^Region$/i) as HTMLInputElement).value).toBe('us-central1');
     expect((screen.getByLabelText(/TTL/i) as HTMLInputElement).value).toBe('4');
   });
+
+  it('renders a boolean field as an unchecked, non-required checkbox and toggles it', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    const pgbouncerCheckbox = screen.getByLabelText(/Enable PgBouncer/i) as HTMLInputElement;
+    expect(pgbouncerCheckbox.type).toBe('checkbox');
+    expect(pgbouncerCheckbox.checked).toBe(false);
+    expect(pgbouncerCheckbox).not.toBeRequired();
+
+    await user.click(pgbouncerCheckbox);
+    expect(pgbouncerCheckbox.checked).toBe(true);
+  });
 });

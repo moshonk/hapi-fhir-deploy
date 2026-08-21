@@ -55,6 +55,9 @@ GCP adapter's `configFields` (defaults sourced from
 | `db_sku` | provider | `"db-custom-2-7680"` |
 | `db_disk_size_gb` | provider | `256` |
 | `expose_source_ranges` | provider | `"0.0.0.0/0"` (matches the CLI's own default; the confirmation dialog for `expose-fhir`/`expose-prometheus`/`expose-grafana` names this value explicitly per FR-012) |
+| `shard_output_capacity_gb` | provider | `1024` (Filestore BASIC_HDD's billed floor; `provision-shard-storage`'s confirmation dialog names this value explicitly per FR-012) |
+| `enable_pgbouncer` | common | `false` (spec 007's opt-in pooled connection tier; `deploy` always passes this explicitly via `--extra-vars`, true or false, per `contracts/cli-action-map.md`) |
+| `pgbouncer_default_pool_size` | common | `20` (real Postgres connections per PgBouncer replica; total = this * `pgbouncer_replica_count`, must stay within the budget in `docs/autoscaling.md`) |
 
 ### ActionDef
 
@@ -63,8 +66,8 @@ GCP adapter's `configFields` (defaults sourced from
 | `name` | string | e.g. `"up"`, `"expose-fhir"`. |
 | `label` | string | Display name/verb, e.g. "Provision infrastructure". |
 | `cliSubcommand` | string | The literal `scripts/lab` subcommand invoked. |
-| `scope` | `"common" \| "provider"` | `expose-fhir`/`expose-prometheus`/`expose-grafana`/`unexpose-fhir`/`unexpose-prometheus`/`unexpose-grafana` are `"provider"` (GCP-only per `docs/lab-cli.md`); the rest are `"common"`. |
-| `requiresConfirmation` | boolean | True for `up`, `down`, `expose-fhir`, `expose-prometheus`, `expose-grafana` (FR-012). |
+| `scope` | `"common" \| "provider"` | `expose-fhir`/`expose-prometheus`/`expose-grafana`/`unexpose-fhir`/`unexpose-prometheus`/`unexpose-grafana`/`provision-shard-storage` are `"provider"` (GCP-only per `docs/lab-cli.md`); the rest are `"common"`. |
+| `requiresConfirmation` | boolean | True for `up`, `down`, `expose-fhir`, `expose-prometheus`, `expose-grafana`, `provision-shard-storage` (FR-012). |
 | `confirmationMessage` | string \| `null` | States the concrete consequence (billable resources / destructive teardown / public 0.0.0.0/0 exposure), populated with the live config values (e.g. actual `source_ranges`) at confirm time. |
 | `requiredPrerequisiteIds` | string[] | Which `PrerequisiteCheckDef`s must be passing (or explicitly overridden) before this action is triggerable (FR-011). |
 

@@ -37,6 +37,26 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     cliMapping: '--echis-tier {value} (benchmark only)',
   },
   {
+    key: 'enable_pgbouncer',
+    label: 'Enable PgBouncer pooled tier',
+    scope: 'common',
+    type: 'boolean',
+    default: false,
+    helpText:
+      "Deploys the opt-in PgBouncer connection-pooling tier (spec 007, ansible/group_vars/lab.yml) alongside HAPI FHIR -- swaps in the pooled ScaledObject in place of the native one. Required for eCHIS tiers T4/T5. maxReplicaCount was lowered from the originally-committed 50 to 5 after a live load test: 50 bounded PgBouncer's client-accept capacity, not its real ~40-connection backend budget, and collapsed throughput/latency/failure-rate badly under the k6 load profile -- see manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml's connection-budget annotation and docs/autoscaling.md.",
+    cliMapping: '--extra-vars enable_pgbouncer={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_default_pool_size',
+    label: 'PgBouncer pool size',
+    scope: 'common',
+    type: 'number',
+    default: 20,
+    helpText:
+      'Real PostgreSQL connections each PgBouncer replica maintains (DEFAULT_POOL_SIZE/MAX_DB_CONNECTIONS, ansible/templates/pgbouncer-deployment.runtime.yaml.j2). Total real connections = this * pgbouncer_replica_count (2, not yet UI-configurable) -- must stay <= (postgres_max_connections - reserved_connections) = 50 (docs/autoscaling.md); the committed default of 20 gives 40. Only takes effect on the next Deploy.',
+    cliMapping: '--extra-vars pgbouncer_default_pool_size={value} (deploy only)',
+  },
+  {
     key: 'households',
     label: 'Households',
     scope: 'common',
@@ -194,6 +214,16 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
       'Do not exceed the native connection-budget ceiling (maxReplicaCount: 5, docs/autoscaling.md).',
     cliMapping: '--replicas {value}',
   },
+  {
+    key: 'shard_output_capacity_gb',
+    label: 'Shard output storage capacity (GB)',
+    scope: 'provider',
+    type: 'number',
+    default: 1024,
+    helpText:
+      "Filestore BASIC_HDD's billed floor is 1024GB (~$0.20/GB-month); only raise this if a run's shard count/size needs more headroom.",
+    cliMapping: '--capacity-gb {value}',
+  },
 ];
 
 export const GCP_ACTIONS: ActionDef[] = [
@@ -311,6 +341,19 @@ export const GCP_ACTIONS: ActionDef[] = [
     sequenceAfter: 'deploy',
   },
   {
+    name: 'provision-shard-storage',
+    label: 'Provision RWX shard storage',
+    cliSubcommand: 'provision-shard-storage',
+    scope: 'provider',
+    requiresConfirmation: true,
+    // {field_key} placeholder resolved against this lab's live field values
+    // by resolveConfirmationMessage, same as up/down/expose-*.
+    confirmationMessage:
+      "This provisions a billable GCP Filestore instance (BASIC_HDD, ~$0.20/GB-month, {shard_output_capacity_gb}GB) for lab '{lab_name}'. Required once before running 'Run k6 benchmark' in-cluster with more than 1 parallel shard; torn down automatically by 'Destroy infrastructure'.",
+    requiredPrerequisiteIds: ['terraform', 'gcloud', 'kubectl'],
+    sequenceAfter: 'up',
+  },
+  {
     name: 'benchmark',
     label: 'Run k6 benchmark',
     cliSubcommand: 'benchmark',
@@ -415,7 +458,24 @@ export function gcpBuildCommand(
       };
 
     case 'deploy':
-      return { argv: ['deploy', '--cloud', 'gcp', '--name', labName], env: {} };
+      return {
+        // Always passed explicitly (never conditionally omitted) so toggling
+        // this field OFF on a later redeploy actually disables the pooled
+        // tier again, rather than leaving a prior true value stuck via
+        // Ansible's own enable_pgbouncer: false group_vars default.
+        argv: [
+          'deploy',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          '--extra-vars',
+          `enable_pgbouncer=${f('enable_pgbouncer', 'false')}`,
+          '--extra-vars',
+          `pgbouncer_default_pool_size=${f('pgbouncer_default_pool_size', '20')}`,
+        ],
+        env: {},
+      };
 
     case 'expose-fhir':
       return {
@@ -553,6 +613,30 @@ export function gcpBuildCommand(
         env,
       };
     }
+
+    case 'provision-shard-storage':
+      return {
+        argv: [
+          'provision-shard-storage',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          '--auto-approve',
+          '--var',
+          `project_id=${projectId}`,
+          '--capacity-gb',
+          f('shard_output_capacity_gb', '1024'),
+        ],
+        // The PV/PVC apply step (manifests/k6-shard-job's static PV/PVC)
+        // shells out to kubectl same as pause-autoscaling/expose-fhir --
+        // scripts/lab's kubectl-using commands never resolve a kubeconfig
+        // themselves, they expect the caller to set KUBECONFIG. Omitting
+        // this makes kubectl fall back to no config at all (resolves to
+        // localhost:8080, "connection refused") rather than this lab's
+        // real cluster.
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
+      };
 
     case 'benchmark': {
       const tier = f('echis_tier');

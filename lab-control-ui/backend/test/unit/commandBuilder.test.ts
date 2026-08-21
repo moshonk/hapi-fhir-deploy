@@ -27,6 +27,9 @@ const FIELDS = {
   ttl_hours: 4,
   expose_source_ranges: '0.0.0.0/0',
   pause_replicas: 5,
+  shard_output_capacity_gb: 1024,
+  enable_pgbouncer: false,
+  pgbouncer_default_pool_size: 20,
   households: 33333,
   individuals_per_household: 3,
   echis_seed: 12345,
@@ -79,8 +82,34 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     ]);
   });
 
-  it('deploy', () => {
-    expect(run('deploy').argv).toEqual(['deploy', '--cloud', 'gcp', '--name', 'hapi-fhir-lab']);
+  it('deploy (enable_pgbouncer: false -> --extra-vars enable_pgbouncer=false, always explicit)', () => {
+    expect(run('deploy').argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=false',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+    ]);
+  });
+
+  it('deploy (enable_pgbouncer: true, custom pool size)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, pgbouncer_default_pool_size: 25 }).argv).toEqual(
+      [
+        'deploy',
+        '--cloud',
+        'gcp',
+        '--name',
+        'hapi-fhir-lab',
+        '--extra-vars',
+        'enable_pgbouncer=true',
+        '--extra-vars',
+        'pgbouncer_default_pool_size=25',
+      ],
+    );
   });
 
   it('expose-fhir (requires KUBECONFIG, same as pause/resume-autoscaling)', () => {
@@ -182,6 +211,23 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
   it('resume-autoscaling', () => {
     const cmd = run('resume-autoscaling');
     expect(cmd.argv).toEqual(['resume-autoscaling']);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
+  });
+
+  it('provision-shard-storage (requires KUBECONFIG for its kubectl-applied PV/PVC step, same as pause/resume-autoscaling)', () => {
+    const cmd = run('provision-shard-storage');
+    expect(cmd.argv).toEqual([
+      'provision-shard-storage',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--auto-approve',
+      '--var',
+      'project_id=my-project',
+      '--capacity-gb',
+      '1024',
+    ]);
     expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
@@ -379,5 +425,18 @@ describe('resolveConfirmationMessage (FR-012 -- name the actual configured value
     // aren't valid field-key characters) -- must survive interpolation
     // verbatim as the real kubectl jsonpath expression it is.
     expect(message).toContain('{.data.admin-password}');
+  });
+
+  it('provision-shard-storage: interpolates shard_output_capacity_gb and lab_name', () => {
+    const provisionShardStorageAction = gcpProvider.actions.find(
+      (a) => a.name === 'provision-shard-storage',
+    )!;
+    const message = resolveConfirmationMessage(provisionShardStorageAction, {
+      lab_name: 'my-real-lab',
+      shard_output_capacity_gb: 2048,
+    })!;
+    expect(message).toContain("'my-real-lab'");
+    expect(message).toContain('2048GB');
+    expect(message).not.toContain('{shard_output_capacity_gb}');
   });
 });
