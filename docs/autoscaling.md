@@ -123,9 +123,11 @@ hikari_maximum_pool_size (pooled tier, charts/hapi-fhir-deploy/values-pgbouncer-
 maxReplicas_pooled <= floor(1000 / 20) = 50
 ```
 
-`manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml` sets `maxReplicaCount: 50`, a sibling to (never applied alongside) the native `hapi-fhir-scaledobject.yaml`; `ansible/playbooks/20-deploy-hapi-fhir.yml` applies exactly one of the two based on `enable_pgbouncer`.
+`manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml` sets `maxReplicaCount: 5`, a sibling to (never applied alongside) the native `hapi-fhir-scaledobject.yaml`; `ansible/playbooks/20-deploy-hapi-fhir.yml` applies exactly one of the two based on `enable_pgbouncer`.
 
-**This ceiling is provisional pending T4 load-test evidence** (the 10,000-concurrent-user tier of `specs/008-echis-workload-benchmark`), matching how the native tier's per-pod RPS threshold is already treated as provisional. Once pooled, connections stop being the binding constraint — cluster CPU/memory and PostgreSQL write IOPS become the real ceiling, so `maxReplicaCount: 50` must also be validated against real load, not just this arithmetic.
+**The `maxReplicas_pooled <= floor(pgbouncer_max_client_conn / hikari_maximum_pool_size) = 50` formula above bounds PgBouncer's CLIENT-accept capacity, not real backend throughput** -- `pgbouncer_max_client_conn` (1000) is a generous, largely-unconstraining ceiling, so this arithmetic alone does not mean 50 replicas can actually be served by the 40 real `pgbouncer_server_connections`. Root-caused live: a 5-shard k6 `load`-profile benchmark against `maxReplicaCount: 50` collapsed throughput ~6x, p50 latency ~37x, and the true failure rate ~13x versus the native (`maxReplicaCount: 5`) tier under the same profile, with PgBouncer's own stats log showing multi-second average client wait times for a free server connection -- i.e. the "provisional pending T4 load-test evidence" caveat below was exactly right, and this was that evidence. `maxReplicaCount` is lowered to `5` (the native tier's already-proven-safe ceiling) as a conservative starting point; raise it incrementally (`5 -> 8 -> 10 -> ...`) with a load test at each step to find where the real 40-connection budget (under `pool_mode=transaction` multiplexing) actually stops scaling cleanly, rather than jumping back to 50.
+
+**This ceiling is provisional pending further load-test evidence**, matching how the native tier's per-pod RPS threshold is already treated as provisional. Once pooled *and validated not to queue*, connections should stop being the binding constraint and cluster CPU/memory and PostgreSQL write IOPS become the real ceiling -- but that hasn't been demonstrated yet, only asserted; `maxReplicaCount` must be raised step-by-step against real load, not by formula alone.
 
 **Prepared statements**: PgBouncer transaction-pooling mode has known friction with JDBC server-side prepared statements (a statement prepared on one backend connection may not exist on the next one a transaction is routed to). The pooled tier's applied, validated-safe configuration is `spring.datasource.hikari.data-source-properties.prepareThreshold: 0` (`charts/hapi-fhir-deploy/values-pgbouncer-tier.yaml`), which disables PgJDBC server-side prepare entirely — this is `research.md` Decision 3's documented fallback, applied by default rather than assumed safe, since no live cluster was available to validate the optimized path where this was implemented.
 
@@ -163,6 +165,28 @@ Confirm the annotation is gone and the replica count is back at (or converging t
 kubectl -n fhir get scaledobject hapi-fhir-jpaserver -o jsonpath='{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}'
 kubectl -n fhir get deploy hapi-fhir-hapi-fhir-jpaserver
 ```
+
+## Tail Latency Diagnosis (p99 ≈ 60s)
+
+Every in-cluster `scripts/lab benchmark` run observed this iteration -- native tier and every PgBouncer variant, including with `prepareThreshold=5` reinstated -- showed p99 request latency hard-pinned at almost exactly `60,000ms`. Root-caused as follows, in case the same signature reappears:
+
+1. **k6's client-side timeout was the first suspect and was ruled out as the direct cause.** k6's default HTTP request timeout is `60000ms` (`benchmarks/k6/lib/fhir_benchmark.js`'s `http.get`/`http.post`/`http.put` calls do not override it), so a pinned-at-60000 p99 is consistent with k6 aborting slow requests client-side. But server-side Prometheus metrics during the same windows independently confirmed the stalls were real, not a client artifact: `http_server_requests_seconds_max` (server-measured) and `hikaricp_connections_usage_seconds_max` (connection hold time, as opposed to `hikaricp_connections_acquire_seconds_max` pool-wait time, which stayed low) both showed genuine 60-142s durations. GC pauses and pod churn were checked and ruled out.
+2. **Cloud SQL Query Insights** (`settings.insights_config` on `google_sql_database_instance`, `infra/terraform/gcp/main.tf`) pinpointed the exact query: `SELECT COUNT(DISTINCT t0.RES_ID) FROM HFJ_RESOURCE t0 WHERE t0.RES_TYPE = $1 AND t0.RES_DELETED_AT IS NULL`, dominant by cumulative execution time by a wide margin over every other query in the window.
+3. This is HAPI's `Bundle.total` computation: by default every FHIR search computes an exact total via `COUNT(DISTINCT res_id)` unless the request passes `_total=none`/`estimate`. The pinned `hapi-fhir-jpaserver-starter` image's `AppProperties.java` has no configuration knob to change the server-wide default (`JpaStorageSettings.setDefaultTotalMode()` is not exposed), and forking the image to add one would violate this repo's pinned-image guardrail -- so the fix has to be per-request, in the benchmark's own query strings.
+
+**Applied fix**: `benchmarks/k6/lib/fhir_benchmark.js` appends `_total=none` to every plain search-shaped operation (`patientSearch`, `observationSearch`, `encounterSearch`, `conditionSearch`, `worklistRead`, `householdRosterRead`). Measured effect, same `load` profile / 5-shard in-cluster run, before vs. after:
+
+| Metric | Before | After `_total=none` |
+|---|---|---|
+| Throughput | 43.8 req/s | 48.3 req/s |
+| p50 | 199ms | 140ms |
+| p95 | 2,194ms | 2,323ms |
+| p99 | pinned at 60,000ms | 48,000-53,000ms |
+| Failure rate | 1.22% | 0.87% |
+
+Real, measurable improvement -- p99 moved off the hard k6-timeout ceiling for the first time -- but not a full fix: Query Insights on the confirmation run still showed the same `COUNT(DISTINCT res_id)` query dominant, at almost unchanged magnitude.
+
+**Known, accepted limitation**: one caller was deliberately left unfixed. `supervisorDashboardRead` calls `/Patient?_summary=count`, and `_summary=count` inherently requests an exact total by FHIR spec -- `_total=none` doesn't apply to it, and there is no way to make that operation cheap without changing what it means. Its workload-mix comment ("weight 5 of 100") undersold its real cost: shard summaries from actual benchmark runs show it accounting for roughly 6-7% of total request volume (thousands of calls per shard over a 40+ minute run), enough that an uncached exact-count scan against `HFJ_RESOURCE` at this data scale dominates aggregate query cost by construction, independent of any other tuning. Accepted as an inherent characteristic of an accurate-count dashboard feature at current data scale rather than a bug to keep chasing; revisit only if either the workload mix changes deliberately or an index/covering-strategy on `hfj_resource(res_type, res_deleted_at)` is investigated and found to help the exact-count path (not attempted this iteration).
 
 ## Verification
 

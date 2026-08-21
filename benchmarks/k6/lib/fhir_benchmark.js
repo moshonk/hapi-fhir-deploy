@@ -235,10 +235,21 @@ export function benchmarkSummary(data, profile) {
   const totalRequests = metricValue(data.metrics.http_reqs, "count") || 0;
   const httpFailureRate = metricValue(data.metrics.http_req_failed, "rate") || 0;
   // http_req_failed is a Rate metric, whose k6 summary values include an exact
-  // "fails" count alongside the rate -- prefer it over round(total * rate),
-  // which can drift from the true count and would make merge_k6_shards.rb
-  // recompute merged failure rates from already-inaccurate inputs.
-  const exactFailedRequests = metricValue(data.metrics.http_req_failed, "fails");
+  // count alongside the rate -- prefer it over round(total * rate), which can
+  // drift from the true count and would make merge_k6_shards.rb recompute
+  // merged failure rates from already-inaccurate inputs.
+  //
+  // Counter-intuitively, k6's own "passes"/"fails" keys name which BOOLEAN
+  // VALUE was added to the Rate sink, not which outcome is semantically good
+  // or bad for this particular metric: "passes" = count of true additions,
+  // "fails" = count of false additions. Since http_req_failed adds `true`
+  // for a FAILED request, "passes" is the failed-request count and "fails"
+  // is the successful-request count -- the reverse of what the names
+  // suggest. This is k6's own well-known upstream naming quirk (confirmed
+  // live: a run with a true 1.03% failure rate reported failed_requests as
+  // ~99% of total here before this fix) -- see grafana/k6#2386, #5679,
+  // #4751.
+  const exactFailedRequests = metricValue(data.metrics.http_req_failed, "passes");
   const failedRequests = exactFailedRequests !== null ? exactFailedRequests : Math.round(totalRequests * httpFailureRate);
   const durationSeconds =
     data.state && typeof data.state.testRunDurationMs === "number" ? data.state.testRunDurationMs / 1000 : null;
@@ -434,8 +445,32 @@ function healthCheck(data) {
   });
 }
 
+// _total=none on every paginated list search below (not on
+// supervisorDashboardRead's /Patient?_summary=count, which asks for a
+// total BY DESIGN): live root-cause via Cloud SQL Query Insights during a
+// `load`-profile run showed a single query --
+// `SELECT COUNT(DISTINCT t0.RES_ID) FROM HFJ_RESOURCE t0 WHERE
+// t0.RES_TYPE = $1 AND t0.RES_DELETED_AT IS NULL` -- as by far the
+// costliest in the whole run (~4,121s of cumulative DB time from one
+// shard alone, more than the run's own wall-clock duration). That's
+// HAPI's default per-search Bundle.total computation: with no predicate
+// narrower than RES_TYPE, a plain `?_count=20` list search forces an
+// unfiltered COUNT DISTINCT over the whole (large, concurrently-written)
+// resource table for every single page fetched. It directly explains the
+// separately-observed p99 tail (docs/autoscaling.md "Tail latency"):
+// server-side hikaricp_connections_usage_seconds_max/
+// http_server_requests_seconds_max both showed individual requests
+// holding a connection for 60-142s under concurrent write load, while
+// connection ACQUIRE wait and GC pauses were both trivial -- i.e. the
+// stall was inside a query, not the pool. This starter image has no
+// exposed config surface for JpaStorageSettings' default total mode
+// (checked live: hapi-fhir-jpaserver-starter's AppProperties.java has no
+// such property), so `_total=none` per-request is the only lever
+// available short of forking the pinned image. `_total=none` is also a
+// recognized real-world FHIR client performance practice, not just a
+// benchmark workaround -- these operations don't consume Bundle.total.
 function patientSearch(data) {
-  requestOperation(data, "patient_search", "/Patient?_count=20", (response) => (
+  requestOperation(data, "patient_search", "/Patient?_count=20&_total=none", (response) => (
     response.status === 200 && jsonResourceType(response) === "Bundle"
   ));
 }
@@ -454,8 +489,8 @@ function patientRead(data) {
 function observationSearch(data) {
   const id = randomPatientId(data);
   const query = id
-    ? `patient=${encodeURIComponent(id)}&date=ge${encodeURIComponent(data.observationDateStart)}&_count=20`
-    : `_count=20`;
+    ? `patient=${encodeURIComponent(id)}&date=ge${encodeURIComponent(data.observationDateStart)}&_count=20&_total=none`
+    : `_count=20&_total=none`;
   requestOperation(data, "observation_search", `/Observation?${query}`, (response) => (
     response.status === 200 && jsonResourceType(response) === "Bundle"
   ));
@@ -463,7 +498,7 @@ function observationSearch(data) {
 
 function encounterSearch(data) {
   const id = randomPatientId(data);
-  const query = id ? `patient=${encodeURIComponent(id)}&_count=20` : `_count=20`;
+  const query = id ? `patient=${encodeURIComponent(id)}&_count=20&_total=none` : `_count=20&_total=none`;
   requestOperation(data, "encounter_search", `/Encounter?${query}`, (response) => (
     response.status === 200 && jsonResourceType(response) === "Bundle"
   ));
@@ -471,7 +506,7 @@ function encounterSearch(data) {
 
 function conditionSearch(data) {
   const id = randomPatientId(data);
-  const query = id ? `patient=${encodeURIComponent(id)}&_count=20` : `_count=20`;
+  const query = id ? `patient=${encodeURIComponent(id)}&_count=20&_total=none` : `_count=20&_total=none`;
   requestOperation(data, "condition_search", `/Condition?${query}`, (response) => (
     response.status === 200 && jsonResourceType(response) === "Bundle"
   ));
@@ -565,7 +600,7 @@ function worklistRead(data) {
   requestOperation(
     data,
     "worklist_read",
-    `/Task?owner=${encodeURIComponent(`PractitionerRole/${chwId}`)}&status=requested&_count=20`,
+    `/Task?owner=${encodeURIComponent(`PractitionerRole/${chwId}`)}&status=requested&_count=20&_total=none`,
     (response) => response.status === 200 && jsonResourceType(response) === "Bundle"
   );
 }
@@ -578,7 +613,7 @@ function householdRosterRead(data) {
   requestOperation(
     data,
     "household_roster_read",
-    `/Group?_id=${encodeURIComponent(householdId)}&_include=Group:member&_count=20`,
+    `/Group?_id=${encodeURIComponent(householdId)}&_include=Group:member&_count=20&_total=none`,
     (response) => response.status === 200 && jsonResourceType(response) === "Bundle"
   );
 }

@@ -33,16 +33,23 @@ hapi-fhir-jpaserver:
             # image (edoburu/pgbouncer:v1.25.2-p0, >= 1.21) supports
             # protocol-level prepared-statement pooling via
             # MAX_PREPARED_STATEMENTS (ansible/group_vars/lab.yml), which
-            # should make server-side prepare safe -- but this has not been
-            # validated end-to-end against a live PgBouncer+PostgreSQL+
-            # HikariCP stack (no live cluster available where this was
-            # implemented). Per Decision 3's own documented fallback,
-            # default to the guaranteed-safe prepareThreshold=0 (disables
-            # PgJDBC server-side prepare entirely) until that live
-            # validation happens; see docs/autoscaling.md's "Prepared
-            # statements" section for the follow-up validation plan and how
-            # to re-enable server-side prepare once confirmed safe.
-            prepareThreshold: 0
+            # should make server-side prepare safe.
+            #
+            # T028 live validation (docs/autoscaling.md "Prepared
+            # statements"): the guaranteed-safe prepareThreshold=0 fallback
+            # was kept until a live cluster was available to test this.
+            # Motivation: a live 'load'-profile benchmark at replica AND
+            # connection parity with the native tier still ran ~5x worse on
+            # p50/p95 latency and ~3x worse on failure rate than native, with
+            # prepareThreshold=0 the only remaining unexplained variable
+            # (connection count was ruled out first). Re-enabling PgJDBC's
+            # default threshold (5) to test whether disabling server-side
+            # prepare was itself the cost. REQUIRES watching HAPI FHIR/
+            # PostgreSQL logs for "prepared statement ... does not exist"
+            # during validation -- if that appears even once, this is unsafe
+            # under transaction pooling and must revert to 0 immediately,
+            # regardless of any latency improvement.
+            prepareThreshold: 5
       jpa:
         properties:
           hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect

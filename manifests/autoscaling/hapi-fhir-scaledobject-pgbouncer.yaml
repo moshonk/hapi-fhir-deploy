@@ -11,8 +11,8 @@ metadata:
   annotations:
     hapi-fhir-deploy.moshonk.dev/issue: "37"
     hapi-fhir-deploy.moshonk.dev/spec: "007-pgbouncer-connection-pooling"
-    hapi-fhir-deploy.moshonk.dev/connection-budget: "pooled: floor(pgbouncer_max_client_conn=1000 / hikari_maximum_pool_size=20) = 50; pgbouncer_server_connections = 20*2 = 40 <= 50 (native: floor((100-50)/10)=5, see hapi-fhir-scaledobject.yaml)"
-    hapi-fhir-deploy.moshonk.dev/provisional: "maxReplicaCount and the RPS threshold are provisional pending T4 (10,000 concurrent user) load-test evidence, per specs/007-pgbouncer-connection-pooling/spec.md SC-002/SC-003."
+    hapi-fhir-deploy.moshonk.dev/connection-budget: "pgbouncer_server_connections = 20*2 = 40 real PostgreSQL connections total (pool_mode=transaction, multiplexed regardless of replica count). The originally-committed floor(pgbouncer_max_client_conn=1000 / hikari_maximum_pool_size=20)=50 bounds PgBouncer's CLIENT-accept capacity, not real backend throughput -- root-caused live (this session): 5-shard 'load'-profile benchmark against maxReplicaCount 50 collapsed throughput ~6x, p50 latency ~37x, true failure rate ~13x vs the native (maxReplicaCount 5) tier, with PgBouncer's own stats log showing multi-second average client wait times for a free server connection. maxReplicaCount lowered to 5 (native tier's proven-safe ceiling, see hapi-fhir-scaledobject.yaml) as a conservative starting point pending further load-test evidence of how far replica count can safely rise above it."
+    hapi-fhir-deploy.moshonk.dev/provisional: "maxReplicaCount and the RPS threshold are provisional pending T4 (10,000 concurrent user) load-test evidence, per specs/007-pgbouncer-connection-pooling/spec.md SC-002/SC-003. Raise incrementally (5 -> 8 -> 10 -> ...) with a load test at each step, not back to 50 in one jump -- see the connection-budget annotation above for why 50 already failed."
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -21,7 +21,7 @@ spec:
   pollingInterval: 30
   cooldownPeriod: 300
   minReplicaCount: 2
-  maxReplicaCount: 50
+  maxReplicaCount: 5
   advanced:
     horizontalPodAutoscalerConfig:
       name: hapi-fhir-jpaserver
