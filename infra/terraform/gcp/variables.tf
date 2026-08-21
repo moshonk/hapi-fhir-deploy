@@ -135,7 +135,14 @@ variable "enable_shard_output_rwx" {
     (default false) so a lab that never needs more than 1 shard doesn't pay
     for storage it doesn't use. `scripts/lab provision-shard-storage`
     (docs/lab-cli.md) sets this true via a *targeted* apply against an
-    already-`up` lab, rather than requiring a full `up` re-run. Torn down
+    already-`up` lab, rather than requiring a full `up` re-run. Because a
+    variable value isn't part of Terraform state (only resources are),
+    provision-shard-storage ALSO writes a per-lab
+    shard-storage.auto.tfvars (ansible/artifacts/lab/gcp/<name>/) so a
+    later plain `scripts/lab up` re-run -- e.g. to pick up an unrelated
+    change elsewhere in this module -- still passes true here instead of
+    silently reverting to this default and destroying the Filestore
+    instance out from under a lab that's actively using it. Torn down
     automatically by `scripts/lab down`'s `terraform destroy` like every
     other resource in this module -- no special-case cleanup needed.
   EOT

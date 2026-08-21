@@ -206,9 +206,16 @@ provision-shard-storage --cloud gcp --name NAME --var project_id=P` once
 per lab first: it provisions a GCP Filestore instance (BASIC_HDD tier,
 ~$0.20/GB-month billed hourly, a few cents for a typical lab session) via a
 *targeted* Terraform apply (touches no other resource in the lab) and
-applies a static PV/PVC pointing at it. `--parallel-shards 1` needs none of
-this -- only one pod ever mounts the PVC, so Kubernetes provisions a
-`ReadWriteOnce` volume from the default StorageClass on its own.
+applies a static PV/PVC pointing at it. It also writes
+`ansible/artifacts/lab/gcp/NAME/shard-storage.auto.tfvars`, persisting
+`enable_shard_output_rwx=true` for this lab so a later plain `up` re-run
+picks it up and doesn't tear the Filestore instance back down (its
+`default = false` in `infra/terraform/gcp/variables.tf` would otherwise
+mean an untargeted apply — with no reason to think this lab wants it —
+destroys it; this happened live once before this file was added).
+`--parallel-shards 1` needs none of this -- only one pod ever mounts the
+PVC, so Kubernetes provisions a `ReadWriteOnce` volume from the default
+StorageClass on its own.
 `benchmark --in-cluster` with `--parallel-shards N > 1` fails fast with a
 clear message if this hasn't been provisioned yet, rather than hanging for
 up to 2 hours on an unschedulable shard pod. Torn down automatically by

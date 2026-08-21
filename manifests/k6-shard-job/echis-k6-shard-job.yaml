@@ -116,6 +116,23 @@ spec:
             # runs inside the cluster and can reach the Service by its
             # cluster-DNS name directly (scripts/lab's cmd_benchmark_in_cluster
             # sets that URL).
+            # Every shard runs the identical script with identical tags, so
+            # without a per-shard differentiator every shard's samples for a
+            # given metric (e.g. k6_http_reqs) land on the SAME Prometheus
+            # series (identical __name__ + label set) -- discovered live: 5
+            # concurrent shards all writing that series with interleaved,
+            # non-monotonic timestamps trips this cluster's Prometheus
+            # `outOfOrderTimeWindow: 0s` and most/all remote-write pushes are
+            # rejected with 400 ("Failed to send the time series data").
+            # Since contracts/merged-report.md requires multi-shard latency
+            # percentiles to come from Prometheus (shard-derived percentiles
+            # can't be validly combined), losing this isn't just a dashboard
+            # gap -- it silently drops the run's only valid latency source.
+            # Tagging each shard's samples with its own SHARD_INDEX gives
+            # each shard a distinct label, so its series are independently
+            # (and correctly) ordered.
+            - "--tag"
+            - "shard=$(SHARD_INDEX)"
             - "--out"
             - "experimental-prometheus-rw"
             - "--summary-export"

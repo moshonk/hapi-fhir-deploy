@@ -1027,6 +1027,15 @@ cmd_up() {
   terraform_workspace_ensure "$tf_bin" "$tf_dir"
 
   local apply_args=("apply" "-var" "lab_name=$NAME")
+  # Reload any opt-in Terraform variables a *targeted* apply persisted for
+  # this lab (currently just enable_shard_output_rwx/shard_output_capacity_gb
+  # from `provision-shard-storage` -- see that command's doc comment) so
+  # this untargeted `up` re-run reconciles to the SAME desired state as the
+  # last targeted apply, instead of silently destroying resources that
+  # only exist because of a variable this invocation never passed.
+  if [[ -f "$dir/shard-storage.auto.tfvars" ]]; then
+    apply_args+=("-var-file=$dir/shard-storage.auto.tfvars")
+  fi
   if [[ "$AUTO_APPROVE" == true ]]; then
     apply_args+=("-auto-approve")
   fi
@@ -1500,6 +1509,28 @@ cmd_provision_shard_storage() {
     die "Terraform applied but shard_output_filestore_ip/shard_output_filestore_share_name are empty -- enable_shard_output_rwx may not have taken effect"
   capacity_gi="${SHARD_OUTPUT_CAPACITY_GB:-1024}"
 
+  # Persist enable_shard_output_rwx=true for THIS lab so a later plain `up`
+  # re-run (e.g. to pick up an unrelated infra/terraform/gcp/*.tf change)
+  # doesn't silently destroy the Filestore instance just provisioned above.
+  # The apply that created it is deliberately *targeted*
+  # (-target=google_filestore_instance.shard_output, see this function's
+  # doc comment) and never writes the variable anywhere Terraform would
+  # remember it on its own -- variables are not part of state, only
+  # resources are. Without this file, `enable_shard_output_rwx` reverts to
+  # its `default = false` (infra/terraform/gcp/variables.tf) on the next
+  # untargeted `apply`, and Terraform reads that as "this lab no longer
+  # wants this resource" and tears it down. Root-caused live: an `up`
+  # re-run (for an unrelated Cloud SQL Query Insights change) destroyed a
+  # previously-working shard-output Filestore instance mid-benchmark,
+  # stranding all 5 shard pods in Init forever on an NFS mount to an IP
+  # that no longer resolved to anything. `cmd_up` below loads this file via
+  # -var-file when present, ahead of any operator-supplied $TF_VARS so an
+  # explicit `--var enable_shard_output_rwx=false` can still override it.
+  cat > "$dir/shard-storage.auto.tfvars" <<EOF
+enable_shard_output_rwx = true
+shard_output_capacity_gb = $capacity_gi
+EOF
+
   local pv_template="$ROOT_DIR/manifests/k6-shard-job/echis-shard-output-pv.yaml"
   [[ -f "$pv_template" ]] || die "PV/PVC manifest not found: $pv_template"
   local rendered="$dir/echis-shard-output-pv.rendered.yaml"
@@ -1512,10 +1543,64 @@ cmd_provision_shard_storage() {
   local kbin
   kbin="$(kubectl_bin)"
   need_command_unless_dry_run "$kbin"
+  # spec.persistentVolumeSource is immutable on a PV once created -- if this
+  # lab's Filestore instance was ever destroyed and recreated (e.g. by a
+  # `down`+`up`, or by the enable_shard_output_rwx footgun this function's
+  # doc comment now guards against), the new instance gets a NEW IP and a
+  # plain re-apply of the OLD PV object fails outright ("Forbidden:
+  # spec.persistentvolumesource is immutable after creation"). Delete
+  # PVC-then-PV first (PVC before PV: the PV's pv-protection finalizer
+  # otherwise blocks on the still-bound claim) so the apply below always
+  # creates a fresh pair bound to the current Filestore IP. Safe to run even
+  # when nothing changed -- ignore-not-found makes this a no-op on a first
+  # provision, and PV/PVC recreation is invisible to callers since nothing
+  # should be actively mounting shard-output between benchmark runs.
+  run "$kbin" delete pvc "$(shard_output_pvc)" -n fhir --ignore-not-found
+  run "$kbin" delete pv echis-shard-output-pv --ignore-not-found
   log "Applying $(shard_output_pvc) PV/PVC (Filestore $filestore_ip:/$filestore_share)"
   run "$kbin" apply -f "$rendered"
 
   log "RWX shard storage ready. 'benchmark --in-cluster --parallel-shards N' with N > 1 will now work; torn down automatically by 'down'."
+}
+
+# `kubectl wait --for=condition=complete` only ever fires for the Complete
+# condition -- it never returns for a Job that instead reaches the Failed
+# condition (e.g. more than maxFailedIndexes shards breached their k6
+# thresholds, per the manifest's own backoffLimitPerIndex/maxFailedIndexes
+# comment), so it hangs until the full --timeout instead of surfacing the
+# already-final result. Root-caused live: a 5-shard run whose Job had been
+# sitting Failed for 20+ minutes while `scripts/lab`/the Lab Control UI
+# kept waiting, on course for the full 7200s timeout, before anyone
+# noticed. Runs two `kubectl wait`s in parallel (one per condition) and
+# returns as soon as either fires, killing the other -- so a genuinely
+# failed run is reported (and this function dies) within moments of
+# Kubernetes marking it Failed, same as it already does for Complete.
+wait_for_shard_job() {
+  local kbin="$1" job_name="$2" timeout="$3"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would wait for job/$job_name to reach Complete or Failed (timeout ${timeout})"
+    return 0
+  fi
+
+  "$kbin" wait --for=condition=complete "job/$job_name" -n fhir --timeout="$timeout" &
+  local complete_pid=$!
+  "$kbin" wait --for=condition=failed "job/$job_name" -n fhir --timeout="$timeout" &
+  local failed_pid=$!
+
+  # Whichever condition the Job actually reaches first returns here; the
+  # other wait is still running against the same (now resolved) Job and
+  # gets cleaned up below rather than left to its own full timeout.
+  wait -n "$complete_pid" "$failed_pid" || true
+  kill "$complete_pid" "$failed_pid" 2>/dev/null || true
+  wait "$complete_pid" "$failed_pid" 2>/dev/null || true
+
+  local failed_status
+  failed_status="$("$kbin" get "job/$job_name" -n fhir \
+    -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+  if [[ "$failed_status" == "True" ]]; then
+    die "job/$job_name reached the Failed condition (more shards breached their k6 thresholds/errored than maxFailedIndexes tolerates) -- see 'kubectl describe job/$job_name -n fhir' and each failed shard's own logs"
+  fi
 }
 
 # Renders manifests/k6-shard-job/echis-k6-shard-job.yaml, applies it, and
@@ -1545,6 +1630,7 @@ cmd_benchmark_in_cluster() {
   dir="$(run_dir)"
   mkdir -p "$dir"
   local rendered="$dir/echis-k6-shard-job.rendered.yaml"
+  local job_name="echis-k6-shard-job"
   local configmap_name="echis-k6-shard-job-scripts"
   local pvc_name
   pvc_name="$(shard_output_pvc)"
@@ -1608,11 +1694,25 @@ cmd_benchmark_in_cluster() {
   log "Creating/updating ConfigMap $configmap_name from $k6_script"
   run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_load_100.js=\"$k6_script\" --from-file=fhir_benchmark.js=\"$ROOT_DIR/benchmarks/k6/lib/fhir_benchmark.js\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
 
+  # The Job name is always the fixed 'echis-k6-shard-job' (never
+  # per-run/label-suffixed), and a Kubernetes Job's pod template is
+  # immutable once created -- so a PRIOR run's Job (whether it Completed,
+  # Failed, or is still lingering after being abandoned) must be deleted
+  # before this run's `apply`, not just re-applied over. Root-caused live:
+  # re-applying an identical rendered manifest onto an already-Failed Job
+  # from an earlier run is a silent no-op ("job.batch/... unchanged", zero
+  # new pods created), and the immediately-following wait then reports
+  # that STALE Job's already-terminal Failed condition -- making a brand
+  # new benchmark trigger fail instantly with no new shards ever run.
+  # --ignore-not-found so the normal case (no prior Job) is a no-op here.
+  log "Deleting any prior $job_name Job so this run starts fresh"
+  run "$kbin" delete job "$job_name" -n fhir --ignore-not-found
+
   log "Applying rendered k6 shard Job: $rendered"
   run "$kbin" apply -f "$rendered"
 
-  log "Waiting for k6 shard Job to complete ($shard_count shard(s))"
-  run "$kbin" wait --for=condition=complete job/echis-k6-shard-job -n fhir --timeout=7200s
+  log "Waiting for k6 shard Job to finish ($shard_count shard(s))"
+  wait_for_shard_job "$kbin" "$job_name" "7200s"
 
   log "Job complete. Shard output lives on PVC $pvc_name; merge with:"
   log "  ruby scripts/merge_k6_shards.rb --shard-dir <path into PVC $pvc_name> --shard-count $shard_count --output $dir/k6-fhir-summary.json"
