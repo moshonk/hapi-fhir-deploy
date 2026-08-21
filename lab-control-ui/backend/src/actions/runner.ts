@@ -131,9 +131,21 @@ export function spawnAction(deps: RunnerDeps, input: SpawnActionInput): void {
 
   function finish(exitCode: number): void {
     logStream.end();
-    markActionRunFinished(deps.db, input.runId, exitCode);
-    emitter.emit('status', exitCode === 0 ? 'succeeded' : 'failed');
-    inFlight.delete(key);
+    // inFlight.delete(key) MUST run even if markActionRunFinished throws
+    // (e.g. a transient sqlite lock/error) -- otherwise the in-memory
+    // concurrency lock (FR-016) outlives the process it was guarding,
+    // permanently wedging this (labConfigurationId, actionName) pair:
+    // every future trigger 409s with "action already running" against a
+    // runId whose own DB row is stuck at status=running forever, with no
+    // operator-facing way to clear it short of restarting the server.
+    // Caught live: a run killed out-of-band (its child process reaped
+    // directly, not through this handler) left exactly this state.
+    try {
+      markActionRunFinished(deps.db, input.runId, exitCode);
+      emitter.emit('status', exitCode === 0 ? 'succeeded' : 'failed');
+    } finally {
+      inFlight.delete(key);
+    }
     // Give any attached SSE clients a tick to receive the final status
     // event before the emitter is dropped; readLogSoFar covers late joiners.
     setTimeout(() => runEmitters.delete(input.runId), 5000);
