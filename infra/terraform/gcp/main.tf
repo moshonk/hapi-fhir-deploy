@@ -210,6 +210,24 @@ resource "google_sql_database_instance" "postgres" {
       name  = "max_connections"
       value = tostring(var.db_max_connections)
     }
+
+    # Query Insights (no extra cost at this sampling level): enabled to
+    # diagnose a live finding from the load-profile benchmark (docs/
+    # autoscaling.md "Tail latency") -- Prometheus's hikaricp_connections_
+    # usage_seconds_max / http_server_requests_seconds_max showed a handful
+    # of requests per run holding a Postgres connection for 60-140s+, on
+    # both the native and PgBouncer tiers, well past k6's own 60s default
+    # request timeout (which was silently truncating/hiding the real tail).
+    # pg_stat_statements is not installed and Query Insights was previously
+    # off, so neither could attribute this to a specific query -- this flag
+    # turns Query Insights on so the next benchmark run's slow/lock-waiting
+    # queries are captured for inspection in Cloud SQL's Query Insights UI.
+    insights_config {
+      query_insights_enabled  = true
+      query_string_length     = 1024
+      record_application_tags = true
+      record_client_address   = true
+    }
   }
 
   deletion_protection = false
