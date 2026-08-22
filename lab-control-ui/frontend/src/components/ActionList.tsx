@@ -10,9 +10,11 @@
 import { useState } from 'react';
 import type { ActionDef, ActionRunSummary, PrereqCheck } from '../api/types.js';
 
-export interface BenchmarkTriggerOptions {
+export interface ActionTriggerOptions {
   inCluster?: boolean;
   parallelShards?: number;
+  restoreFromBackup?: boolean;
+  backupDir?: string;
 }
 
 export interface ActionListProps {
@@ -20,7 +22,21 @@ export interface ActionListProps {
   runs: ActionRunSummary[];
   prereqChecks: PrereqCheck[];
   runningActionName: string | null;
-  onTrigger: (action: ActionDef, benchmarkOptions?: BenchmarkTriggerOptions) => void;
+  /** This lab's own name and provider id, used only to prefill (never to
+   * authoritatively compute) the default database backup directory shown
+   * below -- mirrors gcp.ts's kubeconfigPathFor path convention
+   * (`ansible/artifacts/lab/{provider}/{lab_name}/...`). If the operator
+   * leaves it untouched, scripts/lab lands on this exact same default
+   * itself when --backup-dir is omitted, so the two never actually diverge
+   * in practice. Optional so callers that never render `seed`/`backup-db`
+   * (e.g. tests exercising only `benchmark`) don't need to supply them. */
+  labName?: string;
+  providerId?: string;
+  onTrigger: (action: ActionDef, options?: ActionTriggerOptions) => void;
+}
+
+function defaultBackupDir(providerId: string, labName: string): string {
+  return `ansible/artifacts/lab/${providerId}/${labName}/db-backup`;
 }
 
 function latestStatusFor(
@@ -35,6 +51,8 @@ export function ActionList({
   runs,
   prereqChecks,
   runningActionName,
+  labName = '',
+  providerId = '',
   onTrigger,
 }: ActionListProps) {
   // Trigger-time-only, not persisted lab config (gcp.ts's 'benchmark' case
@@ -42,6 +60,14 @@ export function ActionList({
   // pair of hooks here (rather than per-list-item) is sufficient.
   const [inCluster, setInCluster] = useState(false);
   const [parallelShards, setParallelShards] = useState(1);
+
+  // Same pattern for seed's restore-from-backup choice and backup-db's
+  // destination -- both ephemeral, both share one prefilled directory
+  // default so a backup taken via "Backup database" is exactly where
+  // "Seed synthetic data" looks for it without the operator retyping it.
+  const [restoreFromBackup, setRestoreFromBackup] = useState(false);
+  const [seedBackupDir, setSeedBackupDir] = useState(() => defaultBackupDir(providerId, labName));
+  const [backupDbDir, setBackupDbDir] = useState(() => defaultBackupDir(providerId, labName));
 
   return (
     <ul className="action-list">
@@ -65,9 +91,58 @@ export function ActionList({
         else if (sequenceBlocked) reason = `run ${action.sequenceAfter} successfully first`;
 
         const isBenchmark = action.name === 'benchmark';
+        const isSeed = action.name === 'seed';
+        const isBackupDb = action.name === 'backup-db';
 
         return (
           <li key={action.name} className="action-item">
+            {isSeed && (
+              <div className="seed-options">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={restoreFromBackup}
+                    onChange={(e) => setRestoreFromBackup(e.target.checked)}
+                  />
+                  Restore from backup instead of generating new data
+                </label>
+                {restoreFromBackup && (
+                  <label className="seed-backup-dir">
+                    Backup directory
+                    <input
+                      type="text"
+                      value={seedBackupDir}
+                      onChange={(e) => setSeedBackupDir(e.target.value)}
+                    />
+                  </label>
+                )}
+                {restoreFromBackup && (
+                  <p className="help-text">
+                    Restores a prior <strong>Backup database</strong> directory-format dump straight
+                    into the database instead of regenerating and re-loading synthetic data -- much
+                    faster on repeat runs. The directory must have been produced by
+                    <strong> Backup database</strong> against this same lab.
+                  </p>
+                )}
+              </div>
+            )}
+            {isBackupDb && (
+              <div className="backup-db-options">
+                <label className="seed-backup-dir">
+                  Backup directory
+                  <input
+                    type="text"
+                    value={backupDbDir}
+                    onChange={(e) => setBackupDbDir(e.target.value)}
+                  />
+                </label>
+                <p className="help-text">
+                  Overwrites any existing backup already at this path. Point{' '}
+                  <strong>Seed synthetic data</strong>'s "Restore from backup" at the same directory
+                  on a later run to reuse it.
+                </p>
+              </div>
+            )}
             {isBenchmark && (
               <div className="benchmark-options">
                 <label>
@@ -106,9 +181,20 @@ export function ActionList({
             <button
               type="button"
               disabled={disabled}
-              onClick={() =>
-                onTrigger(action, isBenchmark ? { inCluster, parallelShards } : undefined)
-              }
+              onClick={() => {
+                if (isBenchmark) {
+                  onTrigger(action, { inCluster, parallelShards });
+                } else if (isSeed) {
+                  onTrigger(
+                    action,
+                    restoreFromBackup ? { restoreFromBackup, backupDir: seedBackupDir } : undefined,
+                  );
+                } else if (isBackupDb) {
+                  onTrigger(action, { backupDir: backupDbDir });
+                } else {
+                  onTrigger(action, undefined);
+                }
+              }}
               title={reason ?? undefined}
             >
               {action.label}

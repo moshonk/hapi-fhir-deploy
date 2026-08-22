@@ -337,8 +337,27 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
+    // 'postgresql-client' is deliberately NOT listed here: restoring from a
+    // backup (an ephemeral, per-trigger choice -- see ActionList.tsx/
+    // routes/actions.ts, same pattern as benchmark's in_cluster) is only
+    // one of the two things this button can do. Requiring pg_dump/
+    // pg_restore up front would block the (much more common) generate-fresh
+    // path for operators who never intend to restore from a backup at all.
+    // If restore-from-backup IS chosen and the tool is genuinely missing,
+    // scripts/lab itself fails loudly at trigger time instead.
     requiredPrerequisiteIds: ['ruby'],
     sequenceAfter: 'deploy',
+  },
+  {
+    name: 'backup-db',
+    label: 'Backup database',
+    cliSubcommand: 'backup-db',
+    scope: 'common',
+    requiresConfirmation: false,
+    confirmationMessage: null,
+    requiredPrerequisiteIds: ['postgresql-client'],
+    // Backing up only makes sense once there's data worth keeping.
+    sequenceAfter: 'seed',
   },
   {
     name: 'provision-shard-storage',
@@ -598,21 +617,50 @@ export function gcpBuildCommand(
         FHIR_BASE_URL: f('fhir_base_url', 'http://localhost:8080/fhir'),
         LAB_SEED_GENERATOR_MODE: 'native',
       };
-      return {
-        argv: [
-          'seed',
+      // Ephemeral per-trigger option (routes/actions.ts / ActionList.tsx),
+      // not a persisted ConfigField -- same pattern as benchmark's
+      // in_cluster/parallel_shards. Restoring a prior `backup-db` dump is
+      // far faster than regenerating + re-loading synthetic data, but it's
+      // a choice an operator makes at the moment they click "Seed synthetic
+      // data", not part of the lab's saved configuration.
+      const restoreFromBackup = fieldValues.restore_from_backup === true;
+      // --cloud/--name are only load-bearing for the restore path (locates
+      // this lab's terraform-output.json for direct DB connection details)
+      // but are harmless to always pass -- scripts/lab's native/synthea
+      // generation paths never read them.
+      const argv = ['seed', '--cloud', 'gcp', '--name', labName];
+      if (restoreFromBackup) {
+        argv.push('--restore-from-backup', '--backup-dir', f('backup_dir'));
+      } else {
+        argv.push(
           '--households',
           f('households'),
           '--individuals-per-household',
           f('individuals_per_household'),
           '--seed',
           f('echis_seed'),
-          '--run',
-          cliRunLabel,
-        ],
-        env,
-      };
+        );
+      }
+      argv.push('--run', cliRunLabel);
+      return { argv, env };
     }
+
+    case 'backup-db':
+      return {
+        argv: [
+          'backup-db',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          // Ephemeral per-trigger option, same as seed's backup_dir --
+          // omitted entirely (rather than passed empty) so scripts/lab
+          // falls back to its own default (this lab's state_dir()/db-backup)
+          // when the operator hasn't overridden it.
+          ...(str(fieldValues.backup_dir, '').trim() ? ['--backup-dir', f('backup_dir')] : []),
+        ],
+        env: {},
+      };
 
     case 'provision-shard-storage':
       return {
@@ -745,6 +793,11 @@ export const gcpProvider: ProviderAdapter = {
     { id: 'ruby', label: 'Ruby', severity: 'blocking' },
     { id: 'k6', label: 'k6', severity: 'blocking' },
     { id: 'java', label: 'Java 17+', severity: 'blocking' },
+    {
+      id: 'postgresql-client',
+      label: 'PostgreSQL client (pg_dump/pg_restore)',
+      severity: 'blocking',
+    },
     { id: 'gcloud', label: 'gcloud CLI', severity: 'blocking' },
     { id: 'gke-gcloud-auth-plugin', label: 'gke-gcloud-auth-plugin', severity: 'blocking' },
     { id: 'gcloud-adc', label: 'gcloud Application Default Credentials', severity: 'warning' },

@@ -26,6 +26,8 @@ IN_CLUSTER=false
 REPLICAS=""
 PORT=""
 SOURCE_RANGES=""
+BACKUP_DIR=""
+RESTORE_FROM_BACKUP=false
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
@@ -47,6 +49,12 @@ Usage:
     (LAB_SEED_GENERATOR_MODE=native; add --in-cluster --parallel-shards N to run
     scripts/echis_seed.rb as a distributed Kubernetes Indexed Job instead of a
     single local process)
+  scripts/lab seed --restore-from-backup --cloud aws|azure|gcp --name NAME [--backup-dir DIR]
+    (skips Synthea/native generation entirely and pg_restore's a prior
+    `backup-db` directory-format dump straight into this lab's database --
+    much faster than regenerating + re-loading; --backup-dir defaults to
+    this lab's own backup directory, see `backup-db` below)
+  scripts/lab backup-db --cloud aws|azure|gcp --name NAME [--backup-dir DIR]
   scripts/lab benchmark --profile smoke|baseline|load|stress [--echis-tier T2|T3|T4|T5] [--run RUN_ID]
     (add --in-cluster --parallel-shards N to run benchmarks/k6/echis_load_100.js
     as a distributed Kubernetes Indexed Job instead of a single local k6 process;
@@ -77,6 +85,18 @@ Commands:
                        reused by `up` and `doctor` alike, so the two can never silently drift apart.
   deploy               Run the provider-neutral Ansible deployment workflow.
   seed                 Generate deterministic Synthea FHIR data and optionally invoke a loader.
+                       Pass --restore-from-backup (plus --cloud/--name) to skip generation
+                       entirely and pg_restore a prior `backup-db` dump straight into the
+                       database instead -- see `backup-db` below.
+  backup-db            pg_dump this lab's database (directory format, parallel jobs) to
+                       --backup-dir (defaults to this lab's own artifact directory) so it can
+                       be pg_restore'd back in via `seed --restore-from-backup` on a later run
+                       instead of regenerating and re-POSTing synthetic data from scratch.
+                       Connects directly to the database using this lab's `up`-time Terraform
+                       outputs (terraform-output.json) -- requires network reachability to the
+                       database (e.g. running on a host inside the same VPC) and pg_dump/
+                       pg_restore installed locally. Overwrites any existing backup at the same
+                       --backup-dir.
   benchmark            Run a k6 FHIR benchmark profile. By default, auto-detects a
                        kubeconfig (LAB_KUBECONFIG > KUBECONFIG > --cloud/--name's
                        generated one) and streams live metrics to Prometheus's
@@ -188,7 +208,14 @@ Environment:
                           synthea (default, existing behavior unchanged) or native
                           (invokes scripts/echis_seed.rb directly with --households,
                           skipping Synthea entirely; requires --households not
-                          --patients).
+                          --patients). Ignored entirely by `seed --restore-from-backup`.
+  PG_DUMP_BIN             pg_dump executable; defaults to pg_dump. Used by `backup-db`.
+  PG_RESTORE_BIN          pg_restore executable; defaults to pg_restore. Used by
+                          `seed --restore-from-backup`.
+  BACKUP_JOBS             Parallel pg_dump/pg_restore worker jobs for `backup-db` and
+                          `seed --restore-from-backup`; defaults to 4. Directory-format
+                          dump/restore is required for this to have any effect (plain
+                          format dumps are always single-threaded).
   KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster,
                           pause-autoscaling, and resume-autoscaling.
   LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
@@ -325,6 +352,15 @@ parse_args() {
         [[ -n "${2:-}" ]] || die "--source-ranges requires a value"
         SOURCE_RANGES="$2"
         shift 2
+        ;;
+      --backup-dir)
+        [[ -n "${2:-}" ]] || die "--backup-dir requires a value"
+        BACKUP_DIR="$2"
+        shift 2
+        ;;
+      --restore-from-backup)
+        RESTORE_FROM_BACKUP=true
+        shift
         ;;
       --format)
         [[ -n "${2:-}" ]] || die "--format requires a value (text or json)"
@@ -908,6 +944,16 @@ PYEOF
     add_prereq_check "java" "Java 17+" "fail" "java not found -- used by Synthea seed generation: https://adoptium.net/installation/"
   fi
 
+  # Only 'backup-db' and 'seed --restore-from-backup' need this -- most
+  # seed runs never touch it, so this deliberately isn't required by 'seed'
+  # itself (the Lab Control UI's requiredPrerequisiteIds only lists it on
+  # backup-db; see lab-control-ui/backend/src/providers/gcp.ts).
+  if command -v "${PG_DUMP_BIN:-pg_dump}" >/dev/null 2>&1 && command -v "${PG_RESTORE_BIN:-pg_restore}" >/dev/null 2>&1; then
+    add_prereq_check "postgresql-client" "PostgreSQL client (pg_dump/pg_restore)" "pass" "present"
+  else
+    add_prereq_check "postgresql-client" "PostgreSQL client (pg_dump/pg_restore)" "fail" "pg_dump/pg_restore not found -- only needed for 'backup-db' and 'seed --restore-from-backup': https://www.postgresql.org/download/"
+  fi
+
   case "$CLOUD" in
     gcp)
       if command -v gcloud >/dev/null 2>&1; then
@@ -1166,7 +1212,141 @@ render_job_manifest() {
   sed "${sed_args[@]}" "$template" > "$rendered"
 }
 
+# Reads database_endpoint/database_port/database_name/database_username/
+# database_password out of a `terraform output -json` file (written by
+# write_terraform_outputs during `up`/`provision-shard-storage` into this
+# lab's state_dir()) and exports them as the PG* env vars libpq's own
+# client tools (pg_dump, pg_restore, psql, ...) read automatically -- no
+# --host/--port/... flags needed on any call site below. Every cloud module
+# (infra/terraform/{aws,azure,gcp}/outputs.tf) exposes these same five keys,
+# so this is cloud-agnostic despite Cloud SQL/RDS/Flexible Server having
+# very different provisioning underneath.
+db_connection_from_terraform_output() {
+  local output_file="$1"
+  [[ -f "$output_file" ]] || die "Terraform output not found for $CLOUD lab '$NAME': $output_file (run 'up' first)"
+
+  local exports
+  exports="$("${RUBY_BIN:-ruby}" -rjson -e '
+    data = JSON.parse(File.read(ARGV[0]))
+    keys = %w[database_endpoint database_port database_name database_username database_password]
+    keys.each do |key|
+      value = data.dig(key, "value")
+      abort "missing terraform output '\''#{key}'\'' in #{ARGV[0]}" if value.nil?
+      puts "#{key}=#{value}"
+    end
+  ' "$output_file")" || die "failed to read database connection details from $output_file"
+
+  local line key value
+  while IFS='=' read -r key value; do
+    case "$key" in
+      database_endpoint) PGHOST="$value" ;;
+      database_port) PGPORT="$value" ;;
+      database_name) PGDATABASE="$value" ;;
+      database_username) PGUSER="$value" ;;
+      database_password) PGPASSWORD="$value" ;;
+    esac
+  done <<<"$exports"
+  export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+}
+
+# Default backup location for a given lab: namespaced under its own
+# state_dir() (same directory `up` already writes terraform-output.json
+# and kubeconfig into) so backups from different labs never collide and
+# `down` tearing down one lab's Terraform state doesn't touch another's.
+db_backup_dir_default() {
+  printf '%s/db-backup' "$(state_dir)"
+}
+
+# pg_dump's directory format (-Fd) instead of a single custom-format file:
+# supports parallel jobs (-j) in both directions, which matters at the
+# T2/T3 row counts this lab seeds -- and the operator explicitly wants a
+# *directory* they can point --backup-dir at, not an opaque single file.
+cmd_backup_db() {
+  require_cloud
+  require_name
+
+  local dir
+  dir="$(state_dir)"
+  local terraform_output_file="$dir/terraform-output.json"
+  local backup_dir="${BACKUP_DIR:-$(db_backup_dir_default)}"
+  local jobs="${BACKUP_JOBS:-4}"
+  local pg_dump_bin="${PG_DUMP_BIN:-pg_dump}"
+  need_command_unless_dry_run "$pg_dump_bin"
+
+  if [[ "$DRY_RUN" == true && ! -f "$terraform_output_file" ]]; then
+    log "Dry run: Terraform output file is not present yet: $terraform_output_file"
+  else
+    db_connection_from_terraform_output "$terraform_output_file"
+  fi
+
+  log "Backing up database '${PGDATABASE:-<unknown, dry run>}' at ${PGHOST:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} to $backup_dir (directory format, $jobs parallel job(s))"
+  # pg_dump -Fd refuses to write into a non-empty directory; this backup
+  # location is meant to be overwritten by each successive `backup-db`, not
+  # accumulated, so clear it first rather than requiring the operator to
+  # manage that themselves.
+  if [[ "$DRY_RUN" != true ]]; then
+    rm -rf "$backup_dir"
+    mkdir -p "$(dirname "$backup_dir")"
+  fi
+  run "$pg_dump_bin" --format=directory --jobs="$jobs" --no-owner --no-privileges --file="$backup_dir" "${PGDATABASE:-}"
+
+  if [[ "$DRY_RUN" != true ]]; then
+    "${RUBY_BIN:-ruby}" -rjson -rtime -e '
+      File.write(ARGV[0], JSON.pretty_generate({
+        "database" => ARGV[1],
+        "host" => ARGV[2],
+        "created_at" => Time.now.utc.iso8601,
+      }))
+    ' "$backup_dir/lab-backup-metadata.json" "$PGDATABASE" "$PGHOST"
+  fi
+
+  log "Backup complete: $backup_dir (pass --restore-from-backup --backup-dir $backup_dir to 'seed' on a later run to reuse it)"
+}
+
+# Restores a prior `backup-db` directory-format dump straight into this
+# lab's database instead of regenerating + re-POSTing synthetic data via
+# Synthea/echis_seed.rb -- called from cmd_seed below when
+# --restore-from-backup is set, bypassing SEED_GENERATOR_MODE entirely
+# (restoring is generator-agnostic; whichever generator originally produced
+# the backup doesn't matter once it's a database dump).
+cmd_seed_restore_from_backup() {
+  require_cloud
+  require_name
+
+  local dir
+  dir="$(state_dir)"
+  local terraform_output_file="$dir/terraform-output.json"
+  local backup_dir="${BACKUP_DIR:-$(db_backup_dir_default)}"
+  local jobs="${BACKUP_JOBS:-4}"
+  local pg_restore_bin="${PG_RESTORE_BIN:-pg_restore}"
+  need_command_unless_dry_run "$pg_restore_bin"
+
+  if [[ "$DRY_RUN" == true && ! -d "$backup_dir" ]]; then
+    log "Dry run: backup directory is not present yet: $backup_dir"
+  else
+    [[ -d "$backup_dir" ]] || die "backup directory not found: $backup_dir (run 'backup-db' first, or pass --backup-dir)"
+  fi
+
+  if [[ "$DRY_RUN" == true && ! -f "$terraform_output_file" ]]; then
+    log "Dry run: Terraform output file is not present yet: $terraform_output_file"
+  else
+    db_connection_from_terraform_output "$terraform_output_file"
+  fi
+
+  log "Restoring database '${PGDATABASE:-<unknown, dry run>}' at ${PGHOST:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} from backup $backup_dir ($jobs parallel job(s)) instead of generating new synthetic data"
+  # --clean --if-exists: this database was already seeded once (that's how
+  # the backup was produced), so drop its existing objects before restoring
+  # rather than failing on every already-exists conflict.
+  run "$pg_restore_bin" --format=directory --jobs="$jobs" --clean --if-exists --no-owner --no-privileges --dbname="${PGDATABASE:-}" "$backup_dir"
+  log "Restore complete from $backup_dir"
+}
+
 cmd_seed() {
+  if [[ "$RESTORE_FROM_BACKUP" == true ]]; then
+    cmd_seed_restore_from_backup
+    return 0
+  fi
+
   case "$SEED_GENERATOR_MODE" in
     synthea|native) ;;
     *) die "unsupported LAB_SEED_GENERATOR_MODE '$SEED_GENERATOR_MODE'; expected synthea or native" ;;
@@ -2480,6 +2660,7 @@ case "$COMMAND" in
   doctor) cmd_doctor ;;
   deploy) cmd_deploy ;;
   seed) cmd_seed ;;
+  backup-db) cmd_backup_db ;;
   benchmark) cmd_benchmark ;;
   report) cmd_report ;;
   down) cmd_down ;;

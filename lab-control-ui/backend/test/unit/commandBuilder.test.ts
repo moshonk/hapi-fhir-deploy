@@ -235,6 +235,10 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     const cmd = run('seed');
     expect(cmd.argv).toEqual([
       'seed',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
       '--households',
       '33333',
       '--individuals-per-household',
@@ -248,6 +252,51 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       FHIR_BASE_URL: 'http://localhost:8080/fhir',
       LAB_SEED_GENERATOR_MODE: 'native',
     });
+  });
+
+  it("seed (restore_from_backup: true skips generation and pg_restore's the given directory)", () => {
+    const cmd = run('seed', {
+      restore_from_backup: true,
+      backup_dir: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    });
+    expect(cmd.argv).toEqual([
+      'seed',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--restore-from-backup',
+      '--backup-dir',
+      'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+      '--run',
+      'hapi-fhir-lab-20260101-000000',
+    ]);
+    expect(cmd.env).toEqual({
+      FHIR_BASE_URL: 'http://localhost:8080/fhir',
+      LAB_SEED_GENERATOR_MODE: 'native',
+    });
+  });
+
+  it('backup-db (explicit backup_dir)', () => {
+    const cmd = run('backup-db', {
+      backup_dir: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    });
+    expect(cmd.argv).toEqual([
+      'backup-db',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--backup-dir',
+      'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    ]);
+    expect(cmd.env).toEqual({});
+  });
+
+  it('backup-db (no backup_dir -- omits --backup-dir so scripts/lab applies its own default)', () => {
+    const cmd = run('backup-db');
+    expect(cmd.argv).toEqual(['backup-db', '--cloud', 'gcp', '--name', 'hapi-fhir-lab']);
+    expect(cmd.env).toEqual({});
   });
 
   it('benchmark (T3 tier -> echis_load_1000.js)', () => {
@@ -367,7 +416,7 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     const cmd = run('seed');
     const preview = formatCommandPreview(cmd);
     expect(preview).toBe(
-      'FHIR_BASE_URL=http://localhost:8080/fhir LAB_SEED_GENERATOR_MODE=native scripts/lab seed --households 33333 --individuals-per-household 3 --seed 12345 --run hapi-fhir-lab-20260101-000000',
+      'FHIR_BASE_URL=http://localhost:8080/fhir LAB_SEED_GENERATOR_MODE=native scripts/lab seed --cloud gcp --name hapi-fhir-lab --households 33333 --individuals-per-household 3 --seed 12345 --run hapi-fhir-lab-20260101-000000',
     );
   });
 

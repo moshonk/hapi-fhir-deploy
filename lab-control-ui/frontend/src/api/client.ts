@@ -143,6 +143,15 @@ export interface TriggerActionOptions {
    * `echis-shard-output` (e.g. GCP Filestore) -- plain GCE PD storage
    * classes only support ReadWriteOnce, i.e. shards=1. */
   parallelShards?: number;
+  /** `seed` only: restore a prior `backup-db` directory-format pg_dump
+   * straight into the database instead of generating fresh synthetic data.
+   * Requires `backupDir`. Much faster than regenerating + re-loading. */
+  restoreFromBackup?: boolean;
+  /** `seed` (with restoreFromBackup) + `backup-db`: the pg_dump/pg_restore
+   * directory path -- restore source for `seed`, backup destination for
+   * `backup-db`. Defaults server-side to this lab's own backup directory
+   * when omitted for `backup-db`; required for `seed`'s restore path. */
+  backupDir?: string;
 }
 
 export async function triggerAction(

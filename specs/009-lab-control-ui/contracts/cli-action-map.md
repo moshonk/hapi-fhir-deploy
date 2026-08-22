@@ -22,7 +22,8 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 | `pause-autoscaling` | `pause-autoscaling --replicas {pause_replicas}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `resume-autoscaling` | `resume-autoscaling` (env: `KUBECONFIG` as above) | No |
 | `provision-shard-storage` | `provision-shard-storage --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --capacity-gb {shard_output_capacity_gb}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path -- its PV/PVC apply step shells out to `kubectl`, same requirement as `expose-fhir`/`pause-autoscaling`) | Yes — billable Filestore instance creation |
-| `seed` | `seed --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`) | No |
+| `seed` | Generate (default): `seed --cloud gcp --name {lab_name} --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`). Restore (`restoreFromBackup` trigger option): `seed --cloud gcp --name {lab_name} --restore-from-backup --backup-dir {backupDir} --run {cliRunLabel}` (same env) | No |
+| `backup-db` | `backup-db --cloud gcp --name {lab_name} [--backup-dir {backupDir}]` | No |
 | `benchmark` | `benchmark --profile {k6_profile} [--echis-tier {echis_tier}] --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `K6_SCRIPT` per tier, `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `report` | `report --run {cliRunLabel} --cloud gcp --name {lab_name} --profile {k6_profile}` | No |
 | `down` | `down --cloud gcp --name {lab_name} --yes --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version}` | Yes — destroys infrastructure |
@@ -31,6 +32,24 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 
 Notes:
 
+- `restoreFromBackup`/`backupDir` (`seed`) and `backupDir` (`backup-db`) are
+  ephemeral per-trigger request-body options (`POST /api/labs/:id/actions/seed`
+  and `.../backup-db`), not persisted `ConfigField`s -- same pattern as
+  `benchmark`'s `inCluster`/`parallelShards`. `backup-db` pg_dumps this lab's
+  database (directory format, parallel jobs) to `backupDir` (server-side
+  default: this lab's own `state_dir()/db-backup` when omitted); `seed`'s
+  restore path pg_restores that same directory straight back in, skipping
+  Synthea/native generation entirely -- much faster on repeat runs than
+  regenerating and re-POSTing synthetic data. `restoreFromBackup: true`
+  requires a non-empty `backupDir`; the trigger endpoint refuses with `400`
+  otherwise. Both actions require `--cloud`/`--name` (unlike `seed`'s
+  generate path) to locate this lab's `terraform-output.json`, which is
+  where the database connection details (`database_endpoint`,
+  `database_port`, `database_name`, `database_username`,
+  `database_password` -- identical output keys across every cloud module)
+  come from; direct network reachability to the database from the host
+  running `scripts/lab` is required (e.g. inside the same VPC as a
+  private-IP Cloud SQL/RDS/Flexible Server instance).
 - `cliRunLabel` for `seed`/`benchmark`/`report` is derived from `lab_name`
   plus a short suffix disambiguating repeated runs against the same lab
   (e.g. `{lab_name}-{short-timestamp}`), not a separate form field — matches

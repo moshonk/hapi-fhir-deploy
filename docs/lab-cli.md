@@ -112,6 +112,40 @@ local process — see `docs/echis-benchmark-tiers.md` and
 `manifests/seed-job/README.md` for the ConfigMap/PVC prerequisites and the
 `scripts/merge_seed_shards.rb` follow-up step this leaves for the operator.
 
+#### Backup and restore (faster repeat seeding)
+
+Generating (and, for Synthea mode, re-POSTing) synthetic data from scratch on
+every run gets slow at T2/T3 scale. `backup-db` snapshots a lab's database
+straight to disk so a later `seed --restore-from-backup` can load that same
+snapshot back in far faster than regenerating it:
+
+```sh
+# After a seed run you want to reuse later:
+scripts/lab backup-db --cloud gcp --name hapi-lab-t3
+
+# On a later run, against a freshly `up`/`deploy`'d lab with the same schema:
+scripts/lab seed --restore-from-backup --cloud gcp --name hapi-lab-t3
+```
+
+Both require `--cloud`/`--name` (unlike `seed`'s generate path) to locate
+this lab's `terraform-output.json` (written by `up`), which is where the
+database connection details come from — `pg_dump`/`pg_restore` connect
+directly to the database, so the host running `scripts/lab` needs network
+reachability to it (e.g. running on a GCE VM inside the same VPC as a
+private-IP Cloud SQL instance) and `pg_dump`/`pg_restore` installed
+(`PG_DUMP_BIN`/`PG_RESTORE_BIN` to override which executable). Dumps use
+directory format (parallelizable via `BACKUP_JOBS`, default `4`) at
+`--backup-dir`, which defaults to `ansible/artifacts/lab/<cloud>/<name>/db-backup`
+and is overwritten on every `backup-db` run. The restore applies
+`--clean --if-exists`, so it's safe to run against a database that already
+has a prior seed's data. This is independent of `LAB_SEED_GENERATOR_MODE` —
+restoring skips Synthea/native generation entirely regardless of which mode
+originally produced the backup.
+
+The Lab Control UI (`specs/009-lab-control-ui`) surfaces this as a "Backup
+database" button plus a "Restore from backup" checkbox (with a prefilled
+backup directory) on "Seed synthetic data".
+
 ### Benchmark
 
 ```sh

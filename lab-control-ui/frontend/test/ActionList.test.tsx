@@ -55,10 +55,10 @@ describe('ActionList', () => {
 
     expect(screen.queryByLabelText(/parallel shards/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Run k6 benchmark' }));
-    expect(onTrigger).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'benchmark' }),
-      { inCluster: false, parallelShards: 1 },
-    );
+    expect(onTrigger).toHaveBeenCalledWith(expect.objectContaining({ name: 'benchmark' }), {
+      inCluster: false,
+      parallelShards: 1,
+    });
   });
 
   it('checking "Run in-cluster" reveals the shard count input and threads both through onTrigger', () => {
@@ -78,9 +78,79 @@ describe('ActionList', () => {
     fireEvent.change(shardInput, { target: { value: '5' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Run k6 benchmark' }));
-    expect(onTrigger).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'benchmark' }),
-      { inCluster: true, parallelShards: 5 },
+    expect(onTrigger).toHaveBeenCalledWith(expect.objectContaining({ name: 'benchmark' }), {
+      inCluster: true,
+      parallelShards: 5,
+    });
+  });
+
+  it('defaults seed to generating fresh data (no restore options threaded through)', () => {
+    const onTrigger = vi.fn();
+    render(
+      <ActionList
+        actions={[action({ name: 'seed', label: 'Seed synthetic data', cliSubcommand: 'seed' })]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        labName="hapi-fhir-lab"
+        providerId="gcp"
+        onTrigger={onTrigger}
+      />,
     );
+
+    expect(screen.queryByLabelText(/backup directory/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Seed synthetic data' }));
+    expect(onTrigger).toHaveBeenCalledWith(expect.objectContaining({ name: 'seed' }), undefined);
+  });
+
+  it('checking "Restore from backup" reveals a prefilled backup directory and threads both through onTrigger', () => {
+    const onTrigger = vi.fn();
+    render(
+      <ActionList
+        actions={[action({ name: 'seed', label: 'Seed synthetic data', cliSubcommand: 'seed' })]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        labName="hapi-fhir-lab"
+        providerId="gcp"
+        onTrigger={onTrigger}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText(/restore from backup/i));
+    const dirInput = screen.getByLabelText(/backup directory/i);
+    expect(dirInput).toHaveValue('ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup');
+    fireEvent.change(dirInput, { target: { value: '/tmp/my-backup' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Seed synthetic data' }));
+    expect(onTrigger).toHaveBeenCalledWith(expect.objectContaining({ name: 'seed' }), {
+      restoreFromBackup: true,
+      backupDir: '/tmp/my-backup',
+    });
+  });
+
+  it('backup-db always threads a prefilled backup directory through onTrigger', () => {
+    const onTrigger = vi.fn();
+    render(
+      <ActionList
+        actions={[
+          action({ name: 'backup-db', label: 'Backup database', cliSubcommand: 'backup-db' }),
+        ]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        labName="hapi-fhir-lab"
+        providerId="gcp"
+        onTrigger={onTrigger}
+      />,
+    );
+
+    const dirInput = screen.getByLabelText(/backup directory/i);
+    expect(dirInput).toHaveValue('ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Backup database' }));
+    expect(onTrigger).toHaveBeenCalledWith(expect.objectContaining({ name: 'backup-db' }), {
+      backupDir: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    });
   });
 });

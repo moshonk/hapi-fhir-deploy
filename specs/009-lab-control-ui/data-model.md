@@ -15,7 +15,7 @@ feature). Documented here because every other entity below is shaped by it.
 | `label` | string | Display name, e.g. "Google Cloud (GKE + Cloud SQL)". |
 | `configFields` | `ConfigField[]` | This provider's field schema (below). |
 | `actions` | `ActionDef[]` | This provider's available actions (below). |
-| `prerequisiteChecks` | `PrerequisiteCheckDef[]` | Provider-specific checks layered on top of the provider-agnostic list (Ruby/k6/Java/Terraform/Helm/kubectl/Ansible apply to every provider; `gcloud`/`gke-gcloud-auth-plugin`/ADC are GCP-only). |
+| `prerequisiteChecks` | `PrerequisiteCheckDef[]` | Provider-specific checks layered on top of the provider-agnostic list (Ruby/k6/Java/Terraform/Helm/kubectl/Ansible/PostgreSQL client apply to every provider; `gcloud`/`gke-gcloud-auth-plugin`/ADC are GCP-only). |
 
 ### ConfigField
 

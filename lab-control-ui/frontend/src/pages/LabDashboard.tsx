@@ -5,7 +5,7 @@
 // into a separately-derived message (FR-006).
 
 import { useState } from 'react';
-import { ActionList, type BenchmarkTriggerOptions } from '../components/ActionList.js';
+import { ActionList, type ActionTriggerOptions } from '../components/ActionList.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ExposurePanel } from '../components/ExposurePanel.js';
 import { LogViewer } from '../components/LogViewer.js';
@@ -34,7 +34,7 @@ interface PendingConfirm {
    * -- e.g. names the actual configured expose_source_ranges, not a
    * generic warning. Never the raw {field_key}-templated ActionDef string. */
   message: string;
-  benchmarkOptions?: BenchmarkTriggerOptions;
+  triggerOptions?: ActionTriggerOptions;
 }
 
 interface ActiveRun {
@@ -60,12 +60,17 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
   async function fire(
     action: ActionDef,
     confirmed: boolean,
-    benchmarkOptions?: BenchmarkTriggerOptions,
+    triggerOptions?: ActionTriggerOptions,
   ) {
     setTriggerError(null);
     try {
-      const result = await triggerAction(lab.id, action.name, { confirmed, ...benchmarkOptions });
-      setActiveRun({ id: result.actionRunId, action, startedAt: new Date().toISOString(), endedAt: null });
+      const result = await triggerAction(lab.id, action.name, { confirmed, ...triggerOptions });
+      setActiveRun({
+        id: result.actionRunId,
+        action,
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+      });
       setRunningActionName(action.name);
     } catch (err) {
       if (
@@ -78,7 +83,7 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
         if (body.confirmationMessage) {
           // Show the dialog with the SERVER-RESOLVED message (live field
           // values already interpolated) rather than a static template.
-          setPendingConfirm({ action, message: body.confirmationMessage, benchmarkOptions });
+          setPendingConfirm({ action, message: body.confirmationMessage, triggerOptions });
           return;
         }
       }
@@ -88,7 +93,7 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
     }
   }
 
-  function handleTrigger(action: ActionDef, benchmarkOptions?: BenchmarkTriggerOptions) {
+  function handleTrigger(action: ActionDef, triggerOptions?: ActionTriggerOptions) {
     if (!lab.launchable) {
       setTriggerError('Fill in every required field before triggering actions.');
       return;
@@ -98,13 +103,13 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
     // confirmationMessage, which fire()'s catch block turns into the dialog
     // above. There's no local shortcut using the (unresolved) static
     // ActionDef.confirmationMessage from GET /api/providers.
-    void fire(action, false, benchmarkOptions);
+    void fire(action, false, triggerOptions);
   }
 
   function handleConfirm() {
     const pending = pendingConfirm;
     setPendingConfirm(null);
-    if (pending) void fire(pending.action, true, pending.benchmarkOptions);
+    if (pending) void fire(pending.action, true, pending.triggerOptions);
   }
 
   function handleRunStatus() {
@@ -136,6 +141,8 @@ export function LabDashboard({ provider, lab, runs, onRunTriggered }: LabDashboa
         runs={runs}
         prereqChecks={checks ?? []}
         runningActionName={runningActionName}
+        labName={String(lab.fields.lab_name ?? '')}
+        providerId={provider.id}
         onTrigger={handleTrigger}
       />
 

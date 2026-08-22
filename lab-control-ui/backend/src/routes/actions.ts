@@ -85,6 +85,8 @@ export function createActionsRouter(deps: AppDeps): Router {
       targetRunId?: unknown;
       inCluster?: unknown;
       parallelShards?: unknown;
+      restoreFromBackup?: unknown;
+      backupDir?: unknown;
     };
     const confirmed = body.confirmed === true;
     const overridePrerequisites = body.overridePrerequisites === true;
@@ -103,6 +105,16 @@ export function createActionsRouter(deps: AppDeps): Router {
         return;
       }
       parallelShards = n;
+    }
+
+    // `seed`-only, ephemeral trigger-time options (gcp.ts's 'seed' case doc
+    // comment) -- same pattern as inCluster/parallelShards above. `backup-db`
+    // reuses just backupDir (as its destination rather than a restore source).
+    const restoreFromBackup = actionName === 'seed' && body.restoreFromBackup === true;
+    const backupDir = typeof body.backupDir === 'string' ? body.backupDir.trim() : '';
+    if (restoreFromBackup && !backupDir) {
+      res.status(400).json({ error: 'backupDir is required when restoreFromBackup is true' });
+      return;
     }
 
     // FR-016: refuse a second concurrent trigger before anything else.
@@ -157,12 +169,16 @@ export function createActionsRouter(deps: AppDeps): Router {
       return;
     }
 
-    // Only threaded onto fieldValues for `benchmark` -- harmless no-ops for
-    // every other action, since none of them read in_cluster/parallel_shards.
-    const fieldValues =
-      actionName === 'benchmark' && inCluster
-        ? { ...lab.fields, in_cluster: true, parallel_shards: parallelShards }
-        : lab.fields;
+    // Only threaded onto fieldValues for the action that reads them --
+    // harmless no-ops for every other action.
+    let fieldValues = lab.fields;
+    if (actionName === 'benchmark' && inCluster) {
+      fieldValues = { ...lab.fields, in_cluster: true, parallel_shards: parallelShards };
+    } else if (actionName === 'seed' && restoreFromBackup) {
+      fieldValues = { ...lab.fields, restore_from_backup: true, backup_dir: backupDir };
+    } else if (actionName === 'backup-db' && backupDir) {
+      fieldValues = { ...lab.fields, backup_dir: backupDir };
+    }
 
     let cmd;
     try {
