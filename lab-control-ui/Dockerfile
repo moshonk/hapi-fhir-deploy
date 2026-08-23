@@ -86,12 +86,15 @@ RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.35.6/bin/li
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client
 
-# --- Ruby, OpenJDK 17, Python (for Ansible), git (scripts/lab's repo-root detection) ---
+# --- Ruby, OpenJDK 17, Python (for Ansible), git (scripts/lab's repo-root
+# detection), postgresql-client (pg_dump/pg_restore for backup-db / seed
+# --restore-from-backup) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ruby-full \
       openjdk-17-jre-headless \
       python3 python3-pip python3-venv \
       git \
+      postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Ansible (pip, pinned to match ansible/requirements.txt exactly) ---
