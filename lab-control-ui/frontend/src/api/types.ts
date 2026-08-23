@@ -14,15 +14,26 @@ export interface ConfigField {
   cliMapping: string;
 }
 
+/** Mirrors backend/src/providers/types.ts's ActionGroupId. */
+export type ActionGroupId = 'lifecycle' | 'data' | 'scaling' | 'benchmark' | 'exposure';
+
 export interface ActionDef {
   name: string;
   label: string;
+  /** Plain-language, jargon-free explanation of what this button does,
+   * shown as a hover tooltip. Optional -- absent for an action a provider
+   * hasn't filled it in for yet. */
+  description?: string;
+  /** Which section of the action list this button renders under. Optional
+   * -- an action without one renders in a catch-all "Other" section. */
+  group?: ActionGroupId;
   cliSubcommand: string;
   scope: ConfigFieldScope;
   requiresConfirmation: boolean;
   confirmationMessage: string | null;
   requiredPrerequisiteIds: string[];
   sequenceAfter?: string;
+  sequenceAfterAnySuccess?: boolean;
 }
 
 export interface ProviderPublicShape {

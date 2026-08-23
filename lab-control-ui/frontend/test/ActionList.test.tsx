@@ -8,7 +8,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { ActionList } from '../src/components/ActionList.js';
-import type { ActionDef } from '../src/api/types.js';
+import type { ActionDef, ActionRunSummary } from '../src/api/types.js';
 
 function action(overrides: Partial<ActionDef> = {}): ActionDef {
   return {
@@ -19,6 +19,18 @@ function action(overrides: Partial<ActionDef> = {}): ActionDef {
     requiresConfirmation: false,
     confirmationMessage: null,
     requiredPrerequisiteIds: [],
+    ...overrides,
+  };
+}
+
+function run(overrides: Partial<ActionRunSummary> = {}): ActionRunSummary {
+  return {
+    id: 'run-1',
+    action_name: 'seed',
+    status: 'succeeded',
+    started_at: null,
+    ended_at: null,
+    exit_code: 0,
     ...overrides,
   };
 }
@@ -152,5 +164,151 @@ describe('ActionList', () => {
     expect(onTrigger).toHaveBeenCalledWith(expect.objectContaining({ name: 'backup-db' }), {
       backupDir: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
     });
+  });
+
+  it("shows the action's plain-language description as the button's hover tooltip", () => {
+    render(
+      <ActionList
+        actions={[
+          action({
+            name: 'down',
+            label: 'Destroy infrastructure',
+            description: 'Permanently deletes everything for this lab. This cannot be undone.',
+          }),
+        ]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Destroy infrastructure' })).toHaveAttribute(
+      'title',
+      'Permanently deletes everything for this lab. This cannot be undone.',
+    );
+  });
+
+  it('appends the disabled reason after the description in the tooltip, rather than replacing it', () => {
+    render(
+      <ActionList
+        actions={[
+          action({
+            name: 'benchmark',
+            label: 'Run k6 benchmark',
+            description: 'Runs a load test.',
+            sequenceAfter: 'seed',
+          }),
+        ]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Run k6 benchmark' })).toHaveAttribute(
+      'title',
+      'Runs a load test.\n\nrun seed successfully first',
+    );
+  });
+
+  it('disables a sequenceAfter action whose named action never succeeded, even once', () => {
+    render(
+      <ActionList
+        actions={[
+          action({ name: 'benchmark', label: 'Run k6 benchmark', sequenceAfter: 'seed' }),
+        ]}
+        runs={[run({ status: 'failed' })]}
+        prereqChecks={[]}
+        runningActionName={null}
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Run k6 benchmark' })).toBeDisabled();
+  });
+
+  it('keeps a sequenceAfterAnySuccess action enabled once its named action ever succeeded, even if the most recent run of it later failed', () => {
+    render(
+      <ActionList
+        actions={[
+          action({
+            name: 'backup-db',
+            label: 'Backup database',
+            cliSubcommand: 'backup-db',
+            sequenceAfter: 'seed',
+            sequenceAfterAnySuccess: true,
+          }),
+        ]}
+        runs={[run({ id: 'run-1', status: 'failed' }), run({ id: 'run-2', status: 'succeeded' })]}
+        prereqChecks={[]}
+        runningActionName={null}
+        labName="hapi-fhir-lab"
+        providerId="gcp"
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Backup database' })).not.toBeDisabled();
+  });
+
+  it('disables a sequenceAfterAnySuccess action when its named action has never once succeeded', () => {
+    render(
+      <ActionList
+        actions={[
+          action({
+            name: 'backup-db',
+            label: 'Backup database',
+            cliSubcommand: 'backup-db',
+            sequenceAfter: 'seed',
+            sequenceAfterAnySuccess: true,
+          }),
+        ]}
+        runs={[run({ status: 'failed' })]}
+        prereqChecks={[]}
+        runningActionName={null}
+        labName="hapi-fhir-lab"
+        providerId="gcp"
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Backup database' })).toBeDisabled();
+  });
+
+  it('renders each group heading once, in a fixed order, regardless of the order actions were passed in', () => {
+    render(
+      <ActionList
+        actions={[
+          action({ name: 'benchmark', label: 'Run k6 benchmark', group: 'benchmark' }),
+          action({ name: 'up', label: 'Provision infrastructure', group: 'lifecycle' }),
+          action({ name: 'seed', label: 'Seed synthetic data', group: 'data' }),
+          action({ name: 'report', label: 'Publish report', group: 'benchmark' }),
+        ]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    const headings = screen.getAllByRole('heading').map((h) => h.textContent);
+    expect(headings).toEqual(['Infrastructure lifecycle', 'Data', 'Benchmarking']);
+  });
+
+  it('groups an action with no group under a catch-all "Other" heading instead of dropping it', () => {
+    render(
+      <ActionList
+        actions={[action({ name: 'up', label: 'Provision infrastructure', group: undefined })]}
+        runs={[]}
+        prereqChecks={[]}
+        runningActionName={null}
+        onTrigger={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Other' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Provision infrastructure' })).toBeInTheDocument();
   });
 });

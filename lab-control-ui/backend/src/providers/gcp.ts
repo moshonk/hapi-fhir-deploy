@@ -230,6 +230,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'up',
     label: 'Provision infrastructure',
+    group: 'lifecycle',
+    description:
+      'Creates the cloud computer cluster and database this lab runs on. Costs real money while it exists. Nothing else on this page works until this finishes.',
     cliSubcommand: 'up',
     scope: 'common',
     requiresConfirmation: true,
@@ -243,6 +246,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'deploy',
     label: 'Deploy HAPI FHIR',
+    group: 'lifecycle',
+    description:
+      'Installs and starts the HAPI FHIR application on the infrastructure created by "Provision infrastructure". Safe to run again to apply new settings to an already-running lab.',
     cliSubcommand: 'deploy',
     scope: 'common',
     requiresConfirmation: false,
@@ -253,6 +259,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'expose-fhir',
     label: 'Expose FHIR endpoint publicly',
+    group: 'exposure',
+    description:
+      'Opens the FHIR server up to the public internet so it can be reached from outside this lab, with no login screen protecting it. Anyone with the address can read and write data.',
     cliSubcommand: 'expose-fhir',
     scope: 'provider',
     requiresConfirmation: true,
@@ -263,6 +272,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'unexpose-fhir',
     label: 'Close public FHIR exposure',
+    group: 'exposure',
+    description:
+      'Closes the public internet access that "Expose FHIR endpoint publicly" opened up.',
     cliSubcommand: 'unexpose-fhir',
     scope: 'provider',
     requiresConfirmation: false,
@@ -272,6 +284,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'expose-prometheus',
     label: 'Expose Prometheus publicly',
+    group: 'exposure',
+    description:
+      'Opens the Prometheus monitoring dashboard up to the public internet, with no login screen protecting it.',
     cliSubcommand: 'expose-prometheus',
     scope: 'provider',
     requiresConfirmation: true,
@@ -282,6 +297,8 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'unexpose-prometheus',
     label: 'Close public Prometheus exposure',
+    group: 'exposure',
+    description: 'Closes the public internet access that "Expose Prometheus publicly" opened up.',
     cliSubcommand: 'unexpose-prometheus',
     scope: 'provider',
     requiresConfirmation: false,
@@ -291,6 +308,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'expose-grafana',
     label: 'Expose Grafana publicly',
+    group: 'exposure',
+    description:
+      'Opens the Grafana dashboards up to the public internet. Unlike the FHIR/Prometheus exposure buttons, this one does have a login screen.',
     cliSubcommand: 'expose-grafana',
     scope: 'provider',
     requiresConfirmation: true,
@@ -306,6 +326,8 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'unexpose-grafana',
     label: 'Close public Grafana exposure',
+    group: 'exposure',
+    description: 'Closes the public internet access that "Expose Grafana publicly" opened up.',
     cliSubcommand: 'unexpose-grafana',
     scope: 'provider',
     requiresConfirmation: false,
@@ -315,6 +337,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'pause-autoscaling',
     label: 'Pin replicas for bulk-load window',
+    group: 'scaling',
+    description:
+      'Temporarily locks the number of running application copies in place, so they don\'t shrink automatically while a lot of data is being loaded in. Undo with "Resume normal autoscaling" afterwards.',
     cliSubcommand: 'pause-autoscaling',
     scope: 'common',
     requiresConfirmation: false,
@@ -324,6 +349,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'resume-autoscaling',
     label: 'Resume normal autoscaling',
+    group: 'scaling',
+    description:
+      'Lets the number of running application copies grow and shrink automatically again, undoing "Pin replicas for bulk-load window".',
     cliSubcommand: 'resume-autoscaling',
     scope: 'common',
     requiresConfirmation: false,
@@ -333,6 +361,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'seed',
     label: 'Seed synthetic data',
+    group: 'data',
+    description:
+      'Fills the database with realistic-looking fake patient records for testing, or restores a previous "Backup database" copy instead of generating new ones.',
     cliSubcommand: 'seed',
     scope: 'common',
     requiresConfirmation: false,
@@ -351,17 +382,28 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'backup-db',
     label: 'Backup database',
+    group: 'data',
+    description:
+      'Saves a copy of the current database to disk, so this exact data can be restored later without regenerating and re-loading it from scratch.',
     cliSubcommand: 'backup-db',
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
     requiredPrerequisiteIds: ['postgresql-client'],
-    // Backing up only makes sense once there's data worth keeping.
+    // Backing up only makes sense once there's data worth keeping -- and
+    // that data outlives any single seed run, so this checks "has a seed
+    // ever succeeded" rather than "did the *latest* seed succeed" (a later
+    // failed seed attempt shouldn't gray this out while the earlier
+    // successfully-seeded database is still sitting there).
     sequenceAfter: 'seed',
+    sequenceAfterAnySuccess: true,
   },
   {
     name: 'provision-shard-storage',
     label: 'Provision RWX shard storage',
+    group: 'benchmark',
+    description:
+      'Sets up shared disk space that multiple benchmark workers can all write to at once. Only needed before running a benchmark split across more than one worker.',
     cliSubcommand: 'provision-shard-storage',
     scope: 'provider',
     requiresConfirmation: true,
@@ -375,6 +417,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'benchmark',
     label: 'Run k6 benchmark',
+    group: 'benchmark',
+    description:
+      'Runs a load test that simulates many users using the FHIR server at the same time, to measure how fast and reliable it is under pressure.',
     cliSubcommand: 'benchmark',
     scope: 'common',
     requiresConfirmation: false,
@@ -385,6 +430,8 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'report',
     label: 'Publish report',
+    group: 'benchmark',
+    description: 'Turns the results of the last benchmark run into a readable summary report.',
     cliSubcommand: 'report',
     scope: 'common',
     requiresConfirmation: false,
@@ -395,6 +442,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'down',
     label: 'Destroy infrastructure',
+    group: 'lifecycle',
+    description:
+      'Permanently deletes the cloud computer cluster and database for this lab, and stops the billing for them. This cannot be undone -- all data in the database is lost.',
     cliSubcommand: 'down',
     scope: 'common',
     requiresConfirmation: true,
