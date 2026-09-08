@@ -47,9 +47,21 @@ Notes:
   where the database connection details (`database_endpoint`,
   `database_port`, `database_name`, `database_username`,
   `database_password` -- identical output keys across every cloud module)
-  come from; direct network reachability to the database from the host
-  running `scripts/lab` is required (e.g. inside the same VPC as a
-  private-IP Cloud SQL/RDS/Flexible Server instance).
+  come from. On GCP the database is private-IP-only inside the lab's own
+  VPC, which the Lab Control UI's control-plane host can't reach directly;
+  `scripts/lab` auto-starts a Cloud SQL Auth Proxy in `--psc` mode
+  (reconciling a per-lab PSC consumer endpoint + shared per-region private
+  DNS zone) whenever `terraform-output.json` carries the GCP-only
+  `database_connection_name`/`database_psc_service_attachment_link`/
+  `database_psc_dns_name` outputs, so `pg_dump`/`pg_restore` connect through
+  `127.0.0.1`. A GCP lab whose `up` predates those outputs aborts with a
+  re-run-`up` instruction rather than falling back to an unreachable mode.
+  aws/azure connect directly (in-VPC reachability required, as before).
+  Because of the proxy, `backup-db`'s `requiredPrerequisiteIds` are
+  `['postgresql-client', 'cloud-sql-proxy']`; `seed` lists neither, since
+  restore-from-backup is an ephemeral per-trigger choice and the
+  generate-fresh path needs no DB client (`scripts/lab` fails loudly at
+  trigger time if the tool is genuinely missing on the restore path).
 - `cliRunLabel` for `seed`/`benchmark`/`report` is derived from `lab_name`
   plus a short suffix disambiguating repeated runs against the same lab
   (e.g. `{lab_name}-{short-timestamp}`), not a separate form field — matches

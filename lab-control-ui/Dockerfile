@@ -1,6 +1,7 @@
 # Lab Control UI image: the Node backend (serving the built React frontend
 # statically) PLUS the full scripts/lab toolchain (Terraform, Helm, kubectl,
-# Ansible, Ruby, k6, Java, gcloud + gke-gcloud-auth-plugin). The container is
+# Ansible, Ruby, k6, Java, gcloud + gke-gcloud-auth-plugin, postgresql-client,
+# cloud-sql-proxy). The container is
 # the one spawning `scripts/lab` as a child process (research.md §1/§4), so
 # it needs every tool `scripts/lab doctor` checks for on its own PATH --
 # "always fire up the service" means the image is self-sufficient, not just
@@ -20,6 +21,9 @@
 #   - Helm v3.15.4                           -- matches docs/getting-started-benchmark-lab.md
 #   - kubectl v1.35.6                        -- matches the GCP default kubernetes_version
 #   - k6 2.2.0                               -- latest available on Grafana's Debian repo at pin time
+#   - cloud-sql-proxy v2.25.3                -- latest release at pin time (github.com/
+#     GoogleCloudPlatform/cloud-sql-proxy); lets backup-db/seed --restore-from-backup reach a
+#     private-IP-only Cloud SQL instance from outside the lab's own VPC (docs/lab-cli.md)
 #   - ansible-core 2.19.1 / kubernetes 36.0.3 -- matches ansible/requirements.txt exactly
 #   - Ruby, OpenJDK 17                       -- Debian bookworm's own package versions (no
 #     upstream apt repo offers exact pins for these the way Terraform/k6 do)
@@ -85,6 +89,12 @@ RUN curl -fsSL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz | tar -xz -C 
 RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.35.6/bin/linux/amd64/kubectl" \
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client
+
+# --- Cloud SQL Auth Proxy (direct binary, pinned) ---
+RUN curl -fsSLo /usr/local/bin/cloud-sql-proxy \
+      "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.25.3/cloud-sql-proxy.linux.amd64" \
+    && chmod +x /usr/local/bin/cloud-sql-proxy \
+    && cloud-sql-proxy --version
 
 # --- Ruby, OpenJDK 17, Python (for Ansible), git (scripts/lab's repo-root
 # detection), postgresql-client (pg_dump/pg_restore for backup-db / seed

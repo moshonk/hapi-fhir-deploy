@@ -489,3 +489,32 @@ describe('resolveConfirmationMessage (FR-012 -- name the actual configured value
     expect(message).not.toContain('{shard_output_capacity_gb}');
   });
 });
+
+describe('GCP provider prerequisite wiring (cli-action-map.md -- backup-db DB reachability)', () => {
+  const prereqIds = new Set(gcpProvider.prerequisiteChecks.map((c) => c.id));
+
+  it('exposes a blocking cloud-sql-proxy prerequisite check (Cloud SQL Auth Proxy --psc)', () => {
+    const check = gcpProvider.prerequisiteChecks.find((c) => c.id === 'cloud-sql-proxy');
+    expect(check).toBeDefined();
+    expect(check!.severity).toBe('blocking');
+  });
+
+  it("backup-db requires postgresql-client AND cloud-sql-proxy (the proxy always starts once terraform-output.json carries database_connection_name)", () => {
+    const backupDb = gcpProvider.actions.find((a) => a.name === 'backup-db')!;
+    expect(backupDb.requiredPrerequisiteIds).toEqual(['postgresql-client', 'cloud-sql-proxy']);
+  });
+
+  it('seed requires neither -- restore-from-backup is an ephemeral per-trigger choice, generate-fresh needs no DB client', () => {
+    const seed = gcpProvider.actions.find((a) => a.name === 'seed')!;
+    expect(seed.requiredPrerequisiteIds).not.toContain('postgresql-client');
+    expect(seed.requiredPrerequisiteIds).not.toContain('cloud-sql-proxy');
+  });
+
+  it('every requiredPrerequisiteId across all actions has a matching prerequisiteChecks entry', () => {
+    for (const action of gcpProvider.actions) {
+      for (const id of action.requiredPrerequisiteIds) {
+        expect(prereqIds.has(id), `${action.name} -> ${id}`).toBe(true);
+      }
+    }
+  });
+});

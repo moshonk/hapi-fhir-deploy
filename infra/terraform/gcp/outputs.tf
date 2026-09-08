@@ -51,6 +51,21 @@ output "database_port" {
   value       = 5432
 }
 
+output "database_connection_name" {
+  description = "Cloud SQL instance connection name (PROJECT:REGION:INSTANCE), passed to `cloud-sql-proxy --psc` -- scripts/lab's backup-db/seed --restore-from-backup use this to reach the private-IP-only database from a host outside this lab's own VPC (google_compute_network.lab), which direct-IP connections to database_endpoint cannot do. GCP-only; aws/azure have no equivalent output."
+  value       = google_sql_database_instance.postgres.connection_name
+}
+
+output "database_psc_service_attachment_link" {
+  description = "Cloud SQL's Private Service Connect service attachment -- the target for a one-time, per-lab PSC consumer forwarding rule in the control-plane host's own network (scripts/lab's ensure_cloud_sql_psc_endpoint), which is what makes CLOUD_SQL_PROXY_BIN --psc actually reachable. Plain VPC peering can't substitute for this: Private Services Access (database_endpoint above) is itself a non-transitive peering, so a network peered only to google_compute_network.lab still can't reach it."
+  value       = google_sql_database_instance.postgres.psc_service_attachment_link
+}
+
+output "database_psc_dns_name" {
+  description = "Per-instance PSC DNS name (e.g. <uid>.<uid2>.<region>.sql.goog.) that `cloud-sql-proxy --psc` actually dials -- unlike --private-ip/default mode, PSC has no routable IP the proxy can use directly. scripts/lab's ensure_cloud_sql_psc_endpoint creates an A record for exactly this name (in a shared per-region private zone, <region>.sql.goog.) pointing at the PSC consumer forwarding rule's reserved IP, in the same control-plane network database_psc_service_attachment_link's forwarding rule lives in."
+  value       = google_sql_database_instance.postgres.dns_name
+}
+
 output "database_name" {
   description = "FHIR database name."
   value       = google_sql_database.fhir.name

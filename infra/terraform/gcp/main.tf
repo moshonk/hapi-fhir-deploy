@@ -200,6 +200,25 @@ resource "google_sql_database_instance" "postgres" {
     ip_configuration {
       ipv4_enabled    = false
       private_network = google_compute_network.lab.id
+
+      # Private Service Connect, alongside (not instead of) the VPC-peering
+      # private IP above -- backup-db/seed --restore-from-backup run from
+      # the Lab Control UI's control-plane host, which lives in a
+      # DIFFERENT, unpeered VPC (docs/lab-cli.md). Plain VPC peering
+      # between that network and google_compute_network.lab can't reach
+      # database_endpoint either: Private Services Access (how the private
+      # IP above is allocated) is itself implemented as a peering to a
+      # Google-managed tenant network, and VPC Network Peering is
+      # explicitly non-transitive -- confirmed live (a direct
+      # default<->lab peering was traced back to this exact limitation
+      # before being created). PSC's service attachment doesn't have that
+      # restriction, which is the whole reason it exists. Same-project
+      # only for now (allowed_consumer_projects); this repo's control
+      # plane and every lab it manages always share one project.
+      psc_config {
+        psc_enabled               = true
+        allowed_consumer_projects = [var.project_id]
+      }
     }
 
     backup_configuration {
@@ -226,7 +245,13 @@ resource "google_sql_database_instance" "postgres" {
       query_insights_enabled  = true
       query_string_length     = 1024
       record_application_tags = true
-      record_client_address   = true
+      # Cloud SQL rejects record_client_address = true outright once PSC
+      # connectivity is enabled below ("Insights record client address is
+      # not supported for instances with PSC connectivity enabled", a real
+      # 400 hit live applying the psc_config change) -- query text/tags/
+      # plans (the fields this was actually added to diagnose, see above)
+      # are unaffected; only the connecting client's IP goes unrecorded.
+      record_client_address = false
     }
   }
 

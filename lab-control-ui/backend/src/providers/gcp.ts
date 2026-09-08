@@ -368,14 +368,15 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
-    // 'postgresql-client' is deliberately NOT listed here: restoring from a
-    // backup (an ephemeral, per-trigger choice -- see ActionList.tsx/
-    // routes/actions.ts, same pattern as benchmark's in_cluster) is only
-    // one of the two things this button can do. Requiring pg_dump/
-    // pg_restore up front would block the (much more common) generate-fresh
-    // path for operators who never intend to restore from a backup at all.
-    // If restore-from-backup IS chosen and the tool is genuinely missing,
-    // scripts/lab itself fails loudly at trigger time instead.
+    // 'postgresql-client'/'cloud-sql-proxy' are deliberately NOT listed
+    // here: restoring from a backup (an ephemeral, per-trigger choice --
+    // see ActionList.tsx/routes/actions.ts, same pattern as benchmark's
+    // in_cluster) is only one of the two things this button can do.
+    // Requiring pg_restore/cloud-sql-proxy up front would block the (much
+    // more common) generate-fresh path for operators who never intend to
+    // restore from a backup at all. If restore-from-backup IS chosen and
+    // either tool is genuinely missing, scripts/lab itself fails loudly at
+    // trigger time instead.
     requiredPrerequisiteIds: ['ruby'],
     sequenceAfter: 'deploy',
   },
@@ -389,7 +390,13 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
-    requiredPrerequisiteIds: ['postgresql-client'],
+    // cloud-sql-proxy is required alongside postgresql-client (not just
+    // recommended) because start_cloud_sql_proxy_if_needed (scripts/lab)
+    // always starts it once terraform-output.json carries a
+    // database_connection_name -- true for every lab `up` since that
+    // output was added -- regardless of whether this host could actually
+    // reach the database's private IP directly.
+    requiredPrerequisiteIds: ['postgresql-client', 'cloud-sql-proxy'],
     // Backing up only makes sense once there's data worth keeping -- and
     // that data outlives any single seed run, so this checks "has a seed
     // ever succeeded" rather than "did the *latest* seed succeed" (a later
@@ -851,6 +858,11 @@ export const gcpProvider: ProviderAdapter = {
     { id: 'gcloud', label: 'gcloud CLI', severity: 'blocking' },
     { id: 'gke-gcloud-auth-plugin', label: 'gke-gcloud-auth-plugin', severity: 'blocking' },
     { id: 'gcloud-adc', label: 'gcloud Application Default Credentials', severity: 'warning' },
+    {
+      id: 'cloud-sql-proxy',
+      label: 'Cloud SQL Auth Proxy',
+      severity: 'blocking',
+    },
   ],
   buildCommand: gcpBuildCommand,
 };
