@@ -25,6 +25,14 @@
 #     GoogleCloudPlatform/cloud-sql-proxy); lets backup-db/seed --restore-from-backup reach a
 #     private-IP-only Cloud SQL instance from outside the lab's own VPC (docs/lab-cli.md)
 #   - ansible-core 2.19.1 / kubernetes 36.0.3 -- matches ansible/requirements.txt exactly
+#   - postgresql-client-17                   -- PGDG apt repo. Major 17 (not bookworm's default
+#     15, and not "latest") because pg_dump/pg_restore MUST be >= the Cloud SQL server's major
+#     version: v15 can't dump a v16/v17 server at all, and a client NEWER than the server writes
+#     GUCs into the archive the server rejects (pg_dump 18 emits `SET transaction_timeout` ->
+#     "unrecognized configuration parameter" against v16, and pg_restore then exits non-zero).
+#     17 is the Constitution's max supported PostgreSQL target, so it covers both v16 and v17
+#     labs cleanly. Patch version is NOT pinned -- PGDG only retains the latest 17.x (same
+#     documented exception as gcloud below).
 #   - Ruby, OpenJDK 17                       -- Debian bookworm's own package versions (no
 #     upstream apt repo offers exact pins for these the way Terraform/k6 do)
 #   - gcloud CLI / gke-gcloud-auth-plugin    -- intentionally NOT version-pinned; Google's own
@@ -96,15 +104,27 @@ RUN curl -fsSLo /usr/local/bin/cloud-sql-proxy \
     && chmod +x /usr/local/bin/cloud-sql-proxy \
     && cloud-sql-proxy --version
 
+# --- postgresql-client-17 (PGDG apt repo) -- pg_dump/pg_restore for
+# backup-db / seed --restore-from-backup. Major 17 deliberately: it must be
+# >= the Cloud SQL server major version (16 or 17 per the Constitution) --
+# see the header note. bookworm's own postgresql-client is 15, which cannot
+# dump a v16 server at all. ---
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --dearmor -o /usr/share/keyrings/pgdg-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg-archive-keyring.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-17 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pg_dump --version
+
 # --- Ruby, OpenJDK 17, Python (for Ansible), git (scripts/lab's repo-root
-# detection), postgresql-client (pg_dump/pg_restore for backup-db / seed
-# --restore-from-backup) ---
+# detection) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ruby-full \
       openjdk-17-jre-headless \
       python3 python3-pip python3-venv \
       git \
-      postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Ansible (pip, pinned to match ansible/requirements.txt exactly) ---

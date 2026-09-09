@@ -131,6 +131,14 @@ Both require `--cloud`/`--name` (unlike `seed`'s generate path) to locate
 this lab's `terraform-output.json` (written by `up`), which is where the
 database connection details come from, and both need `pg_dump`/`pg_restore`
 installed (`PG_DUMP_BIN`/`PG_RESTORE_BIN` to override which executable).
+Their major version must be **>= the Cloud SQL server's** (16 or 17) and
+**not newer than it**: an older `pg_dump` refuses to dump the server at all,
+and a newer one writes GUCs the server rejects (`pg_dump` 18 against a v16
+server emits `SET transaction_timeout` → `unrecognized configuration
+parameter`, and `pg_restore` then exits non-zero and `scripts/lab` reports
+failure *even though the data restored*). The Lab Control UI image pins
+`postgresql-client-17` for exactly this reason; on a bare-metal host, match
+it to the lab's `postgres_version`.
 
 Cloud SQL's database lives on a private IP inside the lab's own dedicated
 VPC (`infra/terraform/gcp/main.tf`'s `google_compute_network.lab`), which a
