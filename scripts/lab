@@ -1654,6 +1654,23 @@ cmd_backup_db() {
 # --restore-from-backup is set, bypassing SEED_GENERATOR_MODE entirely
 # (restoring is generator-agnostic; whichever generator originally produced
 # the backup doesn't matter once it's a database dump).
+# pg_restore 17 -- required, since pg_dump must be at least the source
+# server's major version and the lab image therefore ships 17 -- opens every
+# worker connection with `SET transaction_timeout = 0`, a PostgreSQL-17-only
+# parameter. Against an older (e.g. 16) target that SET fails once per
+# connection; pg_restore carries on, restores every object, and then exits 1
+# with "errors ignored on restore: N". Root-caused live restoring
+# hapi-lab-t3's dump into hapi-lab-t4 (2026-09-12): exact row counts on the
+# six largest tables, 179/179 indexes and 132/132 constraints all matched the
+# source, yet the command reported failure. True only when there was at
+# least one pg_restore error and EVERY one of them was that preamble.
+pg_restore_errors_only_transaction_timeout() {
+  local errfile="$1" total benign
+  total="$(grep -c 'pg_restore: error:' "$errfile" || true)"
+  benign="$(grep 'pg_restore: error:' "$errfile" | grep -c 'unrecognized configuration parameter "transaction_timeout"' || true)"
+  [[ "$total" -gt 0 && "$total" == "$benign" ]]
+}
+
 cmd_seed_restore_from_backup() {
   require_cloud
   require_name
@@ -1685,7 +1702,16 @@ cmd_seed_restore_from_backup() {
   # --clean --if-exists: this database was already seeded once (that's how
   # the backup was produced), so drop its existing objects before restoring
   # rather than failing on every already-exists conflict.
-  run "$pg_restore_bin" --format=directory --jobs="$jobs" --clean --if-exists --no-owner --no-privileges --dbname="${PGDATABASE:-}" "$backup_dir"
+  local restore_err rc=0
+  restore_err="$(mktemp)"
+  run "$pg_restore_bin" --format=directory --jobs="$jobs" --clean --if-exists --no-owner --no-privileges --dbname="${PGDATABASE:-}" "$backup_dir" 2>"$restore_err" || rc=$?
+  cat "$restore_err" >&2
+  if [[ $rc -ne 0 ]] && pg_restore_errors_only_transaction_timeout "$restore_err"; then
+    log "pg_restore exited $rc, but every error was the benign PostgreSQL-17-client 'SET transaction_timeout' preamble against an older server -- treating the restore as successful"
+    rc=0
+  fi
+  rm -f "$restore_err"
+  [[ $rc -eq 0 ]] || die "pg_restore failed (exit $rc) -- see the pg_restore errors above"
 
   stop_cloud_sql_proxy
   trap - EXIT
@@ -3006,6 +3032,28 @@ if [[ -z "$COMMAND" || "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
 fi
 
 parse_args "$@"
+
+# Every kubectl this script shells out to must reach THIS lab's cluster.
+# Nine commands/helpers call kubectl without passing --kubeconfig
+# (cmd_benchmark_in_cluster, cmd_exposures, cmd_pause_autoscaling,
+# cmd_resume_autoscaling, cmd_provision_shard_storage,
+# cmd_seed_native_in_cluster, collect_prerequisite_checks,
+# expose_public_service, wait_for_shard_job), so they silently depended on
+# the caller's environment. With nothing set, kubectl falls back to
+# http://localhost:8080 -- and in the Lab Control UI's host-networked
+# container that is an expose-fhir port-forward to HAPI. Root-caused live
+# (hapi-lab-t4 provision-shard-storage, 2026-09-12): `kubectl delete pvc`
+# died on "the server could not find the requested resource", which was
+# HAPI FHIR answering Kubernetes' API discovery with a 404. Nothing was
+# deleted only because discovery failed first; had :8080 been a real API
+# (e.g. a kubectl proxy to another lab) those deletes would have hit the
+# wrong cluster. Resolved once here so every call site is covered. Only
+# exported when the file exists, so `up` (which creates it) and --dry-run
+# invocations behave exactly as before.
+lab_kubeconfig="$(resolve_kubeconfig_file)"
+if [[ -n "$lab_kubeconfig" && -f "$lab_kubeconfig" ]]; then
+  export KUBECONFIG="$lab_kubeconfig"
+fi
 
 case "$COMMAND" in
   up) cmd_up ;;
