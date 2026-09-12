@@ -316,10 +316,27 @@ resource "google_sql_database_instance" "postgres_replica" {
 resource "google_sql_database" "fhir" {
   name     = var.database_name
   instance = google_sql_database_instance.postgres.name
+
+  # ABANDON: on destroy, drop this from state instead of issuing DROP
+  # DATABASE; deleting google_sql_database_instance.postgres removes it
+  # anyway. Root-caused live tearing down hapi-lab-t3 (2026-09-12): the
+  # GKE cluster -- and HAPI/PgBouncer still connected to this database --
+  # is destroyed in parallel with it, so Cloud SQL refused with "database
+  # hapi_fhir is being accessed by other users" and `down` stopped with the
+  # instance (and its bill) still running.
+  deletion_policy = "ABANDON"
 }
 
 resource "google_sql_user" "fhir" {
   name     = var.database_username
   instance = google_sql_database_instance.postgres.name
   password = random_password.postgres.result
+
+  # ABANDON: PostgreSQL will not drop a role that still owns objects, and
+  # this role owns every HAPI table. The same hapi-lab-t3 teardown's retry
+  # failed with 'role "hapi_fhir" cannot be dropped because some objects
+  # depend on it -- 106 objects in database hapi_fhir'. Instance deletion
+  # removes the role and everything it owns, so there is nothing for
+  # Terraform to delete here.
+  deletion_policy = "ABANDON"
 }
