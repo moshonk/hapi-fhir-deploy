@@ -662,12 +662,18 @@ function supervisorDashboardRead(data) {
   // SUPERVISOR_COUNT_WINDOW_HOURS=0 restores the old unbounded query, so a
   // run can still be made directly comparable to the stage 0-5 series that
   // predates this change.
+  // The window start is floored to the MINUTE, not taken at millisecond
+  // precision. HAPI caches search results by URL, and an exact timestamp
+  // makes every request's URL unique -- defeating that cache and writing a
+  // fresh search entity per call. Flooring means every supervisor request
+  // inside the same minute shares one URL, so the cache does the repeat
+  // work. A dashboard tile has no use for sub-minute freshness anyway.
   const windowHours = data.supervisorCountWindowHours;
+  const windowStart = new Date(Date.now() - windowHours * 3600 * 1000);
+  windowStart.setUTCSeconds(0, 0);
   const path =
     windowHours > 0
-      ? `/Patient?_lastUpdated=gt${encodeURIComponent(
-          new Date(Date.now() - windowHours * 3600 * 1000).toISOString()
-        )}&_summary=count`
+      ? `/Patient?_lastUpdated=gt${encodeURIComponent(windowStart.toISOString())}&_summary=count`
       : "/Patient?_summary=count";
 
   requestOperation(
