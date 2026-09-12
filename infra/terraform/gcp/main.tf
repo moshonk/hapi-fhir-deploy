@@ -263,6 +263,44 @@ resource "google_sql_database_instance" "postgres" {
   ]
 }
 
+resource "google_sql_database_instance" "postgres_replica" {
+  count = var.enable_read_replica ? 1 : 0
+
+  name                 = "${local.name}-postgres-replica"
+  region               = var.region
+  database_version     = "POSTGRES_${var.postgres_version}"
+  master_instance_name = google_sql_database_instance.postgres.name
+
+  replica_configuration {
+    failover_target = false
+  }
+
+  settings {
+    tier              = var.db_sku
+    edition           = var.db_edition
+    availability_type = "ZONAL"
+    disk_size         = var.db_disk_size_gb
+    disk_type         = "PD_SSD"
+    user_labels       = local.labels
+
+    ip_configuration {
+      ipv4_enabled    = false
+      private_network = google_compute_network.lab.id
+
+      psc_config {
+        psc_enabled               = true
+        allowed_consumer_projects = [var.project_id]
+      }
+    }
+  }
+
+  deletion_protection = false
+
+  depends_on = [
+    google_sql_database_instance.postgres
+  ]
+}
+
 resource "google_sql_database" "fhir" {
   name     = var.database_name
   instance = google_sql_database_instance.postgres.name

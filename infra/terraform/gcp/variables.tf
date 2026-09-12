@@ -160,3 +160,9 @@ variable "shard_output_capacity_gb" {
     error_message = "shard_output_capacity_gb must be at least 1024 (BASIC_HDD's minimum)."
   }
 }
+
+variable "enable_read_replica" {
+  description = "Provision a Cloud SQL read replica of the primary (same tier/edition/region). Opt-in and disabled by default -- capacity-enhancement-tracker Stage 5: the replica is provisioned here as infrastructure only; nothing routes queries to it yet, since the pinned hapi-fhir-jpaserver-starter image has no read/write datasource routing support (would require forking the pinned image, against this repo's guardrails)."
+  type        = bool
+  default     = false
+}
