@@ -82,6 +82,15 @@ resource "google_service_networking_connection" "private_service" {
   network                 = google_compute_network.lab.id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_service.name]
+
+  # ABANDON: GCP keeps the peering "in use" for a while after the Cloud SQL
+  # instance is deleted. Tearing down hapi-lab-t3 (2026-09-12) failed on
+  # "Failed to delete connection; Producer services (e.g. CloudSQL) are
+  # still using this connection" immediately after the instance was gone,
+  # stranding the network and address range. Abandoning it lets `down`
+  # finish; GCP releases the peering when the producer does, and deleting
+  # the network removes it. Same pattern as the SQL database/user below.
+  deletion_policy = "ABANDON"
 }
 
 resource "google_container_cluster" "lab" {
