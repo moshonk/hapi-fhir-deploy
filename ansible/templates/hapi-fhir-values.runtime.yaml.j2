@@ -6,6 +6,18 @@
 {% set datasource_port = lab_database_port %}
 {% endif %}
 hapi-fhir-jpaserver:
+{% if hapi_cpu_request | default('') | string | trim | length > 0 %}
+  # Per-lab CPU request override (hapi_cpu_request); only requests.cpu is
+  # set, so Helm's map merge keeps the chart's memory request and both
+  # limits. The chart default (500m) understates real usage: under the T3
+  # load shape on hapi-lab-t4 (2026-09-12) HAPI pods used 1.3-1.6 cores
+  # each while requesting 500m, so 8 replicas packed onto 3 nodes at
+  # 101% CPU with 0 pods Pending -- and the cluster autoscaler, which only
+  # reacts to Pending pods, never added nodes despite a max of 6.
+  resources:
+    requests:
+      cpu: "{{ hapi_cpu_request | string | trim }}"
+{% endif %}
   # When enable_pgbouncer is true, HAPI's datasource points at the
   # PgBouncer Service (specs/007-pgbouncer-connection-pooling) instead of
   # the raw PostgreSQL endpoint; PgBouncer itself connects upstream to

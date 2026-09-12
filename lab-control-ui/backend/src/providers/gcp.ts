@@ -254,6 +254,16 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     helpText:
       'Blank uses the ceiling committed in the tier ScaledObject manifest (5 without PgBouncer, 8 with). Raise ONE step at a time with a benchmark at each step -- jumping to 50 by formula once collapsed throughput ~6x. More replicas do not add real database connections: with PgBouncer those stay capped at pool size x PgBouncer replicas, so extra replicas buy parallelism and cost per-request latency.',
     cliMapping: '--extra-vars hapi_max_replicas={value} (deploy only)',
+  },
+  {
+    key: 'hapi_cpu_request',
+    label: 'HAPI CPU request (blank = chart default 500m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU request per HAPI pod, e.g. 1500m. Blank keeps the chart default of 500m, which understates real use: under T3 load HAPI used 1.3-1.6 cores per pod, so 8 replicas crammed onto 3 nodes at 100% CPU and the autoscaler never added nodes (it only reacts to pods that cannot be scheduled). Set it near real usage so scaling up actually adds nodes. Only the request changes; the 2-core limit stays.',
+    cliMapping: '--extra-vars hapi_cpu_request={value} (deploy only)',
   },];
 
 export const GCP_ACTIONS: ActionDef[] = [
@@ -589,6 +599,10 @@ export function gcpBuildCommand(
           // override instead of leaving it stuck.
           '--extra-vars',
           `hapi_max_replicas=${f('hapi_max_replicas', '')}`,
+          // Blank passed explicitly, like hapi_max_replicas: it means "chart
+          // default", so clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_cpu_request=${f('hapi_cpu_request', '')}`,
         ],
         env: {},
       };

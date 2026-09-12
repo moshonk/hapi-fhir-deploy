@@ -99,6 +99,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'pgbouncer_default_pool_size=20',
         '--extra-vars',
         'hapi_max_replicas=',
+        '--extra-vars',
+        'hapi_cpu_request=',
     ]);
   });
 
@@ -116,6 +118,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'pgbouncer_default_pool_size=25',
         '--extra-vars',
         'hapi_max_replicas=',
+        '--extra-vars',
+        'hapi_cpu_request=',
       ],
     );
   });
