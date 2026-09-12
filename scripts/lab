@@ -1347,6 +1347,31 @@ gce_metadata_value() {
 # `down`) can remove it without re-deriving network/region -- deliberately
 # does NOT delete the shared per-region DNS zone, since other labs' records
 # may still live in it.
+# Blocks until the PSC DNS name answers with the endpoint's IP through this
+# host's own resolver -- the same resolver cloud-sql-proxy dials through.
+# Root-caused live (hapi-lab-t3 backup-db, 2026-09-12): the private zone and
+# A record are created by ensure_cloud_sql_psc_endpoint seconds before the
+# proxy's first dial, Cloud DNS takes a few seconds to serve a new private
+# record, and the dial fails with "dial tcp: lookup <name>" in
+# cloud-sql-proxy.log -- which pg_dump/pg_restore only ever surface as the
+# misleading "server closed the connection unexpectedly". The timeout is
+# well past Cloud DNS's default negative-caching TTL (300s), because a
+# lookup that races ahead of propagation can be negatively cached by
+# systemd-resolved for that long.
+wait_for_psc_dns() {
+  local name="$1" expected_ip="$2"
+  [[ "$DRY_RUN" == true ]] && return 0
+  local waited=0 resolved=""
+  until resolved="$(getent hosts "$name" | awk '{print $1; exit}')" && [[ "$resolved" == "$expected_ip" ]]; do
+    if [[ $waited -ge 360 ]]; then
+      die "PSC DNS name $name did not resolve to $expected_ip within 360s (last answer: '${resolved:-none}') -- check the private zone is visible to this host's VPC network"
+    fi
+    waited=$((waited + 2))
+    sleep 2
+  done
+  log "PSC DNS name $name resolves to $expected_ip (waited ${waited}s)"
+}
+
 ensure_cloud_sql_psc_endpoint() {
   [[ "$CLOUD" == "gcp" ]] || return 0
   [[ "$DRY_RUN" == true ]] && return 0
@@ -1424,6 +1449,8 @@ ensure_cloud_sql_psc_endpoint() {
   else
     run gcloud dns record-sets create "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A --rrdatas "$endpoint_ip"
   fi
+
+  wait_for_psc_dns "$DATABASE_PSC_DNS_NAME" "$endpoint_ip"
 
   if [[ "$DRY_RUN" != true ]]; then
     mkdir -p "$(state_dir)"
