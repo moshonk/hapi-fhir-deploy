@@ -45,6 +45,13 @@ install_grafana: true
 install_metrics_server: true
 install_keda: true
 apply_autoscaling: true
+
+# Empty = use the maxReplicaCount committed in the tier's own ScaledObject
+# manifest (manifests/autoscaling/hapi-fhir-scaledobject*.yaml: 5 native,
+# 8 pooled). Set to a number ONLY with a load test at that number and the
+# connection-budget arithmetic in docs/autoscaling.md redone -- raising it
+# by formula alone is exactly what collapsed throughput ~6x at 50.
+hapi_max_replicas: ""
 enable_prometheus_remote_write: true
 
 prometheus_namespace: monitoring

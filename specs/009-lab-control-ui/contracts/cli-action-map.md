@@ -11,8 +11,8 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 
 | Action | `scripts/lab` invocation | Confirmation required |
 |---|---|---|
-| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours}` | Yes — billable resource creation |
-| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size}` | No |
+| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours} --var enable_read_replica={enable_read_replica} --var db_work_mem_kb={db_work_mem_kb}` | Yes — billable resource creation |
+| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas}` | No |
 | `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | Yes — names the exposure scope |
 | `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
@@ -101,6 +101,12 @@ Notes:
   `cli_run_label`), or, if omitted, the lab's most recent **succeeded**
   `benchmark` run. If neither resolves, the trigger is refused with `400`
   rather than silently generating a label that doesn't exist on disk.
+- `hapi_max_replicas` (`deploy`) is always passed explicitly too, including
+  as an EMPTY value, which is the documented "use the ceiling committed in
+  the tier's own ScaledObject manifest" signal (`ansible/group_vars/lab.yml`'s
+  `hapi_max_replicas: ""`). Clearing the field on a later redeploy therefore
+  reverts a previous override instead of leaving it stuck, for the same
+  reason `enable_pgbouncer` is never conditionally omitted.
 - `enable_pgbouncer` (`deploy`) is always passed explicitly, true or false,
   never conditionally omitted -- so toggling it OFF on a later redeploy of
   an already-pooled lab actually disables the tier again (`ansible/

@@ -230,6 +230,18 @@ resource "google_sql_database_instance" "postgres" {
       value = tostring(var.db_max_connections)
     }
 
+    # Opt-in only (db_work_mem_kb = 0 leaves the flag unset entirely, so
+    # PostgreSQL's own 4MB default applies). See the variable's own
+    # description for the measured regression that makes this deliberately
+    # off by default rather than "tuned up because bigger sounds better".
+    dynamic "database_flags" {
+      for_each = var.db_work_mem_kb > 0 ? [var.db_work_mem_kb] : []
+      content {
+        name  = "work_mem"
+        value = tostring(database_flags.value)
+      }
+    }
+
     # Query Insights (no extra cost at this sampling level): enabled to
     # diagnose a live finding from the load-profile benchmark (docs/
     # autoscaling.md "Tail latency") -- Prometheus's hikaricp_connections_

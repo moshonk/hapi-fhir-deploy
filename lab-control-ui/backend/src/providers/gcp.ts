@@ -224,7 +224,37 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
       "Filestore BASIC_HDD's billed floor is 1024GB (~$0.20/GB-month); only raise this if a run's shard count/size needs more headroom.",
     cliMapping: '--capacity-gb {value}',
   },
-];
+
+  {
+    key: 'enable_read_replica',
+    label: 'Cloud SQL read replica',
+    scope: 'provider',
+    type: 'boolean',
+    default: false,
+    helpText:
+      'Provisions a same-tier read replica of the primary. Infrastructure only -- nothing routes queries to it yet, because the pinned HAPI image has no read/write datasource routing. Costs roughly the same again as the primary, so leave off unless you are working on that routing.',
+    cliMapping: '--var enable_read_replica={value} (up only)',
+  },
+  {
+    key: 'db_work_mem_kb',
+    label: 'Cloud SQL work_mem (kB, 0 = default)',
+    scope: 'provider',
+    type: 'number',
+    default: 0,
+    helpText:
+      'Leave 0 unless you are deliberately retesting this. Measured: 32768 (32MB) on db-custom-2-7680 made the 10-shard T3 load benchmark MUCH worse (271 -> 93 req/s, 0.05% -> 5.5% failures) -- work_mem is charged per sort per connection, so a big global value starves a small instance. Only raise it alongside a bigger DB tier, and re-benchmark.',
+    cliMapping: '--var db_work_mem_kb={value} (up only)',
+  },
+  {
+    key: 'hapi_max_replicas',
+    label: 'HAPI max replicas (blank = manifest default)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Blank uses the ceiling committed in the tier ScaledObject manifest (5 without PgBouncer, 8 with). Raise ONE step at a time with a benchmark at each step -- jumping to 50 by formula once collapsed throughput ~6x. More replicas do not add real database connections: with PgBouncer those stay capped at pool size x PgBouncer replicas, so extra replicas buy parallelism and cost per-request latency.',
+    cliMapping: '--extra-vars hapi_max_replicas={value} (deploy only)',
+  },];
 
 export const GCP_ACTIONS: ActionDef[] = [
   {
@@ -529,6 +559,10 @@ export function gcpBuildCommand(
           `db_disk_size_gb=${f('db_disk_size_gb')}`,
           '--var',
           `ttl_hours=${f('ttl_hours')}`,
+          '--var',
+          `enable_read_replica=${f('enable_read_replica', 'false')}`,
+          '--var',
+          `db_work_mem_kb=${f('db_work_mem_kb', '0')}`,
         ],
         env: {},
       };
@@ -549,6 +583,12 @@ export function gcpBuildCommand(
           `enable_pgbouncer=${f('enable_pgbouncer', 'false')}`,
           '--extra-vars',
           `pgbouncer_default_pool_size=${f('pgbouncer_default_pool_size', '20')}`,
+          // Passed even when blank: an empty value is Ansible's documented
+          // "use the manifest's own committed ceiling" signal, so clearing
+          // the field on a later redeploy actually reverts an earlier
+          // override instead of leaving it stuck.
+          '--extra-vars',
+          `hapi_max_replicas=${f('hapi_max_replicas', '')}`,
         ],
         env: {},
       };

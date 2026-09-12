@@ -156,14 +156,51 @@
             } | combine(lookup('file', runtime_rollout_patch_path) | from_yaml, recursive=True)
           }}
 
+    # An EMPTY hapi_max_replicas (the default) means "use whatever the
+    # committed manifest says" -- the manifests stay the readable,
+    # reviewed source of truth for each tier's connection-budget ceiling
+    # (5 native / 8 pooled), and this override exists only so an operator
+    # can walk that ceiling up a step at a time from the Lab Control UI
+    # without hand-editing a manifest mid-experiment. Same
+    # lookup()|from_yaml|combine shape the runtime rollout patch above
+    # already uses, rather than turning the manifests into .j2 templates.
+    - name: Resolve optional KEDA maxReplicaCount override
+      ansible.builtin.set_fact:
+        hapi_scaledobject_override: >-
+          {{
+            {'spec': {'maxReplicaCount': hapi_max_replicas | int}}
+            if (hapi_max_replicas | default('') | string | trim | length > 0)
+            else {}
+          }}
+
+    - name: Report the KEDA maxReplicaCount actually being applied
+      ansible.builtin.debug:
+        msg: >-
+          maxReplicaCount overridden to {{ hapi_max_replicas }} (connection budget is
+          NOT recomputed for you -- see docs/autoscaling.md; the native tier's
+          formula is maxReplicas <= floor((max_connections - reserved) / hikari_pool),
+          and the pooled tier's real ceiling is pgbouncer_server_connections, not
+          replica count).
+      when: hapi_max_replicas | default('') | string | trim | length > 0
+
     - name: Apply HAPI FHIR KEDA autoscaler (native connection-budget ceiling)
       kubernetes.core.k8s:
         state: present
-        src: "{{ autoscaling_manifest_path }}"
+        definition: >-
+          {{
+            lookup('file', autoscaling_manifest_path)
+            | from_yaml
+            | combine(hapi_scaledobject_override, recursive=True)
+          }}
       when: (apply_autoscaling | bool) and not (enable_pgbouncer | default(false) | bool)
 
     - name: Apply HAPI FHIR KEDA autoscaler (pooled connection-budget ceiling)
       kubernetes.core.k8s:
         state: present
-        src: "{{ pgbouncer_scaledobject_path }}"
+        definition: >-
+          {{
+            lookup('file', pgbouncer_scaledobject_path)
+            | from_yaml
+            | combine(hapi_scaledobject_override, recursive=True)
+          }}
       when: (apply_autoscaling | bool) and (enable_pgbouncer | default(false) | bool)

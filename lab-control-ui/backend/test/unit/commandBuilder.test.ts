@@ -79,6 +79,10 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'db_disk_size_gb=256',
       '--var',
       'ttl_hours=4',
+        '--var',
+        'enable_read_replica=false',
+        '--var',
+        'db_work_mem_kb=0',
     ]);
   });
 
@@ -93,6 +97,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'enable_pgbouncer=false',
       '--extra-vars',
       'pgbouncer_default_pool_size=20',
+        '--extra-vars',
+        'hapi_max_replicas=',
     ]);
   });
 
@@ -108,6 +114,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'enable_pgbouncer=true',
         '--extra-vars',
         'pgbouncer_default_pool_size=25',
+        '--extra-vars',
+        'hapi_max_replicas=',
       ],
     );
   });
