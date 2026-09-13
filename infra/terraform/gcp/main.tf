@@ -136,6 +136,18 @@ resource "google_container_node_pool" "lab" {
       "https://www.googleapis.com/auth/cloud-platform"
     ]
   }
+
+  # GKE adds this resource label to the node pool on its own. Without the
+  # ignore, every plan wants to strip it again, so an unrelated apply (the
+  # hapi-lab-t4 Cloud SQL tier change, 2026-09-13) would also push a node
+  # pool update that can roll nodes and evict HAPI and Prometheus. The only
+  # other workaround, `-target`, panics on apply in Terraform 1.9.8
+  # ("unexpected checkable object var.cluster_node_count").
+  lifecycle {
+    ignore_changes = [
+      node_config[0].resource_labels["goog-gke-node-pool-provisioning-model"],
+    ]
+  }
 }
 
 # Backs the ReadWriteMany PVC scripts/lab benchmark --in-cluster
@@ -334,6 +346,18 @@ resource "google_sql_database" "fhir" {
   # hapi_fhir is being accessed by other users" and `down` stopped with the
   # instance (and its bill) still running.
   deletion_policy = "ABANDON"
+
+  # Cloud SQL rejects any update to a Postgres database ("Update database
+  # operation is not supported for Postgres"), and the provider sends one
+  # even when only deletion_policy changes. Applying the ABANDON policy
+  # above to the existing hapi-lab-t4 failed that way (2026-09-13). New
+  # labs get ABANDON at create time. A lab created before the policy
+  # (hapi-lab-t4) keeps DELETE in state, so run
+  # `terraform state rm google_sql_database.fhir` before destroying it,
+  # as the hapi-lab-t3 teardown did.
+  lifecycle {
+    ignore_changes = [deletion_policy]
+  }
 }
 
 resource "google_sql_user" "fhir" {
