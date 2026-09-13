@@ -71,6 +71,22 @@ spec:
         app.kubernetes.io/part-of: hapi-fhir
     spec:
       restartPolicy: Never
+      # Spread shards across nodes. Without this (no CPU requests, no
+      # affinity) the scheduler packed them onto one node: 8 of 10 in the
+      # Stage 6 run on hapi-lab-t4, all 10 in Stage 7 -- on the only node
+      # at 99% CPU, which also hosted 2 HAPI pods. The shards' own timings
+      # then showed p99 blocked 1.65s and TCP connect 1.40s while HAPI's
+      # server-side mean was 41-55ms on every pod, so a large part of the
+      # measured tail was the starved load generator, not the server.
+      # ScheduleAnyway: prefer an even spread, but never leave a shard
+      # Pending because one node is full.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: echis-k6-shard-job
       # Root-caused live, in two layers:
       #   1. The grafana/k6 image bakes in `USER k6` (uid 12345) -- NOT
       #      root, contrary to this comment's original (wrong) assumption
@@ -147,6 +163,15 @@ spec:
               value: "<SHARD_COUNT>"
             - name: K6_PROMETHEUS_RW_SERVER_URL
               value: "<PROMETHEUS_REMOTE_WRITE_URL>"
+          # A CPU request makes the scheduler, and the cluster autoscaler,
+          # account for the load generator instead of treating it as free.
+          # Observed 128-154m per shard at 100 VUs while CPU-starved; 250m
+          # leaves headroom. No limits on purpose: throttling k6 would
+          # distort the very latencies it measures.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
           volumeMounts:
             - name: scripts
               mountPath: /scripts
