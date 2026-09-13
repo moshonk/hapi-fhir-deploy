@@ -192,6 +192,14 @@ Environment:
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
+  ECHIS_SEEDED_HOUSEHOLDS benchmark only. The --households of the eCHIS dataset loaded
+                          into FHIR_BASE_URL; when set (> 0), the echis workload adds
+                          the sync-engine operations (tag-scoped pulls, Patient
+                          $everything, known-household reads, PUT+PATCH uploads)
+                          against that seeded data. Unset keeps the original mix.
+                          Local mode also honors ECHIS_SEEDED_INDIVIDUALS_PER_HOUSEHOLD
+                          (default 3), ECHIS_SYNC_PAGE_SIZE (200), ECHIS_SYNC_MAX_PAGES (3),
+                          and ECHIS_SYNC_WINDOW_MINUTES (60).
   PROMETHEUS_BASE_URL     Required by baseline profile gates for pod restart and Hikari checks.
   K6_PROMETHEUS_RW_SERVER_URL
                           benchmark only. Overrides automatic live-metrics
@@ -1833,8 +1841,14 @@ cmd_seed_native_in_cluster() {
   kbin="$(kubectl_bin)"
   need_command_unless_dry_run "$kbin"
 
-  log "Creating/updating ConfigMap $configmap_name from scripts/echis_seed.rb"
-  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+  # The generator also needs the eCHIS reference content snapshot. It goes in
+  # gzipped: raw, it would push this ConfigMap past the 262KB
+  # last-applied-configuration annotation that `kubectl apply` writes.
+  local content_gz="$dir/echis-content.json.gz"
+  run bash -c "set -euo pipefail; gzip -9 -n -c \"$ROOT_DIR/benchmarks/echis/content/echis-content.json\" > \"$content_gz\""
+
+  log "Creating/updating ConfigMap $configmap_name from scripts/echis_seed.rb and the eCHIS content snapshot"
+  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" --from-file=echis-content.json.gz=\"$content_gz\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
 
   log "Applying rendered seed Job: $rendered"
   run "$kbin" apply -f "$rendered"
@@ -2221,6 +2235,11 @@ cmd_benchmark_in_cluster() {
   local max_failed_shards=$(((shard_count * 3 + 9) / 10))
   ((max_failed_shards >= 1)) || max_failed_shards=1
 
+  # --households of the seeded eCHIS dataset; > 0 adds the echis workload's
+  # sync-engine operations against it (benchmarks/k6/lib/fhir_benchmark.js).
+  local seeded_households="${ECHIS_SEEDED_HOUSEHOLDS:-0}"
+  [[ "$seeded_households" =~ ^[0-9]+$ ]] || die "ECHIS_SEEDED_HOUSEHOLDS must be a non-negative integer"
+
   log "Rendering $manifest_template for $shard_count shard(s)"
   render_job_manifest "$manifest_template" "$rendered" \
     "<SHARD_COUNT>" "$shard_count" \
@@ -2228,7 +2247,8 @@ cmd_benchmark_in_cluster() {
     "<K6_SCRIPTS_CONFIGMAP>" "$configmap_name" \
     "<SHARD_OUTPUT_PVC>" "$pvc_name" \
     "<PROMETHEUS_REMOTE_WRITE_URL>" "$prometheus_rw_url" \
-    "<MAX_FAILED_SHARDS>" "$max_failed_shards"
+    "<MAX_FAILED_SHARDS>" "$max_failed_shards" \
+    "<ECHIS_SEEDED_HOUSEHOLDS>" "$seeded_households"
 
   local kbin
   kbin="$(kubectl_bin)"

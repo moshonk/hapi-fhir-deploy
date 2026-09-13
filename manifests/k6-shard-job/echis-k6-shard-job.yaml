@@ -163,6 +163,10 @@ spec:
               value: "<SHARD_COUNT>"
             - name: K6_PROMETHEUS_RW_SERVER_URL
               value: "<PROMETHEUS_REMOTE_WRITE_URL>"
+            # --households of the seeded eCHIS dataset; "0" keeps the echis
+            # workload's original self-contained operation mix.
+            - name: ECHIS_SEEDED_HOUSEHOLDS
+              value: "<ECHIS_SEEDED_HOUSEHOLDS>"
           # A CPU request makes the scheduler, and the cluster autoscaler,
           # account for the load generator instead of treating it as free.
           # Observed 128-154m per shard at 100 VUs while CPU-starved; 250m

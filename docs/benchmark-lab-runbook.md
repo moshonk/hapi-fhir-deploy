@@ -219,6 +219,17 @@ scripts/lab benchmark --profile load --echis-tier T2 --run echis-t2
 scripts/lab report --run echis-t2 --cloud "$CLOUD" --name "$LAB_NAME" --profile load
 ```
 
+The generated dataset follows the eCHIS dev server's model: Kenya Location
+hierarchy, `supervision-location` sync tags, and visits generated from the
+dev server's own Questionnaires (see `docs/echis-data-model.md`). Datasets
+seeded before that change have a different shape, so re-seed (or restore a
+backup taken after it) before comparing new runs to them. To also exercise
+the sync engine's calls against the seeded data -- tag-scoped pulls,
+`Patient/$everything`, known-household reads, and PUT+PATCH uploads -- set
+`ECHIS_SEEDED_HOUSEHOLDS` to the seeded `--households` (for example
+`ECHIS_SEEDED_HOUSEHOLDS=33333`) on the benchmark command. Unset, the tier's
+operation mix is unchanged.
+
 T4/T5 additionally require spec 007's PgBouncer pooled connection tier to be
 deployed and validated first, and distributed execution across multiple k6/
 seed-generation pods via `--in-cluster --parallel-shards N` (see
