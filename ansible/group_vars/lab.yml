@@ -106,6 +106,17 @@ pgbouncer_default_pool_size: 20
 pgbouncer_max_client_conn: 1000
 pgbouncer_max_prepared_statements: 200
 
+# PgBouncer CPU per pod (ansible/templates/pgbouncer-deployment.runtime.yaml.j2).
+# Empty = 100m request / 500m limit. PgBouncer is single-threaded, so a limit
+# above ~1000m buys nothing; add replicas for more. Measured on hapi-lab-t4
+# (2026-09-13): at true T3 load both pods sat at the 500m limit, throttled
+# ~50%, with clients queueing. Raise the request with the limit so the
+# scheduler reserves the CPU -- a low request lets pods pack onto saturated
+# nodes, the same trap as hapi_cpu_request. The request must not exceed the
+# limit (Kubernetes rejects the Deployment).
+pgbouncer_cpu_request: ""
+pgbouncer_cpu_limit: ""
+
 # scram-sha-256, not the image's own default (md5): the edoburu/pgbouncer
 # entrypoint only writes the plaintext password into userlist.txt (needed for
 # PgBouncer to complete SCRAM auth against the backend Postgres server) when

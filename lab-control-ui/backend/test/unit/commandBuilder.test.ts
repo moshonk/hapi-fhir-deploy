@@ -101,6 +101,10 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'hapi_max_replicas=',
         '--extra-vars',
         'hapi_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_limit=',
     ]);
   });
 
@@ -120,8 +124,36 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'hapi_max_replicas=',
         '--extra-vars',
         'hapi_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_limit=',
       ],
     );
+  });
+
+  it('deploy (PgBouncer CPU request/limit overrides passed through)', () => {
+    expect(
+      run('deploy', { enable_pgbouncer: true, pgbouncer_cpu_request: '1000m', pgbouncer_cpu_limit: '1000m' }).argv,
+    ).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=1000m',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=1000m',
+    ]);
   });
 
   it('expose-fhir (requires KUBECONFIG, same as pause/resume-autoscaling)', () => {

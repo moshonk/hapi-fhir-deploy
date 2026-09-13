@@ -264,6 +264,26 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     helpText:
       'Kubernetes CPU request per HAPI pod, e.g. 1500m. Blank keeps the chart default of 500m, which understates real use: under T3 load HAPI used 1.3-1.6 cores per pod, so 8 replicas crammed onto 3 nodes at 100% CPU and the autoscaler never added nodes (it only reacts to pods that cannot be scheduled). Set it near real usage so scaling up actually adds nodes. Only the request changes; the 2-core limit stays.',
     cliMapping: '--extra-vars hapi_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_cpu_request',
+    label: 'PgBouncer CPU request (blank = 100m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU request per PgBouncer pod, e.g. 1000m. Set it together with the limit below so the scheduler actually reserves the CPU; a low request lets PgBouncer land on a saturated node. Must not exceed the limit. Only used when PgBouncer is enabled.',
+    cliMapping: '--extra-vars pgbouncer_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_cpu_limit',
+    label: 'PgBouncer CPU limit (blank = 500m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU limit per PgBouncer pod. Blank keeps 500m, which was the ceiling at true T3 load: both pods ran at the limit, throttled about half the time, with clients queueing. PgBouncer is single-threaded, so values above 1000m buy nothing -- add PgBouncer replicas instead. Only used when PgBouncer is enabled.',
+    cliMapping: '--extra-vars pgbouncer_cpu_limit={value} (deploy only)',
   },];
 
 export const GCP_ACTIONS: ActionDef[] = [
@@ -603,6 +623,12 @@ export function gcpBuildCommand(
           // default", so clearing the field reverts an earlier override.
           '--extra-vars',
           `hapi_cpu_request=${f('hapi_cpu_request', '')}`,
+          // Blank passed explicitly too (blank = the template's 100m / 500m),
+          // so clearing either field reverts an earlier override.
+          '--extra-vars',
+          `pgbouncer_cpu_request=${f('pgbouncer_cpu_request', '')}`,
+          '--extra-vars',
+          `pgbouncer_cpu_limit=${f('pgbouncer_cpu_limit', '')}`,
         ],
         env: {},
       };

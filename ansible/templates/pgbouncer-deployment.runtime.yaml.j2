@@ -79,10 +79,16 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 20
             failureThreshold: 5
+          # CPU is per-lab (pgbouncer_cpu_request / pgbouncer_cpu_limit, blank
+          # = 100m / 500m). PgBouncer is single-threaded, so one pod uses at
+          # most ~1 core. At true T3 load on hapi-lab-t4 (2026-09-13) both pods
+          # ran at 463-472m of the 500m limit, CFS-throttled ~50%, with 82
+          # clients waiting -- the limit, not the connection budget, was the
+          # ceiling.
           resources:
             requests:
-              cpu: 100m
+              cpu: "{{ (pgbouncer_cpu_request | default('') | string | trim) or '100m' }}"
               memory: 128Mi
             limits:
-              cpu: 500m
+              cpu: "{{ (pgbouncer_cpu_limit | default('') | string | trim) or '500m' }}"
               memory: 256Mi

@@ -12,7 +12,7 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 | Action | `scripts/lab` invocation | Confirmation required |
 |---|---|---|
 | `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours} --var enable_read_replica={enable_read_replica} --var db_work_mem_kb={db_work_mem_kb}` | Yes — billable resource creation |
-| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas} --extra-vars hapi_cpu_request={hapi_cpu_request}` | No |
+| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas} --extra-vars hapi_cpu_request={hapi_cpu_request} --extra-vars pgbouncer_cpu_request={pgbouncer_cpu_request} --extra-vars pgbouncer_cpu_limit={pgbouncer_cpu_limit}` | No |
 | `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | Yes — names the exposure scope |
 | `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
@@ -109,6 +109,9 @@ Notes:
   reason `enable_pgbouncer` is never conditionally omitted.
 - `hapi_cpu_request` (`deploy`) is passed explicitly too, blank meaning the
   chart's own CPU request, for the same revert-on-clear reason.
+- `pgbouncer_cpu_request` and `pgbouncer_cpu_limit` (`deploy`) are passed
+  explicitly as well, blank meaning the PgBouncer template's 100m request and
+  500m limit, for the same revert-on-clear reason.
 - `enable_pgbouncer` (`deploy`) is always passed explicitly, true or false,
   never conditionally omitted -- so toggling it OFF on a later redeploy of
   an already-pooled lab actually disables the tier again (`ansible/
