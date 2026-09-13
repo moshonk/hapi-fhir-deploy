@@ -131,14 +131,16 @@ Both require `--cloud`/`--name` (unlike `seed`'s generate path) to locate
 this lab's `terraform-output.json` (written by `up`), which is where the
 database connection details come from, and both need `pg_dump`/`pg_restore`
 installed (`PG_DUMP_BIN`/`PG_RESTORE_BIN` to override which executable).
-Their major version must be **>= the Cloud SQL server's** (16 or 17) and
-**not newer than it**: an older `pg_dump` refuses to dump the server at all,
-and a newer one writes GUCs the server rejects (`pg_dump` 18 against a v16
-server emits `SET transaction_timeout` → `unrecognized configuration
-parameter`, and `pg_restore` then exits non-zero and `scripts/lab` reports
-failure *even though the data restored*). The Lab Control UI image pins
-`postgresql-client-17` for exactly this reason; on a bare-metal host, match
-it to the lab's `postgres_version`.
+Their major version must be **at least the Cloud SQL server's** (16 or 17):
+an older `pg_dump` refuses to dump a newer server at all. A newer client
+works. `pg_restore` 17 against a v16 server opens every worker connection
+with `SET transaction_timeout`, a 17-only parameter, so it logs one
+`unrecognized configuration parameter` error per connection and exits
+non-zero even though every object restored; `scripts/lab` treats the
+restore as successful when those are its only errors. The Lab Control UI
+image pins `postgresql-client-17` so one client covers both supported server
+majors; on a bare-metal host, use a client at least as new as the lab's
+`postgres_version`.
 
 Cloud SQL's database lives on a private IP inside the lab's own dedicated
 VPC (`infra/terraform/gcp/main.tf`'s `google_compute_network.lab`), which a
@@ -147,7 +149,7 @@ can't reach directly, and it has no public IP either. On GCP, both commands
 start a [Cloud SQL Auth
 Proxy](https://github.com/GoogleCloudPlatform/cloud-sql-proxy) in `--psc`
 mode automatically (`CLOUD_SQL_PROXY_BIN`/`CLOUD_SQL_PROXY_PORT` to
-override) to bridge that gap, unconditionally, for every lab whose
+override; the port otherwise defaults to a free one chosen per run) to bridge that gap, unconditionally, for every lab whose
 `terraform-output.json` carries a `database_connection_name` (every lab
 `up` since this was added). Private Service Connect needs real consumer-side
 networking, not just credentials: `ensure_cloud_sql_psc_endpoint`
