@@ -160,3 +160,20 @@ variable "shard_output_capacity_gb" {
     error_message = "shard_output_capacity_gb must be at least 1024 (BASIC_HDD's minimum)."
   }
 }
+
+variable "enable_read_replica" {
+  description = "Provision a Cloud SQL read replica of the primary (same tier/edition/region). Opt-in and disabled by default -- capacity-enhancement-tracker Stage 5: the replica is provisioned here as infrastructure only; nothing routes queries to it yet, since the pinned hapi-fhir-jpaserver-starter image has no read/write datasource routing support (would require forking the pinned image, against this repo's guardrails)."
+  type        = bool
+  default     = false
+}
+
+variable "db_work_mem_kb" {
+  description = "Cloud SQL `work_mem` in kB. 0 (the default) leaves the flag unset, so PostgreSQL's own 4MB default applies. Measured warning before raising this: a global 32768 (32MB) on db-custom-2-7680 REGRESSED the 10-shard T3 `load` benchmark badly (271.4 -> 92.8 req/s, 0.05% -> 5.50% failures, 963 -> 5,630ms mean latency) -- work_mem is per sort/hash operation per connection, so a large global value multiplied across ~100 concurrent connections starved a 7.5GB instance. It also did NOT keep the dominant COUNT(DISTINCT res_id) sort in memory (2M rows needs far more), which was the reason for trying it. Raise only alongside a bigger db_sku, and re-benchmark."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = floor(var.db_work_mem_kb) == var.db_work_mem_kb && (var.db_work_mem_kb == 0 || var.db_work_mem_kb >= 64)
+    error_message = "db_work_mem_kb must be a whole number of kB: 0 (unset, use the PostgreSQL default) or at least 64 (PostgreSQL's own work_mem minimum). Cloud SQL rejects a decimal value such as 64.5."
+  }
+}

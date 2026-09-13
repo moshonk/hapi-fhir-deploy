@@ -79,6 +79,10 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'db_disk_size_gb=256',
       '--var',
       'ttl_hours=4',
+        '--var',
+        'enable_read_replica=false',
+        '--var',
+        'db_work_mem_kb=0',
     ]);
   });
 
@@ -93,6 +97,18 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'enable_pgbouncer=false',
       '--extra-vars',
       'pgbouncer_default_pool_size=20',
+        '--extra-vars',
+        'hapi_max_replicas=',
+        '--extra-vars',
+        'hapi_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_limit=',
+        '--extra-vars',
+        'hapi_tomcat_max_threads=',
+        '--extra-vars',
+        'hapi_min_replicas=',
     ]);
   });
 
@@ -108,8 +124,100 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'enable_pgbouncer=true',
         '--extra-vars',
         'pgbouncer_default_pool_size=25',
+        '--extra-vars',
+        'hapi_max_replicas=',
+        '--extra-vars',
+        'hapi_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_limit=',
+        '--extra-vars',
+        'hapi_tomcat_max_threads=',
+        '--extra-vars',
+        'hapi_min_replicas=',
       ],
     );
+  });
+
+  it('deploy (PgBouncer CPU request/limit overrides passed through)', () => {
+    expect(
+      run('deploy', { enable_pgbouncer: true, pgbouncer_cpu_request: '1000m', pgbouncer_cpu_limit: '1000m' }).argv,
+    ).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=1000m',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=1000m',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=',
+      '--extra-vars',
+      'hapi_min_replicas=',
+    ]);
+  });
+
+  it('deploy (HAPI Tomcat max threads override passed through)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, hapi_tomcat_max_threads: '40' }).argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=40',
+      '--extra-vars',
+      'hapi_min_replicas=',
+    ]);
+  });
+
+  it('deploy (HAPI min replicas override passed through)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, hapi_min_replicas: '6' }).argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=',
+      '--extra-vars',
+      'hapi_min_replicas=6',
+    ]);
   });
 
   it('expose-fhir (requires KUBECONFIG, same as pause/resume-autoscaling)', () => {
@@ -487,5 +595,34 @@ describe('resolveConfirmationMessage (FR-012 -- name the actual configured value
     expect(message).toContain("'my-real-lab'");
     expect(message).toContain('2048GB');
     expect(message).not.toContain('{shard_output_capacity_gb}');
+  });
+});
+
+describe('GCP provider prerequisite wiring (cli-action-map.md -- backup-db DB reachability)', () => {
+  const prereqIds = new Set(gcpProvider.prerequisiteChecks.map((c) => c.id));
+
+  it('exposes a blocking cloud-sql-proxy prerequisite check (Cloud SQL Auth Proxy --psc)', () => {
+    const check = gcpProvider.prerequisiteChecks.find((c) => c.id === 'cloud-sql-proxy');
+    expect(check).toBeDefined();
+    expect(check!.severity).toBe('blocking');
+  });
+
+  it("backup-db requires postgresql-client, cloud-sql-proxy AND gcloud (the proxy always starts once terraform-output.json carries database_connection_name, and PSC endpoint reconciliation shells out to gcloud)", () => {
+    const backupDb = gcpProvider.actions.find((a) => a.name === 'backup-db')!;
+    expect(backupDb.requiredPrerequisiteIds).toEqual(['postgresql-client', 'cloud-sql-proxy', 'gcloud']);
+  });
+
+  it('seed requires neither -- restore-from-backup is an ephemeral per-trigger choice, generate-fresh needs no DB client', () => {
+    const seed = gcpProvider.actions.find((a) => a.name === 'seed')!;
+    expect(seed.requiredPrerequisiteIds).not.toContain('postgresql-client');
+    expect(seed.requiredPrerequisiteIds).not.toContain('cloud-sql-proxy');
+  });
+
+  it('every requiredPrerequisiteId across all actions has a matching prerequisiteChecks entry', () => {
+    for (const action of gcpProvider.actions) {
+      for (const id of action.requiredPrerequisiteIds) {
+        expect(prereqIds.has(id), `${action.name} -> ${id}`).toBe(true);
+      }
+    }
   });
 });

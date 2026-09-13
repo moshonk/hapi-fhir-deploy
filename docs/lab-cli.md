@@ -129,12 +129,47 @@ scripts/lab seed --restore-from-backup --cloud gcp --name hapi-lab-t3
 
 Both require `--cloud`/`--name` (unlike `seed`'s generate path) to locate
 this lab's `terraform-output.json` (written by `up`), which is where the
-database connection details come from — `pg_dump`/`pg_restore` connect
-directly to the database, so the host running `scripts/lab` needs network
-reachability to it (e.g. running on a GCE VM inside the same VPC as a
-private-IP Cloud SQL instance) and `pg_dump`/`pg_restore` installed
-(`PG_DUMP_BIN`/`PG_RESTORE_BIN` to override which executable). Dumps use
-directory format (parallelizable via `BACKUP_JOBS`, default `4`) at
+database connection details come from, and both need `pg_dump`/`pg_restore`
+installed (`PG_DUMP_BIN`/`PG_RESTORE_BIN` to override which executable).
+Their major version must be **at least the Cloud SQL server's** (16 or 17):
+an older `pg_dump` refuses to dump a newer server at all. A newer client
+works. `pg_restore` 17 against a v16 server opens every worker connection
+with `SET transaction_timeout`, a 17-only parameter, so it logs one
+`unrecognized configuration parameter` error per connection and exits
+non-zero even though every object restored; `scripts/lab` treats the
+restore as successful when those are its only errors. The Lab Control UI
+image pins `postgresql-client-17` so one client covers both supported server
+majors; on a bare-metal host, use a client at least as new as the lab's
+`postgres_version`.
+
+Cloud SQL's database lives on a private IP inside the lab's own dedicated
+VPC (`infra/terraform/gcp/main.tf`'s `google_compute_network.lab`), which a
+host outside that VPC — e.g. the Lab Control UI's control-plane host —
+can't reach directly, and it has no public IP either. On GCP, both commands
+start a [Cloud SQL Auth
+Proxy](https://github.com/GoogleCloudPlatform/cloud-sql-proxy) in `--psc`
+mode automatically (`CLOUD_SQL_PROXY_BIN`/`CLOUD_SQL_PROXY_PORT` to
+override; the port otherwise defaults to a free one chosen per run) to bridge that gap, unconditionally, for every lab whose
+`terraform-output.json` carries a `database_connection_name` (every lab
+`up` since this was added). Private Service Connect needs real consumer-side
+networking, not just credentials: `ensure_cloud_sql_psc_endpoint`
+(`scripts/lab`) reconciles a per-lab reserved IP + forwarding rule (targeting
+the instance's `database_psc_service_attachment_link`) plus a shared
+per-region private DNS zone/record (for its `database_psc_dns_name`, which
+is what the proxy actually dials — PSC has no direct IP/connection-name path)
+in the consumer network — autodetected from this host's own GCE instance
+metadata, or set explicitly via `PSC_CONSUMER_NETWORK`/
+`PSC_CONSUMER_SUBNETWORK`/`PSC_CONSUMER_REGION`. `down` tears the per-lab
+forwarding rule/IP back down (the shared DNS zone stays, for other labs).
+Needs `roles/cloudsql.client`, `roles/compute.networkAdmin`, and
+`roles/dns.admin` (or equivalent) on the active gcloud/ADC identity, and the
+Cloud SQL Admin API enabled on the project. A lab `up`/applied before this
+was added needs a fresh `up`/`terraform apply` to pick up the new outputs —
+`backup-db`/`seed --restore-from-backup` abort with that instruction rather
+than silently falling back to a connection mode that can't reach a
+private-IP-only instance. aws/azure have no equivalent output and always
+connect directly. Dumps use directory format
+(parallelizable via `BACKUP_JOBS`, default `4`) at
 `--backup-dir`, which defaults to `ansible/artifacts/lab/<cloud>/<name>/db-backup`
 and is overwritten on every `backup-db` run. The restore applies
 `--clean --if-exists`, so it's safe to run against a database that already

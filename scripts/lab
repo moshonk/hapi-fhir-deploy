@@ -92,11 +92,14 @@ Commands:
                        --backup-dir (defaults to this lab's own artifact directory) so it can
                        be pg_restore'd back in via `seed --restore-from-backup` on a later run
                        instead of regenerating and re-POSTing synthetic data from scratch.
-                       Connects directly to the database using this lab's `up`-time Terraform
-                       outputs (terraform-output.json) -- requires network reachability to the
-                       database (e.g. running on a host inside the same VPC) and pg_dump/
-                       pg_restore installed locally. Overwrites any existing backup at the same
-                       --backup-dir.
+                       Uses this lab's `up`-time Terraform outputs (terraform-output.json) to
+                       locate the database, and pg_dump/pg_restore must be installed locally.
+                       On GCP, if the database is only reachable via a private IP inside this
+                       lab's own VPC (the default), a Cloud SQL Auth Proxy is started
+                       automatically so a host outside that VPC (e.g. the Lab Control UI's
+                       control-plane host) can still connect -- see CLOUD_SQL_PROXY_BIN below;
+                       requires roles/cloudsql.client on the active gcloud/ADC identity.
+                       Overwrites any existing backup at the same --backup-dir.
   benchmark            Run a k6 FHIR benchmark profile. By default, auto-detects a
                        kubeconfig (LAB_KUBECONFIG > KUBECONFIG > --cloud/--name's
                        generated one) and streams live metrics to Prometheus's
@@ -216,6 +219,24 @@ Environment:
                           `seed --restore-from-backup`; defaults to 4. Directory-format
                           dump/restore is required for this to have any effect (plain
                           format dumps are always single-threaded).
+  CLOUD_SQL_PROXY_BIN     cloud-sql-proxy executable; defaults to cloud-sql-proxy. GCP
+                          only. Used by `backup-db`/`seed --restore-from-backup` (in --psc
+                          mode) to reach a private-IP-only Cloud SQL instance from a host
+                          outside this lab's own VPC -- automatic whenever
+                          terraform-output.json has a database_connection_name (every lab
+                          `up` since this was added); requires the active gcloud/ADC
+                          identity to hold roles/cloudsql.client, roles/compute.networkAdmin,
+                          and roles/dns.admin (or equivalent) on the project.
+  CLOUD_SQL_PROXY_PORT    Local port the Cloud SQL Auth Proxy listens on; defaults to
+                          a free port chosen per run, so concurrent proxy-using
+                          actions never share one. Only used when the proxy
+                          actually starts (see CLOUD_SQL_PROXY_BIN above).
+  PSC_CONSUMER_NETWORK    VPC network/subnetwork/region this host creates its Private
+  PSC_CONSUMER_SUBNETWORK Service Connect endpoint in (ensure_cloud_sql_psc_endpoint,
+  PSC_CONSUMER_REGION     used by CLOUD_SQL_PROXY_BIN's --psc mode above). Autodetected
+                          from this host's own GCE instance metadata when unset -- only
+                          needed when running scripts/lab from a non-GCE host with routable
+                          access to the target network (e.g. over Cloud VPN/Interconnect).
   KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster,
                           pause-autoscaling, and resume-autoscaling.
   LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
@@ -971,6 +992,16 @@ PYEOF
       else
         add_prereq_check "gcloud-adc" "gcloud Application Default Credentials" "warn" "no ADC token -- Terraform will fail to authenticate. Run: gcloud auth application-default login"
       fi
+      # Only needed when backup-db/seed --restore-from-backup actually has
+      # to start one (start_cloud_sql_proxy_if_needed -- a lab whose
+      # database is reachable directly, e.g. this host is already inside
+      # the lab's own VPC, never touches it), same "not required by seed
+      # itself" reasoning as postgresql-client above.
+      if command -v "${CLOUD_SQL_PROXY_BIN:-cloud-sql-proxy}" >/dev/null 2>&1; then
+        add_prereq_check "cloud-sql-proxy" "Cloud SQL Auth Proxy" "pass" "present"
+      else
+        add_prereq_check "cloud-sql-proxy" "Cloud SQL Auth Proxy" "fail" "cloud-sql-proxy not found -- only needed for 'backup-db'/'seed --restore-from-backup' when this host can't reach the database's private IP directly: https://github.com/GoogleCloudPlatform/cloud-sql-proxy"
+      fi
       ;;
     aws)
       if command -v aws >/dev/null 2>&1; then
@@ -1221,6 +1252,17 @@ render_job_manifest() {
 # (infra/terraform/{aws,azure,gcp}/outputs.tf) exposes these same five keys,
 # so this is cloud-agnostic despite Cloud SQL/RDS/Flexible Server having
 # very different provisioning underneath.
+#
+# Also sets DATABASE_CONNECTION_NAME/DATABASE_PSC_SERVICE_ATTACHMENT/
+# DATABASE_PSC_DNS_NAME (possibly empty) from the GCP-only
+# database_connection_name/database_psc_service_attachment_link/
+# database_psc_dns_name outputs, used by start_cloud_sql_proxy_if_needed
+# and ensure_cloud_sql_psc_endpoint below -- optional (never aborts if
+# absent) so an aws/azure lab, or a GCP one whose terraform-output.json
+# predates these outputs, still gets a usable direct PGHOST/PGPORT here
+# exactly as before (start_cloud_sql_proxy_if_needed itself is what aborts
+# with a re-run-`up` message if DATABASE_CONNECTION_NAME is present but the
+# PSC outputs it needs aren't).
 db_connection_from_terraform_output() {
   local output_file="$1"
   [[ -f "$output_file" ]] || die "Terraform output not found for $CLOUD lab '$NAME': $output_file (run 'up' first)"
@@ -1234,9 +1276,15 @@ db_connection_from_terraform_output() {
       abort "missing terraform output '\''#{key}'\'' in #{ARGV[0]}" if value.nil?
       puts "#{key}=#{value}"
     end
+    puts "database_connection_name=#{data.dig("database_connection_name", "value")}"
+    puts "database_psc_service_attachment_link=#{data.dig("database_psc_service_attachment_link", "value")}"
+    puts "database_psc_dns_name=#{data.dig("database_psc_dns_name", "value")}"
   ' "$output_file")" || die "failed to read database connection details from $output_file"
 
   local line key value
+  DATABASE_CONNECTION_NAME=""
+  DATABASE_PSC_SERVICE_ATTACHMENT=""
+  DATABASE_PSC_DNS_NAME=""
   while IFS='=' read -r key value; do
     case "$key" in
       database_endpoint) PGHOST="$value" ;;
@@ -1244,9 +1292,333 @@ db_connection_from_terraform_output() {
       database_name) PGDATABASE="$value" ;;
       database_username) PGUSER="$value" ;;
       database_password) PGPASSWORD="$value" ;;
+      database_connection_name) DATABASE_CONNECTION_NAME="$value" ;;
+      database_psc_service_attachment_link) DATABASE_PSC_SERVICE_ATTACHMENT="$value" ;;
+      database_psc_dns_name) DATABASE_PSC_DNS_NAME="$value" ;;
     esac
   done <<<"$exports"
   export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+}
+
+# Queries this host's own GCE instance metadata (fails fast, and silently,
+# on a non-GCE host -- callers treat empty output as "unknown", not an
+# error, since PSC_CONSUMER_NETWORK/SUBNETWORK/REGION below cover that
+# case).
+gce_metadata_value() {
+  curl -fsS -m 2 -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/instance/$1" 2>/dev/null
+}
+
+# Idempotently provisions the consumer-side Private Service Connect
+# plumbing that `cloud-sql-proxy --psc` needs to reach a PSC-enabled Cloud
+# SQL instance (infra/terraform/gcp/main.tf's psc_config) from a network
+# OTHER than the lab's own google_compute_network.lab -- e.g. the Lab
+# Control UI's control-plane host, which is exactly why this whole feature
+# exists (see docs/lab-cli.md). None of this is Terraform-managed: unlike
+# the lab's own database, WHICH lab's instance is being backed up varies
+# per invocation, so this reconciles real GCP resources by hand, the same
+# way expose_public_service already does for firewall rules.
+#
+# What gets created, all named/scoped so a second call (a later
+# backup-db/seed --restore-from-backup for the same lab, or the first for a
+# different one) is a no-op or an addition, never a conflict:
+#   - google_compute_address + forwarding rule named "$NAME-cloudsql-psc",
+#     in the consumer network/subnet/region below, targeting
+#     DATABASE_PSC_SERVICE_ATTACHMENT -- one pair per lab (the instance
+#     connection name in DATABASE_CONNECTION_NAME is only unique per lab).
+#   - a private Cloud DNS zone named after the instance's own region (e.g.
+#     "cloudsql-psc-us-central1", visible to the consumer network) holding
+#     an A record for DATABASE_PSC_DNS_NAME -> the forwarding rule's IP --
+#     shared across every lab in that region, since cloud-sql-proxy --psc
+#     resolves this DNS name rather than dialing an IP/connection name
+#     directly (confirmed against github.com/GoogleCloudPlatform/
+#     cloud-sql-proxy's PSC docs -- there is no IP- or connection-name-only
+#     path for PSC the way default/--private-ip mode has).
+#
+# Consumer network/subnet/region come from PSC_CONSUMER_NETWORK/
+# PSC_CONSUMER_SUBNETWORK/PSC_CONSUMER_REGION if set, else autodetected via
+# this host's own GCE instance metadata (gce_metadata_value) -- set the
+# env vars explicitly when running scripts/lab from a non-GCE host with
+# routable access to the target network (e.g. over Cloud VPN/Interconnect).
+# Requires roles/compute.networkAdmin and roles/dns.admin (or equivalent)
+# on the active gcloud/ADC identity, on top of roles/cloudsql.client.
+#
+# Writes a small state file under this lab's own state_dir() recording
+# exactly what was created, so teardown_cloud_sql_psc_endpoint (called from
+# `down`) can remove it without re-deriving network/region -- deliberately
+# does NOT delete the shared per-region DNS zone, since other labs' records
+# may still live in it.
+# Blocks until the PSC DNS name answers with the endpoint's IP through this
+# host's own resolver -- the same resolver cloud-sql-proxy dials through.
+# Root-caused live (hapi-lab-t3 backup-db, 2026-09-12): the private zone and
+# A record are created by ensure_cloud_sql_psc_endpoint seconds before the
+# proxy's first dial, Cloud DNS takes a few seconds to serve a new private
+# record, and the dial fails with "dial tcp: lookup <name>" in
+# cloud-sql-proxy.log -- which pg_dump/pg_restore only ever surface as the
+# misleading "server closed the connection unexpectedly". The timeout is
+# well past Cloud DNS's default negative-caching TTL (300s), because a
+# lookup that races ahead of propagation can be negatively cached by
+# systemd-resolved for that long.
+wait_for_psc_dns() {
+  local name="$1" expected_ip="$2"
+  [[ "$DRY_RUN" == true ]] && return 0
+  local waited=0 resolved=""
+  until resolved="$(getent hosts "$name" | awk '{print $1; exit}')" && [[ "$resolved" == "$expected_ip" ]]; do
+    if [[ $waited -ge 360 ]]; then
+      die "PSC DNS name $name did not resolve to $expected_ip within 360s (last answer: '${resolved:-none}') -- check the private zone is visible to this host's VPC network"
+    fi
+    waited=$((waited + 2))
+    sleep 2
+  done
+  log "PSC DNS name $name resolves to $expected_ip (waited ${waited}s)"
+}
+
+ensure_cloud_sql_psc_endpoint() {
+  [[ "$CLOUD" == "gcp" ]] || return 0
+  [[ "$DRY_RUN" == true ]] && return 0
+  [[ -n "${DATABASE_CONNECTION_NAME:-}" ]] || return 0
+
+  need_command gcloud
+
+  local network="${PSC_CONSUMER_NETWORK:-}"
+  local subnetwork="${PSC_CONSUMER_SUBNETWORK:-}"
+  local region="${PSC_CONSUMER_REGION:-}"
+  if [[ -z "$network" || -z "$subnetwork" || -z "$region" ]]; then
+    local md_network md_subnetwork
+    # `|| true`: gce_metadata_value's curl fails on a non-GCE host (no
+    # metadata server) or a transient lookup error -- under `set -e` an
+    # unguarded failing assignment would abort the whole script here
+    # instead of falling through to the "could not determine" die() below,
+    # which is the actual intended fallback path for that case.
+    md_network="$(gce_metadata_value network-interfaces/0/network)" || true
+    md_subnetwork="$(gce_metadata_value network-interfaces/0/subnetwork)" || true
+    [[ -n "$network" ]] || network="${md_network##*/}"
+    [[ -n "$subnetwork" ]] || subnetwork="${md_subnetwork##*/}"
+    if [[ -z "$region" ]]; then
+      region="$(printf '%s' "$md_subnetwork" | sed -n 's#.*/regions/\([^/]*\)/subnetworks/.*#\1#p')"
+    fi
+  fi
+  if [[ -z "$network" || -z "$subnetwork" || -z "$region" ]]; then
+    die "could not determine this host's own VPC network/subnetwork/region (not a GCE VM?) -- set PSC_CONSUMER_NETWORK/PSC_CONSUMER_SUBNETWORK/PSC_CONSUMER_REGION explicitly"
+  fi
+
+  # DATABASE_CONNECTION_NAME is PROJECT:REGION:INSTANCE -- the PSC consumer
+  # allow-list is project-scoped (main.tf's psc_config.allowed_consumer_projects),
+  # so the consumer resources below always live in the SAME project as the
+  # target instance, never a separate --var project_id.
+  local project_id="${DATABASE_CONNECTION_NAME%%:*}"
+  local psc_name="${NAME}-cloudsql-psc"
+  local network_uri="projects/${project_id}/global/networks/${network}"
+
+  # DATABASE_PSC_DNS_NAME looks like "<uid>.<uid2>.<region>.sql.goog." --
+  # strip the two per-instance labels to get the shared zone suffix
+  # (e.g. "us-central1.sql.goog.") every lab in that region reuses.
+  local zone_suffix="${DATABASE_PSC_DNS_NAME#*.*.}"
+  local dns_zone="cloudsql-psc-${zone_suffix%.}"
+  dns_zone="${dns_zone//./-}"
+
+  # Record what this function is about to create BEFORE creating any of it.
+  # These resources live outside Terraform, teardown_cloud_sql_psc_endpoint
+  # learns what to delete only from this file, and it skips entries that
+  # were never created -- so a failure part-way through setup (DNS wait
+  # timeout, quota error, ...) still leaves `down` able to clean up.
+  mkdir -p "$(state_dir)"
+  {
+    printf 'PROJECT_ID=%s\n' "$project_id"
+    printf 'REGION=%s\n' "$region"
+    printf 'ADDRESS_NAME=%s\n' "$psc_name"
+    printf 'FORWARDING_RULE=%s\n' "$psc_name"
+    printf 'DNS_ZONE=%s\n' "$dns_zone"
+    printf 'DNS_RECORD=%s\n' "$DATABASE_PSC_DNS_NAME"
+  } >"$(state_dir)/cloud-sql-psc-endpoint.env"
+
+  if ! gcloud compute addresses describe "$psc_name" --project "$project_id" --region "$region" >/dev/null 2>&1; then
+    log "Reserving internal IP '$psc_name' for Cloud SQL PSC in $network/$subnetwork ($region)"
+    run gcloud compute addresses create "$psc_name" --project "$project_id" --region "$region" --subnet "$subnetwork"
+  fi
+
+  # A rule found by name can still target an OLD service attachment (the
+  # lab's Cloud SQL instance was recreated since the rule was made), and DNS
+  # would then point at a dead endpoint. Compare targets, normalised to the
+  # "projects/..." form, and recreate the rule when they differ.
+  local existing_target=""
+  existing_target="$(gcloud compute forwarding-rules describe "$psc_name" --project "$project_id" --region "$region" --format='value(target)' 2>/dev/null)" || existing_target=""
+  if [[ -n "$existing_target" && "projects/${existing_target#*projects/}" != "projects/${DATABASE_PSC_SERVICE_ATTACHMENT#*projects/}" ]]; then
+    log "Cloud SQL PSC forwarding rule '$psc_name' targets $existing_target, not $DATABASE_PSC_SERVICE_ATTACHMENT -- recreating it"
+    run gcloud compute forwarding-rules delete "$psc_name" --project "$project_id" --region "$region" --quiet
+    existing_target=""
+  fi
+  if [[ -z "$existing_target" ]]; then
+    log "Creating Cloud SQL PSC forwarding rule '$psc_name' -> $DATABASE_PSC_SERVICE_ATTACHMENT"
+    run gcloud compute forwarding-rules create "$psc_name" \
+      --project "$project_id" --region "$region" \
+      --network "$network_uri" --address "$psc_name" \
+      --target-service-attachment "$DATABASE_PSC_SERVICE_ATTACHMENT" \
+      --allow-psc-global-access
+  fi
+
+  local endpoint_ip
+  endpoint_ip="$(gcloud compute addresses describe "$psc_name" --project "$project_id" --region "$region" --format='value(address)')" \
+    || die "failed to read reserved IP for Cloud SQL PSC endpoint '$psc_name'"
+
+  # The zone is shared by every lab in the region, so another run can create
+  # it between this describe and this create; treat "already exists" as success.
+  if ! gcloud dns managed-zones describe "$dns_zone" --project "$project_id" >/dev/null 2>&1; then
+    log "Creating shared private DNS zone '$dns_zone' ($zone_suffix) for Cloud SQL PSC in $network"
+    if ! run gcloud dns managed-zones create "$dns_zone" \
+      --project "$project_id" --dns-name "$zone_suffix" --visibility private \
+      --networks "$network_uri" \
+      --description "scripts/lab: Cloud SQL PSC DNS zone for cloud-sql-proxy --psc from $network. Shared across every lab's backup-db/seed --restore-from-backup in this region; not deleted by any single lab's 'down' (see teardown_cloud_sql_psc_endpoint)."; then
+      gcloud dns managed-zones describe "$dns_zone" --project "$project_id" >/dev/null 2>&1 \
+        || die "failed to create shared private DNS zone '$dns_zone'"
+      log "Shared DNS zone '$dns_zone' was created concurrently by another run; reusing it"
+    fi
+  fi
+
+  if gcloud dns record-sets describe "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A >/dev/null 2>&1; then
+    run gcloud dns record-sets update "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A --rrdatas "$endpoint_ip"
+  else
+    run gcloud dns record-sets create "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A --rrdatas "$endpoint_ip"
+  fi
+
+  wait_for_psc_dns "$DATABASE_PSC_DNS_NAME" "$endpoint_ip"
+}
+
+# Reverse of ensure_cloud_sql_psc_endpoint for one lab: deletes its
+# forwarding rule + reserved IP + DNS record (never the shared per-region
+# DNS zone -- other labs' records may still live in it). Safe to call even
+# when no PSC endpoint was ever created for this lab (no state file ->
+# no-op). Called from `down`, non-fatally, same as unexpose_public_service.
+teardown_cloud_sql_psc_endpoint() {
+  [[ "$CLOUD" == "gcp" ]] || return 0
+  local state_file
+  state_file="$(state_dir)/cloud-sql-psc-endpoint.env"
+  [[ -f "$state_file" ]] || return 0
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would clean up the Cloud SQL PSC consumer endpoint recorded in $state_file (state kept)"
+    return 0
+  fi
+
+  need_command gcloud
+
+  local project_id region address_name forwarding_rule dns_zone dns_record
+  project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
+  region="$(grep -m1 '^REGION=' "$state_file" | cut -d= -f2)" || true
+  address_name="$(grep -m1 '^ADDRESS_NAME=' "$state_file" | cut -d= -f2)" || true
+  forwarding_rule="$(grep -m1 '^FORWARDING_RULE=' "$state_file" | cut -d= -f2)" || true
+  dns_zone="$(grep -m1 '^DNS_ZONE=' "$state_file" | cut -d= -f2)" || true
+  dns_record="$(grep -m1 '^DNS_RECORD=' "$state_file" | cut -d= -f2)" || true
+
+  log "Cleaning up Cloud SQL PSC consumer endpoint for lab '$NAME' (forwarding rule '$forwarding_rule') -- shared DNS zone '$dns_zone' is left in place for other labs"
+
+  if [[ -n "$dns_record" && -n "$dns_zone" ]] && gcloud dns record-sets describe "$dns_record" --project "$project_id" --zone "$dns_zone" --type A >/dev/null 2>&1; then
+    run gcloud dns record-sets delete "$dns_record" --project "$project_id" --zone "$dns_zone" --type A --quiet
+  fi
+  if [[ -n "$forwarding_rule" ]] && gcloud compute forwarding-rules describe "$forwarding_rule" --project "$project_id" --region "$region" >/dev/null 2>&1; then
+    run gcloud compute forwarding-rules delete "$forwarding_rule" --project "$project_id" --region "$region" --quiet
+  fi
+  if [[ -n "$address_name" ]] && gcloud compute addresses describe "$address_name" --project "$project_id" --region "$region" >/dev/null 2>&1; then
+    run gcloud compute addresses delete "$address_name" --project "$project_id" --region "$region" --quiet
+  fi
+
+  rm -f "$state_file"
+}
+
+# Starts the Cloud SQL Auth Proxy (GCP only) in --psc mode and rewrites
+# PGHOST/PGPORT (already exported by db_connection_from_terraform_output,
+# which must be called first) to point at it, so pg_dump/pg_restore can
+# reach a private-IP-only Cloud SQL instance from a host outside this lab's
+# own dedicated VPC (infra/terraform/gcp/main.tf's google_compute_network.lab)
+# -- e.g. the Lab Control UI's control-plane host, which lives on a
+# different network than the lab's own Terraform-managed one.
+#
+# Deliberately does NOT use --private-ip (needs a VPC route this host
+# doesn't have, confirmed live: `dial tcp 10.99.0.3:3307: i/o timeout`) or
+# default/public mode (needs the instance to have a public IP; this one
+# doesn't -- main.tf's ipv4_enabled is false -- so default mode's local
+# port opens fine but every real connection gets closed immediately once
+# the proxy fails to dial a public IP that doesn't exist, confirmed live:
+# pg_dump's "server closed the connection unexpectedly"). --psc is the only
+# mode that works for a private-IP-only instance from outside its VPC; see
+# ensure_cloud_sql_psc_endpoint above for what it requires.
+#
+# No-op (leaves PGHOST/PGPORT untouched) for aws/azure or a dry run. On GCP
+# it aborts -- rather than falling back to the private PGHOST, which a host
+# outside the lab's VPC can't reach -- when terraform-output.json lacks
+# database_connection_name or the PSC outputs; a lab whose output predates
+# them needs a fresh `up`/apply.
+#
+# The proxy listens on CLOUD_SQL_PROXY_PORT if set, otherwise on a free port
+# chosen for this run, and readiness is read from this run's own proxy log
+# ("Listening on 127.0.0.1:<port>" and "ready for new connections"), never
+# from a bare TCP connect. Two proxy-using actions running at once (two labs,
+# or backup-db and a restore for one lab) must never reach each other's proxy
+# and dump or restore the wrong database.
+#
+# Sets CLOUD_SQL_PROXY_PID (empty if the proxy was never started). Callers
+# MUST install `trap stop_cloud_sql_proxy EXIT` BEFORE calling this, so a
+# readiness failure inside it (die) or a failed pg_dump/pg_restore (which
+# exits the whole script under `set -e`) never leaves the proxy running.
+CLOUD_SQL_PROXY_PID=""
+
+start_cloud_sql_proxy_if_needed() {
+  CLOUD_SQL_PROXY_PID=""
+  [[ "$CLOUD" == "gcp" ]] || return 0
+  [[ "$DRY_RUN" == true ]] && return 0
+
+  if [[ -z "${DATABASE_CONNECTION_NAME:-}" || -z "${DATABASE_PSC_SERVICE_ATTACHMENT:-}" || -z "${DATABASE_PSC_DNS_NAME:-}" ]]; then
+    die "terraform-output.json for lab '$NAME' is missing database_connection_name/database_psc_service_attachment_link/database_psc_dns_name (it predates Private Service Connect support) -- re-run 'scripts/lab up' (or 'terraform apply') for this lab to pick up those outputs, then retry"
+  fi
+
+  ensure_cloud_sql_psc_endpoint
+
+  local proxy_bin="${CLOUD_SQL_PROXY_BIN:-cloud-sql-proxy}"
+  need_command "$proxy_bin"
+
+  local proxy_port="${CLOUD_SQL_PROXY_PORT:-}"
+  if [[ -z "$proxy_port" ]]; then
+    proxy_port="$("${RUBY_BIN:-ruby}" -rsocket -e 's = TCPServer.new("127.0.0.1", 0); puts s.addr[1]; s.close')" \
+      || die "could not pick a free local port for cloud-sql-proxy (set CLOUD_SQL_PROXY_PORT explicitly)"
+  fi
+  mkdir -p "$(state_dir)"
+  local proxy_log
+  proxy_log="$(state_dir)/cloud-sql-proxy.$$.log"
+  log "Starting Cloud SQL Auth Proxy (PSC) for $DATABASE_CONNECTION_NAME on 127.0.0.1:$proxy_port -- $PGHOST is only directly reachable from inside this lab's own VPC"
+
+  nohup "$proxy_bin" --port "$proxy_port" --psc "$DATABASE_CONNECTION_NAME" >"$proxy_log" 2>&1 &
+  CLOUD_SQL_PROXY_PID=$!
+  disown
+
+  # Ready only once THIS process says so in its own log. A TCP connect alone
+  # could succeed against another run's proxy already holding the port; ours
+  # would then fail to bind and exit, which the kill -0 check catches.
+  local waited=0
+  until grep -qF "Listening on 127.0.0.1:$proxy_port" "$proxy_log" 2>/dev/null \
+    && grep -qF "ready for new connections" "$proxy_log" 2>/dev/null; do
+    if ! kill -0 "$CLOUD_SQL_PROXY_PID" 2>/dev/null; then
+      die "cloud-sql-proxy exited before becoming ready (127.0.0.1:$proxy_port may already be in use, or the active gcloud/ADC identity lacks roles/cloudsql.client, or the Cloud SQL Admin API is disabled); see $proxy_log"
+    fi
+    waited=$((waited + 1))
+    if [[ $waited -ge 30 ]]; then
+      die "cloud-sql-proxy did not become ready on 127.0.0.1:$proxy_port within 30s; see $proxy_log"
+    fi
+    sleep 1
+  done
+  kill -0 "$CLOUD_SQL_PROXY_PID" 2>/dev/null \
+    || die "cloud-sql-proxy exited right after reporting ready; see $proxy_log"
+
+  PGHOST="127.0.0.1"
+  PGPORT="$proxy_port"
+  export PGHOST PGPORT
+}
+
+# Reverse of start_cloud_sql_proxy_if_needed -- safe to call even when no
+# proxy was started (CLOUD_SQL_PROXY_PID left empty).
+stop_cloud_sql_proxy() {
+  if [[ -n "$CLOUD_SQL_PROXY_PID" ]] && kill -0 "$CLOUD_SQL_PROXY_PID" 2>/dev/null; then
+    kill "$CLOUD_SQL_PROXY_PID" 2>/dev/null || true
+  fi
+  CLOUD_SQL_PROXY_PID=""
 }
 
 # Default backup location for a given lab: namespaced under its own
@@ -1278,8 +1650,14 @@ cmd_backup_db() {
   else
     db_connection_from_terraform_output "$terraform_output_file"
   fi
+  # Recorded in lab-backup-metadata.json below -- the real database host,
+  # not 127.0.0.1, even once start_cloud_sql_proxy_if_needed rewrites PGHOST
+  # to point at the local proxy instead.
+  local real_pghost="${PGHOST:-}"
+  trap stop_cloud_sql_proxy EXIT
+  start_cloud_sql_proxy_if_needed
 
-  log "Backing up database '${PGDATABASE:-<unknown, dry run>}' at ${PGHOST:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} to $backup_dir (directory format, $jobs parallel job(s))"
+  log "Backing up database '${PGDATABASE:-<unknown, dry run>}' at ${real_pghost:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} to $backup_dir (directory format, $jobs parallel job(s))"
   # pg_dump -Fd refuses to write into a non-empty directory; this backup
   # location is meant to be overwritten by each successive `backup-db`, not
   # accumulated, so clear it first rather than requiring the operator to
@@ -1297,9 +1675,11 @@ cmd_backup_db() {
         "host" => ARGV[2],
         "created_at" => Time.now.utc.iso8601,
       }))
-    ' "$backup_dir/lab-backup-metadata.json" "$PGDATABASE" "$PGHOST"
+    ' "$backup_dir/lab-backup-metadata.json" "$PGDATABASE" "$real_pghost"
   fi
 
+  stop_cloud_sql_proxy
+  trap - EXIT
   log "Backup complete: $backup_dir (pass --restore-from-backup --backup-dir $backup_dir to 'seed' on a later run to reuse it)"
 }
 
@@ -1309,6 +1689,23 @@ cmd_backup_db() {
 # --restore-from-backup is set, bypassing SEED_GENERATOR_MODE entirely
 # (restoring is generator-agnostic; whichever generator originally produced
 # the backup doesn't matter once it's a database dump).
+# pg_restore 17 -- required, since pg_dump must be at least the source
+# server's major version and the lab image therefore ships 17 -- opens every
+# worker connection with `SET transaction_timeout = 0`, a PostgreSQL-17-only
+# parameter. Against an older (e.g. 16) target that SET fails once per
+# connection; pg_restore carries on, restores every object, and then exits 1
+# with "errors ignored on restore: N". Root-caused live restoring
+# hapi-lab-t3's dump into hapi-lab-t4 (2026-09-12): exact row counts on the
+# six largest tables, 179/179 indexes and 132/132 constraints all matched the
+# source, yet the command reported failure. True only when there was at
+# least one pg_restore error and EVERY one of them was that preamble.
+pg_restore_errors_only_transaction_timeout() {
+  local errfile="$1" total benign
+  total="$(grep -c 'pg_restore: error:' "$errfile" || true)"
+  benign="$(grep 'pg_restore: error:' "$errfile" | grep -c 'unrecognized configuration parameter "transaction_timeout"' || true)"
+  [[ "$total" -gt 0 && "$total" == "$benign" ]]
+}
+
 cmd_seed_restore_from_backup() {
   require_cloud
   require_name
@@ -1332,12 +1729,27 @@ cmd_seed_restore_from_backup() {
   else
     db_connection_from_terraform_output "$terraform_output_file"
   fi
+  local real_pghost="${PGHOST:-}"
+  trap stop_cloud_sql_proxy EXIT
+  start_cloud_sql_proxy_if_needed
 
-  log "Restoring database '${PGDATABASE:-<unknown, dry run>}' at ${PGHOST:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} from backup $backup_dir ($jobs parallel job(s)) instead of generating new synthetic data"
+  log "Restoring database '${PGDATABASE:-<unknown, dry run>}' at ${real_pghost:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} from backup $backup_dir ($jobs parallel job(s)) instead of generating new synthetic data"
   # --clean --if-exists: this database was already seeded once (that's how
   # the backup was produced), so drop its existing objects before restoring
   # rather than failing on every already-exists conflict.
-  run "$pg_restore_bin" --format=directory --jobs="$jobs" --clean --if-exists --no-owner --no-privileges --dbname="${PGDATABASE:-}" "$backup_dir"
+  local restore_err rc=0
+  restore_err="$(mktemp)"
+  run "$pg_restore_bin" --format=directory --jobs="$jobs" --clean --if-exists --no-owner --no-privileges --dbname="${PGDATABASE:-}" "$backup_dir" 2>"$restore_err" || rc=$?
+  cat "$restore_err" >&2
+  if [[ $rc -ne 0 ]] && pg_restore_errors_only_transaction_timeout "$restore_err"; then
+    log "pg_restore exited $rc, but every error was the benign PostgreSQL-17-client 'SET transaction_timeout' preamble against an older server -- treating the restore as successful"
+    rc=0
+  fi
+  rm -f "$restore_err"
+  [[ $rc -eq 0 ]] || die "pg_restore failed (exit $rc) -- see the pg_restore errors above"
+
+  stop_cloud_sql_proxy
+  trap - EXIT
   log "Restore complete from $backup_dir"
 }
 
@@ -2574,13 +2986,6 @@ cmd_down() {
   require_cloud
   require_name
 
-  if [[ "$CLOUD" == "gcp" ]]; then
-    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus'/'expose-grafana' before destroying infrastructure"
-    cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
-    cmd_unexpose_prometheus || log "WARNING: could not fully clean up public Prometheus exposure (see above); continuing with destroy anyway"
-    cmd_unexpose_grafana || log "WARNING: could not fully clean up public Grafana exposure (see above); continuing with destroy anyway"
-  fi
-
   local tf_bin
   tf_bin="$(terraform_bin)"
   need_command_unless_dry_run "$tf_bin"
@@ -2593,6 +2998,16 @@ cmd_down() {
   run "$tf_bin" -chdir="$tf_dir" init
   terraform_workspace_select "$tf_bin" "$tf_dir"
   confirm_destroy
+
+  # Only after confirmation: these clean-ups can't be undone, and a cancelled
+  # or mistyped confirmation must leave the lab fully usable.
+  if [[ "$CLOUD" == "gcp" ]]; then
+    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus'/'expose-grafana' before destroying infrastructure"
+    cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
+    cmd_unexpose_prometheus || log "WARNING: could not fully clean up public Prometheus exposure (see above); continuing with destroy anyway"
+    cmd_unexpose_grafana || log "WARNING: could not fully clean up public Grafana exposure (see above); continuing with destroy anyway"
+    teardown_cloud_sql_psc_endpoint || log "WARNING: could not fully clean up this lab's Cloud SQL PSC consumer endpoint (see above); continuing with destroy anyway"
+  fi
 
   local destroy_args=("destroy" "-var" "lab_name=$NAME")
   if [[ "$YES" == true || "$AUTO_APPROVE" == true ]]; then
@@ -2654,6 +3069,28 @@ if [[ -z "$COMMAND" || "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
 fi
 
 parse_args "$@"
+
+# Every kubectl this script shells out to must reach THIS lab's cluster.
+# Nine commands/helpers call kubectl without passing --kubeconfig
+# (cmd_benchmark_in_cluster, cmd_exposures, cmd_pause_autoscaling,
+# cmd_resume_autoscaling, cmd_provision_shard_storage,
+# cmd_seed_native_in_cluster, collect_prerequisite_checks,
+# expose_public_service, wait_for_shard_job), so they silently depended on
+# the caller's environment. With nothing set, kubectl falls back to
+# http://localhost:8080 -- and in the Lab Control UI's host-networked
+# container that is an expose-fhir port-forward to HAPI. Root-caused live
+# (hapi-lab-t4 provision-shard-storage, 2026-09-12): `kubectl delete pvc`
+# died on "the server could not find the requested resource", which was
+# HAPI FHIR answering Kubernetes' API discovery with a 404. Nothing was
+# deleted only because discovery failed first; had :8080 been a real API
+# (e.g. a kubectl proxy to another lab) those deletes would have hit the
+# wrong cluster. Resolved once here so every call site is covered. Only
+# exported when the file exists, so `up` (which creates it) and --dry-run
+# invocations behave exactly as before.
+lab_kubeconfig="$(resolve_kubeconfig_file)"
+if [[ -n "$lab_kubeconfig" && -f "$lab_kubeconfig" ]]; then
+  export KUBECONFIG="$lab_kubeconfig"
+fi
 
 case "$COMMAND" in
   up) cmd_up ;;

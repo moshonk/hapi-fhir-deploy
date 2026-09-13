@@ -15,7 +15,7 @@ feature). Documented here because every other entity below is shaped by it.
 | `label` | string | Display name, e.g. "Google Cloud (GKE + Cloud SQL)". |
 | `configFields` | `ConfigField[]` | This provider's field schema (below). |
 | `actions` | `ActionDef[]` | This provider's available actions (below). |
-| `prerequisiteChecks` | `PrerequisiteCheckDef[]` | Provider-specific checks layered on top of the provider-agnostic list (Ruby/k6/Java/Terraform/Helm/kubectl/Ansible/PostgreSQL client apply to every provider; `gcloud`/`gke-gcloud-auth-plugin`/ADC are GCP-only). |
+| `prerequisiteChecks` | `PrerequisiteCheckDef[]` | Provider-specific checks layered on top of the provider-agnostic list (Ruby/k6/Java/Terraform/Helm/kubectl/Ansible/PostgreSQL client apply to every provider; `gcloud`/`gke-gcloud-auth-plugin`/ADC/`cloud-sql-proxy` are GCP-only — the last for `backup-db`/`seed --restore-from-backup` reaching a private-IP-only Cloud SQL instance from outside the lab's VPC). |
 
 ### ConfigField
 
@@ -58,6 +58,14 @@ GCP adapter's `configFields` (defaults sourced from
 | `shard_output_capacity_gb` | provider | `1024` (Filestore BASIC_HDD's billed floor; `provision-shard-storage`'s confirmation dialog names this value explicitly per FR-012) |
 | `enable_pgbouncer` | common | `false` (spec 007's opt-in pooled connection tier; `deploy` always passes this explicitly via `--extra-vars`, true or false, per `contracts/cli-action-map.md`) |
 | `pgbouncer_default_pool_size` | common | `20` (real Postgres connections per PgBouncer replica; total = this * `pgbouncer_replica_count`, must stay within the budget in `docs/autoscaling.md`) |
+| `enable_read_replica` | provider | `false` (opt-in Cloud SQL read replica; `up` only via `--var`; billable, and HAPI does not route reads to it) |
+| `db_work_mem_kb` | provider | `0` (Cloud SQL `work_mem` in kB; `up` only via `--var`; `0` leaves PostgreSQL's default, otherwise a whole number of at least 64) |
+| `hapi_max_replicas` | provider | `""` (blank = the tier ScaledObject's `maxReplicaCount`, 5 native / 8 pooled; otherwise a whole number; `deploy` only, always passed) |
+| `hapi_min_replicas` | provider | `""` (blank = the tier ScaledObject's `minReplicaCount`, 2; otherwise a whole number from 2 to the effective max; `deploy` only, always passed) |
+| `hapi_cpu_request` | provider | `""` (blank = the chart's 500m HAPI CPU request, e.g. `1500m`; `deploy` only, always passed) |
+| `hapi_tomcat_max_threads` | provider | `""` (blank = Tomcat's 200 worker threads per HAPI pod; `deploy` only, always passed) |
+| `pgbouncer_cpu_request` | provider | `""` (blank = 100m per PgBouncer pod; `deploy` only, always passed) |
+| `pgbouncer_cpu_limit` | provider | `""` (blank = 500m per PgBouncer pod; PgBouncer is single-threaded, so more than ~1000m buys nothing; `deploy` only, always passed) |
 
 ### ActionDef
 

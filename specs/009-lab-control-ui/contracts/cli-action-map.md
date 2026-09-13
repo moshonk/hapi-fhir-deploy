@@ -11,8 +11,8 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 
 | Action | `scripts/lab` invocation | Confirmation required |
 |---|---|---|
-| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours}` | Yes — billable resource creation |
-| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size}` | No |
+| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours} --var enable_read_replica={enable_read_replica} --var db_work_mem_kb={db_work_mem_kb}` | Yes — billable resource creation |
+| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas} --extra-vars hapi_cpu_request={hapi_cpu_request} --extra-vars pgbouncer_cpu_request={pgbouncer_cpu_request} --extra-vars pgbouncer_cpu_limit={pgbouncer_cpu_limit} --extra-vars hapi_tomcat_max_threads={hapi_tomcat_max_threads} --extra-vars hapi_min_replicas={hapi_min_replicas}` | No |
 | `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | Yes — names the exposure scope |
 | `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
@@ -47,9 +47,22 @@ Notes:
   where the database connection details (`database_endpoint`,
   `database_port`, `database_name`, `database_username`,
   `database_password` -- identical output keys across every cloud module)
-  come from; direct network reachability to the database from the host
-  running `scripts/lab` is required (e.g. inside the same VPC as a
-  private-IP Cloud SQL/RDS/Flexible Server instance).
+  come from. On GCP the database is private-IP-only inside the lab's own
+  VPC, which the Lab Control UI's control-plane host can't reach directly;
+  `scripts/lab` auto-starts a Cloud SQL Auth Proxy in `--psc` mode
+  (reconciling a per-lab PSC consumer endpoint + shared per-region private
+  DNS zone) whenever `terraform-output.json` carries the GCP-only
+  `database_connection_name`/`database_psc_service_attachment_link`/
+  `database_psc_dns_name` outputs, so `pg_dump`/`pg_restore` connect through
+  `127.0.0.1`. A GCP lab whose `up` predates those outputs aborts with a
+  re-run-`up` instruction rather than falling back to an unreachable mode.
+  aws/azure connect directly (in-VPC reachability required, as before).
+  Because of the proxy, `backup-db`'s `requiredPrerequisiteIds` are
+  `['postgresql-client', 'cloud-sql-proxy', 'gcloud']` (`gcloud` because
+  reconciling the PSC consumer endpoint shells out to it); `seed` lists none of them, since
+  restore-from-backup is an ephemeral per-trigger choice and the
+  generate-fresh path needs no DB client (`scripts/lab` fails loudly at
+  trigger time if the tool is genuinely missing on the restore path).
 - `cliRunLabel` for `seed`/`benchmark`/`report` is derived from `lab_name`
   plus a short suffix disambiguating repeated runs against the same lab
   (e.g. `{lab_name}-{short-timestamp}`), not a separate form field — matches
@@ -89,6 +102,25 @@ Notes:
   `cli_run_label`), or, if omitted, the lab's most recent **succeeded**
   `benchmark` run. If neither resolves, the trigger is refused with `400`
   rather than silently generating a label that doesn't exist on disk.
+- `hapi_max_replicas` (`deploy`) is always passed explicitly too, including
+  as an EMPTY value, which is the documented "use the ceiling committed in
+  the tier's own ScaledObject manifest" signal (`ansible/group_vars/lab.yml`'s
+  `hapi_max_replicas: ""`). Clearing the field on a later redeploy therefore
+  reverts a previous override instead of leaving it stuck, for the same
+  reason `enable_pgbouncer` is never conditionally omitted.
+- `hapi_cpu_request` (`deploy`) is passed explicitly too, blank meaning the
+  chart's own CPU request, for the same revert-on-clear reason.
+- `pgbouncer_cpu_request` and `pgbouncer_cpu_limit` (`deploy`) are passed
+  explicitly as well, blank meaning the PgBouncer template's 100m request and
+  500m limit, for the same revert-on-clear reason.
+- `hapi_tomcat_max_threads` (`deploy`) is passed explicitly too, blank meaning
+  Tomcat's default of 200 worker threads, for the same revert-on-clear reason.
+- `hapi_min_replicas` (`deploy`) is passed explicitly too, blank meaning the
+  tier ScaledObject manifest's own `minReplicaCount`, for the same
+  revert-on-clear reason. The deploy asserts it is a whole number within
+  2..effective `maxReplicaCount` (`specs/003-autoscaling-connection-budget`
+  SC-001: never fewer than two HAPI replicas); `hapi_max_replicas` must be a
+  whole number too.
 - `enable_pgbouncer` (`deploy`) is always passed explicitly, true or false,
   never conditionally omitted -- so toggling it OFF on a later redeploy of
   an already-pooled lab actually disables the tier again (`ansible/

@@ -150,6 +150,7 @@ export function benchmarkSetup(profile, workload = "generic") {
     patientIds,
     bulkExportEnabled: envBool("BULK_EXPORT_ENABLED", false),
     observationDateStart: __ENV.OBSERVATION_DATE_START || "1900-01-01",
+    supervisorCountWindowHours: envNumber("SUPERVISOR_COUNT_WINDOW_HOURS", 1),
     sleepSeconds: config.sleepSeconds,
     prometheusBefore
   };
@@ -315,6 +316,15 @@ function requiredEnv(name) {
 
 function trimTrailingSlash(value) {
   return value.replace(/\/+$/, "");
+}
+
+function envNumber(name, defaultValue) {
+  const value = __ENV[name];
+  if (value === undefined || value === "") {
+    return defaultValue;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
 function envBool(name, defaultValue) {
@@ -624,10 +634,52 @@ function supervisorDashboardRead(data) {
   // shared across all VUs instead of gating by VU identity: it achieves the
   // same low-volume traffic shape without adding a second selection
   // dimension (which VUs vs. which operations) to chooseOperation.
+  //
+  // The count is BOUNDED by a recent _lastUpdated window, not taken over
+  // the whole table. This used to be a bare `/Patient?_summary=count` --
+  // an exact count of every Patient in the database -- and that single
+  // choice dominated every tail-latency number this benchmark has ever
+  // produced. Measured, at ~2M patients (EXPLAIN ANALYZE against the live
+  // lab, idle db-custom-2-7680): a ~3.5s parallel sequential scan plus an
+  // external-merge sort that spills to disk, and no index can help,
+  // because Patient is ~41% of hfj_resource -- far past the selectivity
+  // where a B-tree beats a seq scan (every index-forced plan measured
+  // 13-94s against the planner's own 3.5s). At this workload's ~6.8%
+  // share and the T3 shape's ~380 req/s, that is ~26 such queries/sec,
+  // each holding a PgBouncer backend connection for its full ~3.5s: ~90
+  // connection-seconds/sec of demand against a 40-connection backend
+  // budget, 2.2x the entire budget before any other traffic is served.
+  // That is why every OTHER operation's p99 also sat at 12-14s while p50
+  // stayed near 100ms -- head-of-line blocking behind this one query, not
+  // a cost of their own (see docs/autoscaling.md's tail-latency section
+  // and the capacity-enhancement benchmark series).
+  //
+  // A supervisor dashboard tile is realistically "registrations in my
+  // recent window", not "recount every patient who has ever existed, 26
+  // times a second". Scoping by _lastUpdated turns it into a bounded range
+  // scan over hfj_resource's existing idx_res_date (res_updated).
+  //
+  // SUPERVISOR_COUNT_WINDOW_HOURS=0 restores the old unbounded query, so a
+  // run can still be made directly comparable to the stage 0-5 series that
+  // predates this change.
+  // The window start is floored to the MINUTE, not taken at millisecond
+  // precision. HAPI caches search results by URL, and an exact timestamp
+  // makes every request's URL unique -- defeating that cache and writing a
+  // fresh search entity per call. Flooring means every supervisor request
+  // inside the same minute shares one URL, so the cache does the repeat
+  // work. A dashboard tile has no use for sub-minute freshness anyway.
+  const windowHours = data.supervisorCountWindowHours;
+  const windowStart = new Date(Date.now() - windowHours * 3600 * 1000);
+  windowStart.setUTCSeconds(0, 0);
+  const path =
+    windowHours > 0
+      ? `/Patient?_lastUpdated=gt${encodeURIComponent(windowStart.toISOString())}&_summary=count`
+      : "/Patient?_summary=count";
+
   requestOperation(
     data,
     "supervisor_dashboard_read",
-    "/Patient?_summary=count",
+    path,
     (response) => response.status === 200 && jsonResourceType(response) === "Bundle"
   );
 }

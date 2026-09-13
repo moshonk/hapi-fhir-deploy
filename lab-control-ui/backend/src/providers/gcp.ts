@@ -43,7 +43,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     type: 'boolean',
     default: false,
     helpText:
-      "Deploys the opt-in PgBouncer connection-pooling tier (spec 007, ansible/group_vars/lab.yml) alongside HAPI FHIR -- swaps in the pooled ScaledObject in place of the native one. Required for eCHIS tiers T4/T5. maxReplicaCount was lowered from the originally-committed 50 to 5 after a live load test: 50 bounded PgBouncer's client-accept capacity, not its real ~40-connection backend budget, and collapsed throughput/latency/failure-rate badly under the k6 load profile -- see manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml's connection-budget annotation and docs/autoscaling.md.",
+      "Deploys the opt-in PgBouncer connection-pooling tier (spec 007, ansible/group_vars/lab.yml) alongside HAPI FHIR -- swaps in the pooled ScaledObject in place of the native one. Required for eCHIS tiers T4/T5. maxReplicaCount was lowered from the originally-committed 50 to 5 after a live load test, and later raised to 8 after a further load test: 50 bounded PgBouncer's client-accept capacity, not its real ~40-connection backend budget, and collapsed throughput/latency/failure-rate badly under the k6 load profile -- see manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml's connection-budget annotation and docs/autoscaling.md.",
     cliMapping: '--extra-vars enable_pgbouncer={value} (deploy only)',
   },
   {
@@ -224,7 +224,87 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
       "Filestore BASIC_HDD's billed floor is 1024GB (~$0.20/GB-month); only raise this if a run's shard count/size needs more headroom.",
     cliMapping: '--capacity-gb {value}',
   },
-];
+
+  {
+    key: 'enable_read_replica',
+    label: 'Cloud SQL read replica',
+    scope: 'provider',
+    type: 'boolean',
+    default: false,
+    helpText:
+      'Provisions a same-tier read replica of the primary. Infrastructure only -- nothing routes queries to it yet, because the pinned HAPI image has no read/write datasource routing. Costs roughly the same again as the primary, so leave off unless you are working on that routing.',
+    cliMapping: '--var enable_read_replica={value} (up only)',
+  },
+  {
+    key: 'db_work_mem_kb',
+    label: 'Cloud SQL work_mem (kB, 0 = default)',
+    scope: 'provider',
+    type: 'number',
+    default: 0,
+    helpText:
+      'Leave 0 unless you are deliberately retesting this. Measured: 32768 (32MB) on db-custom-2-7680 made the 10-shard T3 load benchmark MUCH worse (271 -> 93 req/s, 0.05% -> 5.5% failures) -- work_mem is charged per sort per connection, so a big global value starves a small instance. Only raise it alongside a bigger DB tier, and re-benchmark.',
+    cliMapping: '--var db_work_mem_kb={value} (up only)',
+  },
+  {
+    key: 'hapi_min_replicas',
+    label: 'HAPI min replicas (blank = manifest default)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Blank uses the minimum committed in the tier ScaledObject manifest (2). Raise it to keep warm HAPI pods ready before load arrives: under T3 load the opening ramp swamped the 2 minimum pods for about 3 minutes while new pods took 90-120s each to start, and health checks timed out. The cost is idle capacity -- that many pods (each requesting the HAPI CPU request) stay up even when nothing is running. Must be a whole number from 2 (the minimum HA replica count) up to max replicas.',
+    cliMapping: '--extra-vars hapi_min_replicas={value} (deploy only)',
+  },
+  {
+    key: 'hapi_max_replicas',
+    label: 'HAPI max replicas (blank = manifest default)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Blank uses the ceiling committed in the tier ScaledObject manifest (5 without PgBouncer, 8 with). Raise ONE step at a time with a benchmark at each step -- jumping to 50 by formula once collapsed throughput ~6x. More replicas do not add real database connections: with PgBouncer those stay capped at pool size x PgBouncer replicas, so extra replicas buy parallelism and cost per-request latency.',
+    cliMapping: '--extra-vars hapi_max_replicas={value} (deploy only)',
+  },
+  {
+    key: 'hapi_cpu_request',
+    label: 'HAPI CPU request (blank = chart default 500m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU request per HAPI pod, e.g. 1500m. Blank keeps the chart default of 500m, which understates real use: under T3 load HAPI used 1.3-1.6 cores per pod, so 8 replicas crammed onto 3 nodes at 100% CPU and the autoscaler never added nodes (it only reacts to pods that cannot be scheduled). Set it near real usage so scaling up actually adds nodes. Only the request changes; the 2-core limit stays.',
+    cliMapping: '--extra-vars hapi_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_cpu_request',
+    label: 'PgBouncer CPU request (blank = 100m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU request per PgBouncer pod, e.g. 1000m. Set it together with the limit below so the scheduler actually reserves the CPU; a low request lets PgBouncer land on a saturated node. Must not exceed the limit. Only used when PgBouncer is enabled.',
+    cliMapping: '--extra-vars pgbouncer_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_cpu_limit',
+    label: 'PgBouncer CPU limit (blank = 500m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU limit per PgBouncer pod. Blank keeps 500m, which was the ceiling at true T3 load: both pods ran at the limit, throttled about half the time, with clients queueing. PgBouncer is single-threaded, so values above 1000m buy nothing -- add PgBouncer replicas instead. Only used when PgBouncer is enabled.',
+    cliMapping: '--extra-vars pgbouncer_cpu_limit={value} (deploy only)',
+  },
+  {
+    key: 'hapi_tomcat_max_threads',
+    label: 'HAPI Tomcat max threads (blank = 200)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Worker threads per HAPI pod (server.tomcat.threads.max). Blank keeps Tomcat\'s default of 200. Under T3 load single pods jammed with 200 requests in flight against a 20-connection database pool, throttled at their CPU limit, and stayed stuck while load lasted -- one pod in eight carried the whole p95/p99 tail. Try about twice the pool size (e.g. 40); extra connections wait in the queue without holding a thread.',
+    cliMapping: '--extra-vars hapi_tomcat_max_threads={value} (deploy only)',
+  },];
 
 export const GCP_ACTIONS: ActionDef[] = [
   {
@@ -368,14 +448,15 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
-    // 'postgresql-client' is deliberately NOT listed here: restoring from a
-    // backup (an ephemeral, per-trigger choice -- see ActionList.tsx/
-    // routes/actions.ts, same pattern as benchmark's in_cluster) is only
-    // one of the two things this button can do. Requiring pg_dump/
-    // pg_restore up front would block the (much more common) generate-fresh
-    // path for operators who never intend to restore from a backup at all.
-    // If restore-from-backup IS chosen and the tool is genuinely missing,
-    // scripts/lab itself fails loudly at trigger time instead.
+    // 'postgresql-client'/'cloud-sql-proxy' are deliberately NOT listed
+    // here: restoring from a backup (an ephemeral, per-trigger choice --
+    // see ActionList.tsx/routes/actions.ts, same pattern as benchmark's
+    // in_cluster) is only one of the two things this button can do.
+    // Requiring pg_restore/cloud-sql-proxy up front would block the (much
+    // more common) generate-fresh path for operators who never intend to
+    // restore from a backup at all. If restore-from-backup IS chosen and
+    // either tool is genuinely missing, scripts/lab itself fails loudly at
+    // trigger time instead.
     requiredPrerequisiteIds: ['ruby'],
     sequenceAfter: 'deploy',
   },
@@ -389,7 +470,13 @@ export const GCP_ACTIONS: ActionDef[] = [
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
-    requiredPrerequisiteIds: ['postgresql-client'],
+    // cloud-sql-proxy is required alongside postgresql-client (not just
+    // recommended) because start_cloud_sql_proxy_if_needed (scripts/lab)
+    // always starts it once terraform-output.json carries a
+    // database_connection_name -- true for every lab `up` since that
+    // output was added -- regardless of whether this host could actually
+    // reach the database's private IP directly.
+    requiredPrerequisiteIds: ['postgresql-client', 'cloud-sql-proxy', 'gcloud'],
     // Backing up only makes sense once there's data worth keeping -- and
     // that data outlives any single seed run, so this checks "has a seed
     // ever succeeded" rather than "did the *latest* seed succeed" (a later
@@ -522,6 +609,10 @@ export function gcpBuildCommand(
           `db_disk_size_gb=${f('db_disk_size_gb')}`,
           '--var',
           `ttl_hours=${f('ttl_hours')}`,
+          '--var',
+          `enable_read_replica=${f('enable_read_replica', 'false')}`,
+          '--var',
+          `db_work_mem_kb=${f('db_work_mem_kb', '0')}`,
         ],
         env: {},
       };
@@ -542,6 +633,30 @@ export function gcpBuildCommand(
           `enable_pgbouncer=${f('enable_pgbouncer', 'false')}`,
           '--extra-vars',
           `pgbouncer_default_pool_size=${f('pgbouncer_default_pool_size', '20')}`,
+          // Passed even when blank: an empty value is Ansible's documented
+          // "use the manifest's own committed ceiling" signal, so clearing
+          // the field on a later redeploy actually reverts an earlier
+          // override instead of leaving it stuck.
+          '--extra-vars',
+          `hapi_max_replicas=${f('hapi_max_replicas', '')}`,
+          // Blank passed explicitly, like hapi_max_replicas: it means "chart
+          // default", so clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_cpu_request=${f('hapi_cpu_request', '')}`,
+          // Blank passed explicitly too (blank = the template's 100m / 500m),
+          // so clearing either field reverts an earlier override.
+          '--extra-vars',
+          `pgbouncer_cpu_request=${f('pgbouncer_cpu_request', '')}`,
+          '--extra-vars',
+          `pgbouncer_cpu_limit=${f('pgbouncer_cpu_limit', '')}`,
+          // Blank passed explicitly (blank = Tomcat's default 200), so
+          // clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_tomcat_max_threads=${f('hapi_tomcat_max_threads', '')}`,
+          // Blank passed explicitly (blank = manifest minReplicaCount), so
+          // clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_min_replicas=${f('hapi_min_replicas', '')}`,
         ],
         env: {},
       };
@@ -851,6 +966,11 @@ export const gcpProvider: ProviderAdapter = {
     { id: 'gcloud', label: 'gcloud CLI', severity: 'blocking' },
     { id: 'gke-gcloud-auth-plugin', label: 'gke-gcloud-auth-plugin', severity: 'blocking' },
     { id: 'gcloud-adc', label: 'gcloud Application Default Credentials', severity: 'warning' },
+    {
+      id: 'cloud-sql-proxy',
+      label: 'Cloud SQL Auth Proxy',
+      severity: 'blocking',
+    },
   ],
   buildCommand: gcpBuildCommand,
 };

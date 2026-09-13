@@ -82,6 +82,15 @@ resource "google_service_networking_connection" "private_service" {
   network                 = google_compute_network.lab.id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_service.name]
+
+  # ABANDON: GCP keeps the peering "in use" for a while after the Cloud SQL
+  # instance is deleted. Tearing down hapi-lab-t3 (2026-09-12) failed on
+  # "Failed to delete connection; Producer services (e.g. CloudSQL) are
+  # still using this connection" immediately after the instance was gone,
+  # stranding the network and address range. Abandoning it lets `down`
+  # finish; GCP releases the peering when the producer does, and deleting
+  # the network removes it. Same pattern as the SQL database/user below.
+  deletion_policy = "ABANDON"
 }
 
 resource "google_container_cluster" "lab" {
@@ -125,6 +134,18 @@ resource "google_container_node_pool" "lab" {
 
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+
+  # GKE adds this resource label to the node pool on its own. Without the
+  # ignore, every plan wants to strip it again, so an unrelated apply (the
+  # hapi-lab-t4 Cloud SQL tier change, 2026-09-13) would also push a node
+  # pool update that can roll nodes and evict HAPI and Prometheus. The only
+  # other workaround, `-target`, panics on apply in Terraform 1.9.8
+  # ("unexpected checkable object var.cluster_node_count").
+  lifecycle {
+    ignore_changes = [
+      node_config[0].resource_labels["goog-gke-node-pool-provisioning-model"],
     ]
   }
 }
@@ -200,6 +221,25 @@ resource "google_sql_database_instance" "postgres" {
     ip_configuration {
       ipv4_enabled    = false
       private_network = google_compute_network.lab.id
+
+      # Private Service Connect, alongside (not instead of) the VPC-peering
+      # private IP above -- backup-db/seed --restore-from-backup run from
+      # the Lab Control UI's control-plane host, which lives in a
+      # DIFFERENT, unpeered VPC (docs/lab-cli.md). Plain VPC peering
+      # between that network and google_compute_network.lab can't reach
+      # database_endpoint either: Private Services Access (how the private
+      # IP above is allocated) is itself implemented as a peering to a
+      # Google-managed tenant network, and VPC Network Peering is
+      # explicitly non-transitive -- confirmed live (a direct
+      # default<->lab peering was traced back to this exact limitation
+      # before being created). PSC's service attachment doesn't have that
+      # restriction, which is the whole reason it exists. Same-project
+      # only for now (allowed_consumer_projects); this repo's control
+      # plane and every lab it manages always share one project.
+      psc_config {
+        psc_enabled               = true
+        allowed_consumer_projects = [var.project_id]
+      }
     }
 
     backup_configuration {
@@ -209,6 +249,18 @@ resource "google_sql_database_instance" "postgres" {
     database_flags {
       name  = "max_connections"
       value = tostring(var.db_max_connections)
+    }
+
+    # Opt-in only (db_work_mem_kb = 0 leaves the flag unset entirely, so
+    # PostgreSQL's own 4MB default applies). See the variable's own
+    # description for the measured regression that makes this deliberately
+    # off by default rather than "tuned up because bigger sounds better".
+    dynamic "database_flags" {
+      for_each = var.db_work_mem_kb > 0 ? [var.db_work_mem_kb] : []
+      content {
+        name  = "work_mem"
+        value = tostring(database_flags.value)
+      }
     }
 
     # Query Insights (no extra cost at this sampling level): enabled to
@@ -226,7 +278,13 @@ resource "google_sql_database_instance" "postgres" {
       query_insights_enabled  = true
       query_string_length     = 1024
       record_application_tags = true
-      record_client_address   = true
+      # Cloud SQL rejects record_client_address = true outright once PSC
+      # connectivity is enabled below ("Insights record client address is
+      # not supported for instances with PSC connectivity enabled", a real
+      # 400 hit live applying the psc_config change) -- query text/tags/
+      # plans (the fields this was actually added to diagnose, see above)
+      # are unaffected; only the connecting client's IP goes unrecorded.
+      record_client_address = false
     }
   }
 
@@ -238,13 +296,80 @@ resource "google_sql_database_instance" "postgres" {
   ]
 }
 
+resource "google_sql_database_instance" "postgres_replica" {
+  count = var.enable_read_replica ? 1 : 0
+
+  name                 = "${local.name}-postgres-replica"
+  region               = var.region
+  database_version     = "POSTGRES_${var.postgres_version}"
+  master_instance_name = google_sql_database_instance.postgres.name
+
+  replica_configuration {
+    failover_target = false
+  }
+
+  settings {
+    tier              = var.db_sku
+    edition           = var.db_edition
+    availability_type = "ZONAL"
+    disk_size         = var.db_disk_size_gb
+    disk_type         = "PD_SSD"
+    user_labels       = local.labels
+
+    ip_configuration {
+      ipv4_enabled    = false
+      private_network = google_compute_network.lab.id
+
+      psc_config {
+        psc_enabled               = true
+        allowed_consumer_projects = [var.project_id]
+      }
+    }
+  }
+
+  deletion_protection = false
+
+  depends_on = [
+    google_sql_database_instance.postgres
+  ]
+}
+
 resource "google_sql_database" "fhir" {
   name     = var.database_name
   instance = google_sql_database_instance.postgres.name
+
+  # ABANDON: on destroy, drop this from state instead of issuing DROP
+  # DATABASE; deleting google_sql_database_instance.postgres removes it
+  # anyway. Root-caused live tearing down hapi-lab-t3 (2026-09-12): the
+  # GKE cluster -- and HAPI/PgBouncer still connected to this database --
+  # is destroyed in parallel with it, so Cloud SQL refused with "database
+  # hapi_fhir is being accessed by other users" and `down` stopped with the
+  # instance (and its bill) still running.
+  deletion_policy = "ABANDON"
+
+  # Cloud SQL rejects any update to a Postgres database ("Update database
+  # operation is not supported for Postgres"), and the provider sends one
+  # even when only deletion_policy changes. Applying the ABANDON policy
+  # above to the existing hapi-lab-t4 failed that way (2026-09-13). New
+  # labs get ABANDON at create time. A lab created before the policy
+  # (hapi-lab-t4) keeps DELETE in state, so run
+  # `terraform state rm google_sql_database.fhir` before destroying it,
+  # as the hapi-lab-t3 teardown did.
+  lifecycle {
+    ignore_changes = [deletion_policy]
+  }
 }
 
 resource "google_sql_user" "fhir" {
   name     = var.database_username
   instance = google_sql_database_instance.postgres.name
   password = random_password.postgres.result
+
+  # ABANDON: PostgreSQL will not drop a role that still owns objects, and
+  # this role owns every HAPI table. The same hapi-lab-t3 teardown's retry
+  # failed with 'role "hapi_fhir" cannot be dropped because some objects
+  # depend on it -- 106 objects in database hapi_fhir'. Instance deletion
+  # removes the role and everything it owns, so there is nothing for
+  # Terraform to delete here.
+  deletion_policy = "ABANDON"
 }
