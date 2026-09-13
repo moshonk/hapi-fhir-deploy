@@ -173,7 +173,7 @@ variable "db_work_mem_kb" {
   default     = 0
 
   validation {
-    condition     = var.db_work_mem_kb == 0 || var.db_work_mem_kb >= 64
-    error_message = "db_work_mem_kb must be 0 (unset, use the PostgreSQL default) or at least 64 (PostgreSQL's own work_mem minimum, in kB)."
+    condition     = floor(var.db_work_mem_kb) == var.db_work_mem_kb && (var.db_work_mem_kb == 0 || var.db_work_mem_kb >= 64)
+    error_message = "db_work_mem_kb must be a whole number of kB: 0 (unset, use the PostgreSQL default) or at least 64 (PostgreSQL's own work_mem minimum). Cloud SQL rejects a decimal value such as 64.5."
   }
 }

@@ -59,7 +59,9 @@ hapi_max_replicas: ""
 # swamped the two minimum pods for ~3 minutes (new pods take 90-120s to be
 # ready) and /metadata requests timed out, failing fhir_health_success.
 # Costs idle capacity: that many pods x hapi_cpu_request stay scheduled.
-# Must be between 1 and the effective maxReplicaCount (the deploy asserts).
+# Must be a whole number between 2 (specs/003-autoscaling-connection-budget
+# SC-001: never fewer than two HAPI replicas) and the effective
+# maxReplicaCount; the deploy asserts both.
 hapi_min_replicas: ""
 
 # Empty = the chart's HAPI CPU request (charts/hapi-fhir-deploy/values.yaml,

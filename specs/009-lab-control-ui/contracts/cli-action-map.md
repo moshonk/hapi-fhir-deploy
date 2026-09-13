@@ -58,7 +58,8 @@ Notes:
   re-run-`up` instruction rather than falling back to an unreachable mode.
   aws/azure connect directly (in-VPC reachability required, as before).
   Because of the proxy, `backup-db`'s `requiredPrerequisiteIds` are
-  `['postgresql-client', 'cloud-sql-proxy']`; `seed` lists neither, since
+  `['postgresql-client', 'cloud-sql-proxy', 'gcloud']` (`gcloud` because
+  reconciling the PSC consumer endpoint shells out to it); `seed` lists none of them, since
   restore-from-backup is an ephemeral per-trigger choice and the
   generate-fresh path needs no DB client (`scripts/lab` fails loudly at
   trigger time if the tool is genuinely missing on the restore path).
@@ -116,8 +117,10 @@ Notes:
   Tomcat's default of 200 worker threads, for the same revert-on-clear reason.
 - `hapi_min_replicas` (`deploy`) is passed explicitly too, blank meaning the
   tier ScaledObject manifest's own `minReplicaCount`, for the same
-  revert-on-clear reason. The deploy asserts it stays within
-  1..effective `maxReplicaCount`.
+  revert-on-clear reason. The deploy asserts it is a whole number within
+  2..effective `maxReplicaCount` (`specs/003-autoscaling-connection-budget`
+  SC-001: never fewer than two HAPI replicas); `hapi_max_replicas` must be a
+  whole number too.
 - `enable_pgbouncer` (`deploy`) is always passed explicitly, true or false,
   never conditionally omitted -- so toggling it OFF on a later redeploy of
   an already-pooled lab actually disables the tier again (`ansible/

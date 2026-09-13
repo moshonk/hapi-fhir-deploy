@@ -43,7 +43,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     type: 'boolean',
     default: false,
     helpText:
-      "Deploys the opt-in PgBouncer connection-pooling tier (spec 007, ansible/group_vars/lab.yml) alongside HAPI FHIR -- swaps in the pooled ScaledObject in place of the native one. Required for eCHIS tiers T4/T5. maxReplicaCount was lowered from the originally-committed 50 to 5 after a live load test: 50 bounded PgBouncer's client-accept capacity, not its real ~40-connection backend budget, and collapsed throughput/latency/failure-rate badly under the k6 load profile -- see manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml's connection-budget annotation and docs/autoscaling.md.",
+      "Deploys the opt-in PgBouncer connection-pooling tier (spec 007, ansible/group_vars/lab.yml) alongside HAPI FHIR -- swaps in the pooled ScaledObject in place of the native one. Required for eCHIS tiers T4/T5. maxReplicaCount was lowered from the originally-committed 50 to 5 after a live load test, and later raised to 8 after a further load test: 50 bounded PgBouncer's client-accept capacity, not its real ~40-connection backend budget, and collapsed throughput/latency/failure-rate badly under the k6 load profile -- see manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml's connection-budget annotation and docs/autoscaling.md.",
     cliMapping: '--extra-vars enable_pgbouncer={value} (deploy only)',
   },
   {
@@ -252,7 +252,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     type: 'string',
     default: '',
     helpText:
-      'Blank uses the minimum committed in the tier ScaledObject manifest (2). Raise it to keep warm HAPI pods ready before load arrives: under T3 load the opening ramp swamped the 2 minimum pods for about 3 minutes while new pods took 90-120s each to start, and health checks timed out. The cost is idle capacity -- that many pods (each requesting the HAPI CPU request) stay up even when nothing is running. Must not exceed max replicas.',
+      'Blank uses the minimum committed in the tier ScaledObject manifest (2). Raise it to keep warm HAPI pods ready before load arrives: under T3 load the opening ramp swamped the 2 minimum pods for about 3 minutes while new pods took 90-120s each to start, and health checks timed out. The cost is idle capacity -- that many pods (each requesting the HAPI CPU request) stay up even when nothing is running. Must be a whole number from 2 (the minimum HA replica count) up to max replicas.',
     cliMapping: '--extra-vars hapi_min_replicas={value} (deploy only)',
   },
   {
@@ -476,7 +476,7 @@ export const GCP_ACTIONS: ActionDef[] = [
     // database_connection_name -- true for every lab `up` since that
     // output was added -- regardless of whether this host could actually
     // reach the database's private IP directly.
-    requiredPrerequisiteIds: ['postgresql-client', 'cloud-sql-proxy'],
+    requiredPrerequisiteIds: ['postgresql-client', 'cloud-sql-proxy', 'gcloud'],
     // Backing up only makes sense once there's data worth keeping -- and
     // that data outlives any single seed run, so this checks "has a seed
     // ever succeeded" rather than "did the *latest* seed succeed" (a later

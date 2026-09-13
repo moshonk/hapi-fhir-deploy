@@ -171,6 +171,19 @@
     # cluster-autoscaler scale-down) absorbed the opening ramp alone for ~3
     # minutes while new pods took 90-120s each to become ready, and /metadata
     # requests hit k6's 60s timeout.
+    # `| int` below would silently truncate a decimal extra-var (6.9 -> 6), so
+    # reject anything but blank or a whole number before casting.
+    - name: Refuse non-integer HAPI replica overrides
+      ansible.builtin.assert:
+        that:
+          - (hapi_min_replicas | default('') | string | trim) is match('^[0-9]*$')
+          - (hapi_max_replicas | default('') | string | trim) is match('^[0-9]*$')
+        fail_msg: >-
+          hapi_min_replicas and hapi_max_replicas must be blank or a whole number
+          (got hapi_min_replicas='{{ hapi_min_replicas | default('') }}',
+          hapi_max_replicas='{{ hapi_max_replicas | default('') }}').
+        quiet: true
+
     - name: Resolve optional KEDA minReplicaCount / maxReplicaCount overrides
       ansible.builtin.set_fact:
         hapi_scaledobject_override: >-
@@ -187,7 +200,9 @@
             else {}
           }}
 
-    - name: Refuse a minReplicaCount outside 1..maxReplicaCount for the active tier
+    # Lower bound 2: specs/003-autoscaling-connection-budget SC-001 -- the
+    # autoscaler must never permit fewer than two HAPI FHIR replicas.
+    - name: Refuse a minReplicaCount outside 2..maxReplicaCount for the active tier
       vars:
         hapi_scaledobject_effective: >-
           {{
@@ -199,11 +214,11 @@
           }}
       ansible.builtin.assert:
         that:
-          - (hapi_scaledobject_effective.spec.minReplicaCount | int) >= 1
+          - (hapi_scaledobject_effective.spec.minReplicaCount | int) >= 2
           - (hapi_scaledobject_effective.spec.minReplicaCount | int) <= (hapi_scaledobject_effective.spec.maxReplicaCount | int)
         fail_msg: >-
           minReplicaCount {{ hapi_scaledobject_effective.spec.minReplicaCount }} must be
-          between 1 and maxReplicaCount {{ hapi_scaledobject_effective.spec.maxReplicaCount }}
+          between 2 (the HA minimum, spec 003 SC-001) and maxReplicaCount {{ hapi_scaledobject_effective.spec.maxReplicaCount }}
           (hapi_min_replicas='{{ hapi_min_replicas | default('') }}',
           hapi_max_replicas='{{ hapi_max_replicas | default('') }}').
         quiet: true

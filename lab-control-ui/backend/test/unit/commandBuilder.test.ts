@@ -607,9 +607,9 @@ describe('GCP provider prerequisite wiring (cli-action-map.md -- backup-db DB re
     expect(check!.severity).toBe('blocking');
   });
 
-  it("backup-db requires postgresql-client AND cloud-sql-proxy (the proxy always starts once terraform-output.json carries database_connection_name)", () => {
+  it("backup-db requires postgresql-client, cloud-sql-proxy AND gcloud (the proxy always starts once terraform-output.json carries database_connection_name, and PSC endpoint reconciliation shells out to gcloud)", () => {
     const backupDb = gcpProvider.actions.find((a) => a.name === 'backup-db')!;
-    expect(backupDb.requiredPrerequisiteIds).toEqual(['postgresql-client', 'cloud-sql-proxy']);
+    expect(backupDb.requiredPrerequisiteIds).toEqual(['postgresql-client', 'cloud-sql-proxy', 'gcloud']);
   });
 
   it('seed requires neither -- restore-from-backup is an ephemeral per-trigger choice, generate-fresh needs no DB client', () => {
