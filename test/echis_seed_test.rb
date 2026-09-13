@@ -6,138 +6,166 @@ require "open3"
 require "rbconfig"
 require "socket"
 require "tmpdir"
+require "zlib"
 
-# First automated test coverage for scripts/echis_seed.rb (spec 010,
-# /speckit-tasks T002/T011/T018/T023/T030 -- spec 008's generator had none,
-# per docs/echis-benchmark-tiers.md's "verified locally" manual-check
-# convention). Most cases run in --metadata-only mode (no live server
-# needed); the FR-010 shape-regression case uses a one-shot capturing HTTP
-# server, the same pattern test/synthea_loader_http_test.rb already
+# Coverage for scripts/echis_seed.rb's dev-server-aligned data model
+# (docs/echis-data-model.md). Most cases run in --metadata-only mode; the
+# shape and reference-closure cases capture the real transaction bundles
+# with a local stub server, the same pattern test/synthea_loader_http_test.rb
 # establishes, since --metadata-only never serializes resource bodies.
 class EchisSeedTest < Minitest::Test
   ROOT_DIR = File.expand_path("..", __dir__)
   GENERATOR = File.join(ROOT_DIR, "scripts", "echis_seed.rb")
-  ACCEPT_TIMEOUT_SECONDS = 2
+  CONTENT = File.join(ROOT_DIR, "benchmarks", "echis", "content", "echis-content.json")
+  TAG_SYSTEM = "https://www.example.com/CodeSystem/supervision-location"
+  ACCEPT_TIMEOUT_SECONDS = 5
+  HOUSEHOLD_OWNED_TYPES = %w[Group Patient RelatedPerson QuestionnaireResponse Encounter Observation DetectedIssue Task Condition].freeze
 
-  def test_resource_counts_include_new_types_at_small_scale
-    metadata = run_seed(households: 100, run_id: "echis-seed-test-small")
-    counts = metadata.dig("echis", "resource_counts")
+  def test_resource_counts_at_small_scale
+    counts = run_seed(households: 100, run_id: "echis-seed-test-small").dig("echis", "resource_counts")
 
-    # H=100 -> C (CHW catchments) = ceil(100/100) = 1, F (facilities,
-    # CHWS_PER_FACILITY=5) = ceil(1/5) = 1, sub-region = ceil(1/50) = 1,
-    # region = ceil(1/20) = 1 -- data-model.md's corrected cardinality formula.
-    assert_equal 3, counts["Location"]
+    assert_equal 100, counts["Group"]
+    assert_equal 300, counts["Patient"]
+    assert_equal 200, counts["RelatedPerson"], "one RelatedPerson per non-head household member"
+    # One CHV catchment and one Community Health Unit: CHV + CHA staff.
+    assert_equal 2, counts["Practitioner"]
+    assert_equal 2, counts["PractitionerRole"]
+    assert_equal 1, counts["CareTeam"]
     assert_equal 1, counts["Organization"]
-    assert_equal 1, counts["Practitioner"]
+    # 48 snapshot Locations (country + 47 counties) + unit, facility, ward, sub-county.
+    assert_equal 52, counts["Location"]
+    assert_equal 21, counts["Questionnaire"]
+    assert_equal 34, counts["PlanDefinition"]
+    assert_equal 7, counts["ActivityDefinition"]
+    assert_operator counts["QuestionnaireResponse"], :>=, 100, "every household has a registration response"
+    assert_operator counts["Observation"], :>=, 300, "every household has three WASH observations"
+    %w[Encounter DetectedIssue Task Condition].each { |type| assert_operator counts[type].to_i, :>, 0, "expected some #{type}" }
     refute counts.key?("Specimen"), "Specimen must not appear unless --include-specimen is set"
   end
 
-  def test_pre_existing_resource_counts_unchanged_by_default
-    metadata = run_seed(households: 100, run_id: "echis-seed-test-unchanged")
-    counts = metadata.dig("echis", "resource_counts")
-
-    # Pre-feature (spec 008) counts for --households 100
-    # --individuals-per-household 3 (SC-006 non-regression check).
-    assert_equal 100, counts["Group"]
-    assert_equal 300, counts["Patient"]
-    assert_equal 200, counts["RelatedPerson"]
-    assert_equal 1, counts["PractitionerRole"]
-    assert_equal 1, counts["CareTeam"]
-    assert_equal 300, counts["Encounter"]
-    assert_equal 300, counts["Observation"]
-    assert_equal 150, counts["Condition"]
-    assert_equal 100, counts["Task"]
-    assert_equal 300, counts["QuestionnaireResponse"]
+  def test_household_sizes_vary_around_the_average
+    metadata = run_seed(households: 5, run_id: "echis-seed-test-sizes")
+    # Sizes cycle 3, 4, 2, 3, 4 -> 16 individuals.
+    assert_equal 16, metadata.dig("echis", "patients")
+    assert_equal 16, metadata.dig("echis", "resource_counts", "Patient")
   end
 
-  def test_shard_rerun_is_byte_reproducible
-    first = run_seed(households: 1000, shard_index: 0, shard_count: 4, run_id: "echis-seed-test-shard-a")
-    second = run_seed(households: 1000, shard_index: 0, shard_count: 4, run_id: "echis-seed-test-shard-b")
+  def test_shard_rerun_is_reproducible
+    first = run_seed(households: 1000, shard_index: 1, shard_count: 4, run_id: "echis-seed-test-shard-a")
+    second = run_seed(households: 1000, shard_index: 1, shard_count: 4, run_id: "echis-seed-test-shard-b")
 
     assert_equal first.dig("echis", "resource_counts"), second.dig("echis", "resource_counts")
   end
 
-  def test_organization_and_practitioner_counts
-    metadata = run_seed(households: 1000, run_id: "echis-seed-test-org-practitioner")
-    counts = metadata.dig("echis", "resource_counts")
+  def test_shards_partition_household_owned_resources_and_count_content_once
+    single = run_seed(households: 1000, run_id: "echis-seed-test-single").dig("echis", "resource_counts")
+    sharded = Array.new(4) { |index| run_seed(households: 1000, shard_index: index, shard_count: 4, run_id: "echis-seed-test-part-#{index}") }
+      .map { |metadata| metadata.dig("echis", "resource_counts") }
 
-    assert_equal 1, counts["Organization"]
-    # C = ceil(1000/100) = 10 CHW catchments -> 10 Practitioners (1 per CHW,
-    # unaffected by facility grouping).
-    assert_equal 10, counts["Practitioner"]
+    HOUSEHOLD_OWNED_TYPES.each do |type|
+      assert_equal single[type], sharded.sum { |counts| counts[type].to_i }, "#{type} must be generated by exactly one shard"
+    end
+    assert_equal 21, sharded.sum { |counts| counts["Questionnaire"].to_i }, "reference content is counted by shard 0 only"
   end
 
-  def test_specimen_absent_by_default_and_present_when_enabled
-    without_flag = run_seed(households: 100, run_id: "echis-seed-test-specimen-off")
-    refute without_flag.dig("echis", "resource_counts").key?("Specimen")
+  def test_seed_changes_the_generated_mix
+    first = run_seed(households: 1000, seed: 1, run_id: "echis-seed-test-seed-1").dig("echis", "resource_counts")
+    second = run_seed(households: 1000, seed: 2, run_id: "echis-seed-test-seed-2").dig("echis", "resource_counts")
 
-    with_flag = run_seed(households: 100, run_id: "echis-seed-test-specimen-on", include_specimen: true)
-    counts = with_flag.dig("echis", "resource_counts")
-    assert counts.key?("Specimen")
-    assert counts["Specimen"].positive?
-    assert_operator counts["Specimen"], :<, 300
+    assert_equal first["Patient"], second["Patient"]
+    refute_equal first["Observation"], second["Observation"]
   end
 
-  def test_existing_resource_shapes_unchanged_except_documented_additions
-    # FR-010 regression proof (spec 010 /speckit-analyze finding G3): confirm
-    # the fields already implemented and reviewed under spec 008 stay exactly
-    # as docs/echis-data-model.md documents them, aside from this feature's
-    # explicitly-added meta.tag (Group/Task/Patient/QuestionnaireResponse)
-    # and practitioner reference (PractitionerRole).
-    port, server, thread = capturing_server
+  def test_specimen_only_when_enabled
+    counts = run_seed(households: 300, run_id: "echis-seed-test-specimen", include_specimen: true).dig("echis", "resource_counts")
 
+    assert_operator counts["Specimen"].to_i, :>, 0
+  end
+
+  def test_gzipped_content_snapshot_is_accepted
     Dir.mktmpdir do |dir|
-      metadata_path = File.join(dir, "metadata.json")
-      stdout, stderr, status = Open3.capture3(
-        RbConfig.ruby, GENERATOR,
-        "--households", "1",
-        "--seed", "12345",
-        "--run-id", "echis-seed-test-fr010",
-        "--metadata", metadata_path,
-        "--fhir-base-url", "http://127.0.0.1:#{port}/"
+      gz = File.join(dir, "echis-content.json.gz")
+      Zlib::GzipWriter.open(gz) { |writer| writer.write(File.read(CONTENT)) }
+
+      plain = run_seed(households: 50, run_id: "echis-seed-test-plain").dig("echis", "resource_counts")
+      zipped = run_seed(households: 50, run_id: "echis-seed-test-gz", content: gz).dig("echis", "resource_counts")
+      assert_equal plain, zipped
+    end
+  end
+
+  def test_missing_content_snapshot_fails_clearly
+    Dir.mktmpdir do |dir|
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby, GENERATOR, "--households", "1", "--seed", "1", "--run-id", "missing",
+        "--metadata", File.join(dir, "m.json"), "--metadata-only", "--content", File.join(dir, "nope.json")
       )
-      assert status.success?, "#{stdout}\n#{stderr}"
+      refute status.success?
+      assert_match(/content snapshot not found/, stderr)
+    end
+  end
+
+  def test_generated_resources_match_dev_server_shapes
+    requests = capture_bundles(households: 100)
+    content, households = requests
+    resources = households["entry"].map { |entry| entry["resource"] }
+
+    assert_equal 110, content["entry"].length, "reference content is loaded before household data"
+    assert(households["entry"].all? { |entry| entry.dig("request", "method") == "PUT" })
+
+    by_type = resources.group_by { |resource| resource["resourceType"] }
+    %w[Group Patient RelatedPerson QuestionnaireResponse Encounter Observation Task DetectedIssue CareTeam].each do |type|
+      by_type.fetch(type).each do |resource|
+        tag = Array(resource.dig("meta", "tag")).find { |t| t["system"] == TAG_SYSTEM }
+        assert_equal "echis-loc-chu000000", tag&.fetch("code", nil), "#{type}/#{resource["id"]} needs the supervision-location sync tag"
+      end
     end
 
-    request = stop_server(server, thread)
-    resources = request["entry"].map { |e| e["resource"] }
-
-    group = resources.find { |r| r["resourceType"] == "Group" }
-    assert_equal %w[actual id member meta quantity resourceType type].sort, group.keys.sort
+    group = by_type["Group"].first
     assert_equal "person", group["type"]
     assert_equal true, group["actual"]
+    assert_equal "PractitionerRole/echis-chw000000", group.dig("managingEntity", "reference")
+    assert_match(/ Household\z/, group["name"])
 
-    patient = resources.find { |r| r["resourceType"] == "Patient" }
-    assert_equal %w[active birthDate gender id identifier meta name resourceType].sort, patient.keys.sort
+    patient = by_type["Patient"].first
+    assert_equal "PractitionerRole/echis-chw000000", patient.dig("generalPractitioner", 0, "reference")
+    assert_equal "KE", patient.dig("address", 0, "country")
 
-    task = resources.find { |r| r["resourceType"] == "Task" }
-    assert_equal %w[for id intent meta owner resourceType status].sort, task.keys.sort
-    assert_equal "requested", task["status"]
+    chv = by_type["PractitionerRole"].find { |role| role["id"] == "echis-chw000000" }
+    assert_equal({ "system" => "https://nphiis.health.go.ke/fhir/CodeSystem/nphiis-roles", "code" => "CHV", "display" => "CHV" }, chv.dig("code", 0, "coding", 0))
 
-    questionnaire_response = resources.find { |r| r["resourceType"] == "QuestionnaireResponse" }
-    assert_equal %w[encounter id item meta resourceType status subject].sort, questionnaire_response.keys.sort
+    assert(by_type["Encounter"].all? { |encounter| encounter.dig("class", "code") == "FLD" })
+    assert(by_type["QuestionnaireResponse"].all? { |response| response["questionnaire"].start_with?("https://echisv3.intellisoftkenya.com/fhir/Questionnaire/") })
 
-    role = resources.find { |r| r["resourceType"] == "PractitionerRole" }
-    assert_equal %w[active code id practitioner resourceType].sort, role.keys.sort
+    registration = by_type["QuestionnaireResponse"].find { |response| response["questionnaire"].end_with?("/household-registration") }
+    assert_equal "Group/#{group["id"]}", registration.dig("subject", "reference")
 
-    # Unmodified 008 resource types (no field additions at all in this feature).
-    encounter = resources.find { |r| r["resourceType"] == "Encounter" }
-    assert_equal %w[class id period resourceType status subject].sort, encounter.keys.sort
-    care_team = resources.find { |r| r["resourceType"] == "CareTeam" }
-    assert_equal %w[id participant resourceType status].sort, care_team.keys.sort
-  ensure
-    stop_server(server, thread) if server && !server.closed?
+    extracted = by_type["Observation"].select { |observation| observation["derivedFrom"] }
+    response_ids = by_type["QuestionnaireResponse"].map { |response| "QuestionnaireResponse/#{response["id"]}" }
+    assert(extracted.all? { |observation| response_ids.include?(observation.dig("derivedFrom", 0, "reference")) })
+    assert(by_type["Observation"].any? { |observation| observation.dig("code", "coding", 0, "system") == "https://echisv3.intellisoftkenya.com/fhir/CodeSystem/under-5-observation" })
+  end
+
+  def test_every_reference_resolves_within_the_load
+    content, households = capture_bundles(households: 100)
+    loaded = (content["entry"] + households["entry"]).to_set { |entry| "#{entry.dig("resource", "resourceType")}/#{entry.dig("resource", "id")}" }
+
+    dangling = households["entry"].flat_map { |entry| references(entry["resource"]) }.reject { |ref| loaded.include?(ref) }.uniq
+    assert_empty dangling, "HAPI enforces referential integrity on write; these references would be rejected"
+  end
+
+  def test_household_bundles_are_byte_identical_across_runs
+    assert_equal capture_bundles(households: 20), capture_bundles(households: 20)
   end
 
   private
 
-  def run_seed(households:, run_id:, shard_index: 0, shard_count: 1, include_specimen: false)
+  def run_seed(households:, run_id:, seed: 12345, shard_index: 0, shard_count: 1, include_specimen: false, content: nil)
     Dir.mktmpdir do |dir|
       metadata_path = File.join(dir, "metadata.json")
       args = [
         RbConfig.ruby, GENERATOR,
         "--households", households.to_s,
-        "--seed", "12345",
+        "--seed", seed.to_s,
         "--run-id", run_id,
         "--metadata", metadata_path,
         "--metadata-only",
@@ -145,6 +173,7 @@ class EchisSeedTest < Minitest::Test
         "--shard-count", shard_count.to_s
       ]
       args << "--include-specimen" if include_specimen
+      args.push("--content", content) if content
 
       stdout, stderr, status = Open3.capture3(*args)
       assert status.success?, "#{stdout}\n#{stderr}"
@@ -153,19 +182,35 @@ class EchisSeedTest < Minitest::Test
     end
   end
 
-  # Accepts exactly one POST, captures its parsed JSON body (the transaction
-  # Bundle echis_seed.rb sent), and responds with a valid transaction-response
-  # Bundle so the caller doesn't report a partial-response error. Returns
-  # [port, server, thread]; call stop_server(server, thread) to retrieve the
-  # captured request body via Thread#value, mirroring
-  # test/synthea_loader_http_test.rb's one_shot_server/stop_server pattern.
-  def capturing_server
+  # Runs a live (non-metadata-only) seed against a stub server and returns
+  # every transaction bundle it POSTed, in order.
+  def capture_bundles(households:)
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
-    thread = Thread.new do
-      socket = nil
+    thread = Thread.new { serve_transactions(server) }
+
+    Dir.mktmpdir do |dir|
+      stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby, GENERATOR,
+        "--households", households.to_s,
+        "--seed", "12345",
+        "--run-id", "echis-seed-test-capture",
+        "--metadata", File.join(dir, "metadata.json"),
+        "--fhir-base-url", "http://127.0.0.1:#{port}/fhir"
+      )
+      assert status.success?, "#{stdout}\n#{stderr}"
+    end
+
+    server.close
+    thread.join(ACCEPT_TIMEOUT_SECONDS)
+    thread.value
+  end
+
+  def serve_transactions(server)
+    requests = []
+    loop do
       ready = IO.select([server], nil, nil, ACCEPT_TIMEOUT_SECONDS)
-      raise "timed out waiting for seed connection" unless ready
+      break unless ready
 
       socket = server.accept
       headers = []
@@ -174,42 +219,30 @@ class EchisSeedTest < Minitest::Test
 
         headers << line
       end
-      content_length = headers.find { |line| line.downcase.start_with?("content-length:") }
-        .to_s
-        .split(":", 2)
-        .last
-        .to_i
-      body = content_length.positive? ? socket.read(content_length) : ""
-      request = JSON.parse(body)
+      length = headers.find { |header| header.downcase.start_with?("content-length:") }.to_s.split(":", 2).last.to_i
+      request = JSON.parse(socket.read(length))
+      requests << request
 
-      response_body = JSON.generate(
+      body = JSON.generate(
         "resourceType" => "Bundle",
         "type" => "transaction-response",
-        "entry" => Array.new(Array(request["entry"]).length) { { "response" => { "status" => "200 OK" } } }
+        "entry" => Array.new(request["entry"].length) { { "response" => { "status" => "201 Created" } } }
       )
-      socket.write "HTTP/1.1 200 OK\r\n"
-      socket.write "Content-Type: application/fhir+json\r\n"
-      socket.write "Content-Length: #{response_body.bytesize}\r\n"
-      socket.write "Connection: close\r\n"
-      socket.write "\r\n"
-      socket.write response_body
-
-      request
-    ensure
-      socket&.close unless socket&.closed?
-      server.close unless server.closed?
+      socket.write "HTTP/1.1 200 OK\r\nContent-Type: application/fhir+json\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}"
+      socket.close
     end
-
-    [port, server, thread]
+    requests
+  rescue IOError, Errno::EBADF
+    requests
   end
 
-  def stop_server(server, thread)
-    server&.close unless server.nil? || server.closed?
-    return unless thread
-
-    thread.join(ACCEPT_TIMEOUT_SECONDS + 1)
-    raise "test server thread did not stop" if thread.alive?
-
-    thread.value
+  def references(value)
+    case value
+    when Hash
+      own = value["reference"].is_a?(String) && value["reference"].match?(%r{\A[A-Z][A-Za-z]+/[^/]+\z}) ? [value["reference"]] : []
+      own + value.values.flat_map { |child| references(child) }
+    when Array then value.flat_map { |child| references(child) }
+    else []
+    end
   end
 end

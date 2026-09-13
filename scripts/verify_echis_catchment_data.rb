@@ -1,14 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Post-seed verification script for spec 010's eCHIS catchment/reference
-# data (FR-011). Read-only: performs a fixed, small set of GET checks
-# against a live FHIR server after scripts/echis_seed.rb has loaded a
-# dataset, proving the facility hierarchy, catchment tags, Organization,
-# and Practitioner data are reachable -- not a load-test workload (see
-# spec.md Clarifications). Mirrors scripts/echis_seed.rb's
-# SeedError/require_option/status_success? conventions, per
-# specs/010-echis-additional-seed-data/contracts/echis-seed-cli-additions.md.
+# Post-seed verification for scripts/echis_seed.rb's dev-server-aligned
+# dataset. Read-only: a fixed, small set of GETs that replay the sync calls
+# an OHS client makes for one Community Health Unit (the "OHS FHIR Sync --
+# API Call Inventory & Performance Simulation Baseline" document), proving
+# the Location hierarchy, supervision-location sync tags, household roster,
+# staff chain, and reference content are all reachable. Not a load test.
 
 require "json"
 require "net/http"
@@ -17,12 +15,17 @@ require "uri"
 
 class VerifyError < StandardError; end
 
-options = { timeout: 120 }
+SUPERVISION_LOCATION_TAG_SYSTEM = "https://www.example.com/CodeSystem/supervision-location"
+TAG_SCOPED_TYPES = %w[Group Patient Task QuestionnaireResponse Encounter Observation].freeze
+# unit -> facility -> ward -> sub-county -> county -> country
+EXPECTED_HIERARCHY_DEPTH = 6
+
+options = { timeout: 120, unit_id: "echis-loc-chu000000" }
 
 OptionParser.new do |opts|
-  opts.banner = "Usage: scripts/verify_echis_catchment_data.rb --fhir-base-url URL --facility-id ID [--timeout SECONDS]"
+  opts.banner = "Usage: scripts/verify_echis_catchment_data.rb --fhir-base-url URL [--unit-id ID] [--timeout SECONDS]"
   opts.on("--fhir-base-url URL", "FHIR base URL to verify against.") { |v| options[:fhir_base_url] = v }
-  opts.on("--facility-id ID", "Facility-level Location id to verify catchment scoping against (e.g. echis-loc-fac000000).") { |v| options[:facility_id] = v }
+  opts.on("--unit-id ID", "Community Health Unit Location id whose sync scope to verify; default echis-loc-chu000000.") { |v| options[:unit_id] = v }
   opts.on("--timeout SECONDS", Integer, "HTTP open/read timeout in seconds; default 120.") { |v| options[:timeout] = v }
   opts.on("-h", "--help", "Show this help.") do
     puts opts
@@ -30,121 +33,98 @@ OptionParser.new do |opts|
   end
 end.parse!
 
-begin
-
-def require_option(options, key)
-  value = options[key]
-  return value unless value.nil? || value.to_s.empty?
-
-  raise VerifyError, "missing required option --#{key.to_s.tr("_", "-")}"
-end
-
-fhir_base_url = require_option(options, :fhir_base_url).to_s.sub(%r{/+\z}, "")
-facility_id = require_option(options, :facility_id)
-timeout = options.fetch(:timeout)
-
-raise VerifyError, "missing required option --fhir-base-url" if fhir_base_url.empty?
-
-base_uri = URI(fhir_base_url)
-raise VerifyError, "FHIR base URL must be http or https: #{fhir_base_url}" unless %w[http https].include?(base_uri.scheme)
-
-def status_success?(code)
-  code.to_i >= 200 && code.to_i < 300
-end
-
-def http_get(fhir_base_url, path, timeout)
+def get_json(fhir_base_url, path, timeout, description)
   target = URI("#{fhir_base_url}/#{path}")
   http = Net::HTTP.new(target.host, target.port)
   http.use_ssl = target.scheme == "https"
   http.open_timeout = timeout
   http.read_timeout = timeout
-
   request = Net::HTTP::Get.new(target.request_uri)
   request["Accept"] = "application/fhir+json"
-  http.request(request)
-end
-
-def get_json(fhir_base_url, path, timeout, description)
-  response = http_get(fhir_base_url, path, timeout)
-  raise VerifyError, "#{description}: expected 2xx, got #{response.code} (GET #{path})" unless status_success?(response.code)
+  response = http.request(request)
+  raise VerifyError, "#{description}: expected 2xx, got #{response.code} (GET #{path})" unless response.code.to_i.between?(200, 299)
 
   JSON.parse(response.body)
 rescue JSON::ParserError => e
   raise VerifyError, "#{description}: invalid JSON response (GET #{path}): #{e.message}"
 end
 
-def bundle_entries(bundle, description)
+def bundle_resources(bundle, description)
   raise VerifyError, "#{description}: expected a Bundle, got #{bundle["resourceType"].inspect}" unless bundle.is_a?(Hash) && bundle["resourceType"] == "Bundle"
 
-  Array(bundle["entry"])
+  Array(bundle["entry"]).map { |entry| entry["resource"] }
 end
 
-CATCHMENT_TAG_SYSTEM = "urn:hapi-fhir-deploy:echis-catchment"
+begin
+  fhir_base_url = options[:fhir_base_url].to_s.sub(%r{/+\z}, "")
+  raise VerifyError, "missing required option --fhir-base-url" if fhir_base_url.empty?
+  raise VerifyError, "FHIR base URL must be http or https: #{fhir_base_url}" unless %w[http https].include?(URI(fhir_base_url).scheme)
 
-def assert_tag_matches(resource, facility_id, description)
-  tags = Array(resource.dig("meta", "tag"))
-  matching = tags.find { |tag| tag["system"] == CATCHMENT_TAG_SYSTEM && tag["code"] == facility_id }
-  return if matching
+  unit_id = options[:unit_id]
+  timeout = options[:timeout]
+  results = []
 
-  raise VerifyError, "#{description}: #{resource["resourceType"]}/#{resource["id"]} is missing the expected catchment tag (#{facility_id})"
-end
+  # 1. The unit's partOf chain resolves all the way up to the country.
+  chain = []
+  location = get_json(fhir_base_url, "Location/#{unit_id}", timeout, "unit Location lookup")
+  loop do
+    chain << location["name"]
+    parent = location.dig("partOf", "reference")
+    break unless parent
 
-results = []
-
-# Check 1: the facility Location resolves, and its partOf chain resolves up
-# through sub-region and region levels (contract check #1).
-location = get_json(fhir_base_url, "Location/#{facility_id}", timeout, "facility Location lookup")
-results << "Location/#{facility_id} resolves"
-
-part_of_ref = location.dig("partOf", "reference")
-if part_of_ref
-  sub_region = get_json(fhir_base_url, part_of_ref, timeout, "sub-region Location lookup")
-  results << "#{part_of_ref} (sub-region) resolves"
-
-  region_ref = sub_region.dig("partOf", "reference")
-  if region_ref
-    get_json(fhir_base_url, region_ref, timeout, "region Location lookup")
-    results << "#{region_ref} (region) resolves"
+    location = get_json(fhir_base_url, parent, timeout, "Location hierarchy lookup")
   end
-end
+  raise VerifyError, "Location hierarchy for #{unit_id} is #{chain.length} levels deep, expected #{EXPECTED_HIERARCHY_DEPTH}: #{chain.join(" -> ")}" unless chain.length == EXPECTED_HIERARCHY_DEPTH
 
-# Checks 2-3: facility-scoped Group/Task/Patient/QuestionnaireResponse
-# searches return only this facility's resources (contract checks #2-#3,
-# FR-005/SC-001). Collects one Task.owner reference along the way for
-# check #5.
-task_owner_refs = []
-%w[Group Task Patient QuestionnaireResponse].each do |resource_type|
-  path = "#{resource_type}?_tag=#{CATCHMENT_TAG_SYSTEM}|#{facility_id}"
-  bundle = get_json(fhir_base_url, path, timeout, "#{resource_type} facility-scoped search")
-  entries = bundle_entries(bundle, "#{resource_type} facility-scoped search")
-  raise VerifyError, "#{resource_type} facility-scoped search returned no results for #{facility_id}" if entries.empty?
+  results << "Location hierarchy resolves: #{chain.join(" -> ")}"
 
-  entries.each do |entry|
-    resource = entry["resource"]
-    assert_tag_matches(resource, facility_id, "#{resource_type} facility-scoped search")
-    task_owner_refs << resource.dig("owner", "reference") if resource_type == "Task" && resource["owner"]
+  # 2. First-sync, tag-scoped pulls return only this unit's data.
+  groups = []
+  TAG_SCOPED_TYPES.each do |type|
+    path = "#{type}?_tag=#{SUPERVISION_LOCATION_TAG_SYSTEM}|#{unit_id}&_count=50&_sort=_lastUpdated"
+    resources = bundle_resources(get_json(fhir_base_url, path, timeout, "#{type} tag-scoped pull"), "#{type} tag-scoped pull")
+    raise VerifyError, "#{type} tag-scoped pull returned no results for #{unit_id}" if resources.empty?
+
+    resources.each do |resource|
+      tagged = Array(resource.dig("meta", "tag")).any? { |tag| tag["system"] == SUPERVISION_LOCATION_TAG_SYSTEM && tag["code"] == unit_id }
+      raise VerifyError, "#{type}/#{resource["id"]} is missing the supervision-location tag #{unit_id}" unless tagged
+    end
+    groups = resources if type == "Group"
+    results << "#{type} tag-scoped pull returned #{resources.length} correctly tagged resource(s)"
   end
-  results << "#{path} returned #{entries.length} catchment-consistent result(s)"
-end
 
-# Check 4: the Organization resolves (contract check #4).
-get_json(fhir_base_url, "Organization/echis-org000001", timeout, "Organization lookup")
-results << "Organization/echis-org000001 resolves"
+  # 3. Known-household roster read and member $everything (sync use case 2).
+  group = groups.first
+  roster = bundle_resources(get_json(fhir_base_url, "Group?_id=#{group["id"]}&_include=Group:member", timeout, "household roster read"), "household roster read")
+  members = roster.count { |resource| resource["resourceType"] == "Patient" }
+  raise VerifyError, "Group/#{group["id"]} roster read returned no Patient members" if members.zero?
 
-# Check 5: one PractitionerRole found above resolves its practitioner
-# reference to a Practitioner (contract check #5).
-role_ref = task_owner_refs.first
-raise VerifyError, "no Task.owner reference found to verify PractitionerRole -> Practitioner resolution" unless role_ref
+  member_ref = group.dig("member", 0, "entity", "reference")
+  everything = bundle_resources(get_json(fhir_base_url, "#{member_ref}/$everything", timeout, "Patient $everything"), "Patient $everything")
+  results << "Group/#{group["id"]} roster includes #{members} Patient(s); #{member_ref}/$everything returned #{everything.length} resource(s)"
 
-role = get_json(fhir_base_url, role_ref, timeout, "PractitionerRole lookup")
-practitioner_ref = role.dig("practitioner", "reference")
-raise VerifyError, "#{role_ref} has no practitioner reference" unless practitioner_ref
+  # 4. Staff chain: household -> CHV PractitionerRole -> Practitioner, and the organization.
+  role_ref = group.dig("managingEntity", "reference")
+  raise VerifyError, "Group/#{group["id"]} has no managingEntity" unless role_ref
 
-get_json(fhir_base_url, practitioner_ref, timeout, "Practitioner lookup")
-results << "#{role_ref} -> #{practitioner_ref} resolves"
+  role = get_json(fhir_base_url, role_ref, timeout, "CHV PractitionerRole lookup")
+  practitioner_ref = role.dig("practitioner", "reference")
+  raise VerifyError, "#{role_ref} has no practitioner reference" unless practitioner_ref
 
-puts "eCHIS catchment data verification passed for facility #{facility_id}:"
-results.each { |line| puts "  - #{line}" }
+  get_json(fhir_base_url, practitioner_ref, timeout, "Practitioner lookup")
+  get_json(fhir_base_url, "Organization/echis-org000001", timeout, "Organization lookup")
+  results << "#{role_ref} -> #{practitioner_ref} resolves; Organization/echis-org000001 resolves"
+
+  # 5. Reference content: generated responses point at loaded Questionnaires.
+  response = bundle_resources(get_json(fhir_base_url, "QuestionnaireResponse?_tag=#{SUPERVISION_LOCATION_TAG_SYSTEM}|#{unit_id}&_count=1", timeout, "QuestionnaireResponse lookup"), "QuestionnaireResponse lookup").first
+  canonical = response["questionnaire"]
+  questionnaires = bundle_resources(get_json(fhir_base_url, "Questionnaire?url=#{URI.encode_www_form_component(canonical)}", timeout, "Questionnaire canonical lookup"), "Questionnaire canonical lookup")
+  raise VerifyError, "no Questionnaire found for canonical #{canonical}" if questionnaires.empty?
+
+  results << "QuestionnaireResponse/#{response["id"]} questionnaire #{canonical} resolves"
+
+  puts "eCHIS dataset verification passed for unit #{unit_id}:"
+  results.each { |line| puts "  - #{line}" }
 rescue VerifyError => e
   warn "scripts/verify_echis_catchment_data.rb: #{e.message}"
   exit 1

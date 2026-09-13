@@ -91,7 +91,7 @@ jobs:
             --run-id ci-echis-seed \
             --metadata /tmp/echis-seed-metadata.json \
             --metadata-only
-          ruby -rjson -e 'm = JSON.parse(File.read("/tmp/echis-seed-metadata.json")); counts = m.dig("echis", "resource_counts"); abort "household count mismatch" unless counts["Group"] == 100; abort "Location count mismatch" unless counts["Location"] == 3; abort "Organization count mismatch" unless counts["Organization"] == 1; abort "Practitioner count mismatch" unless counts["Practitioner"] == 1; abort "unexpected Specimen without --include-specimen" if counts.key?("Specimen"); abort "unexpected import errors" unless m.dig("import", "error_count") == 0'
+          ruby -rjson -e 'm = JSON.parse(File.read("/tmp/echis-seed-metadata.json")); counts = m.dig("echis", "resource_counts"); abort "household count mismatch" unless counts["Group"] == 100; abort "Patient count mismatch" unless counts["Patient"] == 300; abort "Location count mismatch" unless counts["Location"] == 52; abort "Organization count mismatch" unless counts["Organization"] == 1; abort "Practitioner count mismatch" unless counts["Practitioner"] == 2; abort "Questionnaire count mismatch" unless counts["Questionnaire"] == 21; abort "unexpected Specimen without --include-specimen" if counts.key?("Specimen"); abort "unexpected import errors" unless m.dig("import", "error_count") == 0'
           ruby test/echis_seed_test.rb
           ruby test/merge_seed_shards_test.rb
 
