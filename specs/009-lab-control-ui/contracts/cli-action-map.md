@@ -11,8 +11,8 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 
 | Action | `scripts/lab` invocation | Confirmation required |
 |---|---|---|
-| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours} --var enable_read_replica={enable_read_replica} --var db_work_mem_kb={db_work_mem_kb}` | Yes — billable resource creation |
-| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas} --extra-vars hapi_cpu_request={hapi_cpu_request} --extra-vars pgbouncer_cpu_request={pgbouncer_cpu_request} --extra-vars pgbouncer_cpu_limit={pgbouncer_cpu_limit} --extra-vars hapi_tomcat_max_threads={hapi_tomcat_max_threads} --extra-vars hapi_min_replicas={hapi_min_replicas}` | No |
+| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours} --var enable_read_replica={enable_read_replica} --var db_work_mem_kb={db_work_mem_kb} --var db_max_connections={db_max_connections}` | Yes — billable resource creation |
+| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas} --extra-vars hapi_cpu_request={hapi_cpu_request} --extra-vars pgbouncer_cpu_request={pgbouncer_cpu_request} --extra-vars pgbouncer_cpu_limit={pgbouncer_cpu_limit} --extra-vars hapi_tomcat_max_threads={hapi_tomcat_max_threads} --extra-vars hapi_min_replicas={hapi_min_replicas} --extra-vars pgbouncer_replica_count={pgbouncer_replica_count} --extra-vars hapi_cpu_limit={hapi_cpu_limit} --extra-vars hapi_hikari_max_pool_size={hapi_hikari_max_pool_size}` | No |
 | `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | Yes — names the exposure scope |
 | `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
@@ -121,6 +121,16 @@ Notes:
   2..effective `maxReplicaCount` (`specs/003-autoscaling-connection-budget`
   SC-001: never fewer than two HAPI replicas); `hapi_max_replicas` must be a
   whole number too.
+- `pgbouncer_replica_count` (`deploy`) is always passed (a number field
+  defaulting to 2). `hapi_cpu_limit` and `hapi_hikari_max_pool_size`
+  (`deploy`) are passed explicitly even when blank (chart CPU limit / tier
+  Hikari default), for the same revert-on-clear reason.
+- `db_max_connections` (`up`) is always passed (default 100). The deploy
+  reads it back from `terraform-output.json` (`database_max_connections`) and
+  refuses connection sizing beyond it minus `postgres_reserved_connections`
+  (`ansible/group_vars/lab.yml`, 50): pooled `pgbouncer_default_pool_size *
+  pgbouncer_replica_count`, native `maxReplicaCount * Hikari pool`. Changing
+  it on an existing lab restarts Cloud SQL.
 - `enable_pgbouncer` (`deploy`) is always passed explicitly, true or false,
   never conditionally omitted -- so toggling it OFF on a later redeploy of
   an already-pooled lab actually disables the tier again (`ansible/

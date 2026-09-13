@@ -120,9 +120,14 @@ variable "labels" {
 }
 
 variable "db_max_connections" {
-  description = "PostgreSQL max_connections enforced on the Cloud SQL instance. Must match the value documented in docs/autoscaling.md's connection-budget formulas (specs/007-pgbouncer-connection-pooling)."
+  description = "PostgreSQL max_connections enforced on the Cloud SQL instance. The Ansible deploy reads it back (database_max_connections output) and refuses HAPI/PgBouncer sizing beyond this minus postgres_reserved_connections; docs/autoscaling.md has the formulas. Changing it on an existing instance restarts Cloud SQL."
   type        = number
   default     = 100
+
+  validation {
+    condition     = floor(var.db_max_connections) == var.db_max_connections && var.db_max_connections >= 14 && var.db_max_connections <= 262143
+    error_message = "db_max_connections must be a whole number between 14 and 262143 (Cloud SQL's allowed range for max_connections)."
+  }
 }
 
 variable "enable_shard_output_rwx" {

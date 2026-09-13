@@ -83,6 +83,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'enable_read_replica=false',
         '--var',
         'db_work_mem_kb=0',
+        '--var',
+        'db_max_connections=100',
     ]);
   });
 
@@ -109,6 +111,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'hapi_tomcat_max_threads=',
         '--extra-vars',
         'hapi_min_replicas=',
+        '--extra-vars',
+        'pgbouncer_replica_count=2',
+        '--extra-vars',
+        'hapi_cpu_limit=',
+        '--extra-vars',
+        'hapi_hikari_max_pool_size=',
     ]);
   });
 
@@ -136,6 +144,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'hapi_tomcat_max_threads=',
         '--extra-vars',
         'hapi_min_replicas=',
+        '--extra-vars',
+        'pgbouncer_replica_count=2',
+        '--extra-vars',
+        'hapi_cpu_limit=',
+        '--extra-vars',
+        'hapi_hikari_max_pool_size=',
       ],
     );
   });
@@ -165,6 +179,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'hapi_tomcat_max_threads=',
       '--extra-vars',
       'hapi_min_replicas=',
+      '--extra-vars',
+      'pgbouncer_replica_count=2',
+      '--extra-vars',
+      'hapi_cpu_limit=',
+      '--extra-vars',
+      'hapi_hikari_max_pool_size=',
     ]);
   });
 
@@ -191,6 +211,12 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'hapi_tomcat_max_threads=40',
       '--extra-vars',
       'hapi_min_replicas=',
+      '--extra-vars',
+      'pgbouncer_replica_count=2',
+      '--extra-vars',
+      'hapi_cpu_limit=',
+      '--extra-vars',
+      'hapi_hikari_max_pool_size=',
     ]);
   });
 
@@ -217,7 +243,56 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'hapi_tomcat_max_threads=',
       '--extra-vars',
       'hapi_min_replicas=6',
+      '--extra-vars',
+      'pgbouncer_replica_count=2',
+      '--extra-vars',
+      'hapi_cpu_limit=',
+      '--extra-vars',
+      'hapi_hikari_max_pool_size=',
     ]);
+  });
+
+  it('deploy (PgBouncer replicas, HAPI CPU limit and Hikari pool size overrides passed through)', () => {
+    expect(
+      run('deploy', {
+        enable_pgbouncer: true,
+        pgbouncer_replica_count: 4,
+        hapi_cpu_limit: '3',
+        hapi_hikari_max_pool_size: '15',
+      }).argv,
+    ).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=',
+      '--extra-vars',
+      'hapi_min_replicas=',
+      '--extra-vars',
+      'pgbouncer_replica_count=4',
+      '--extra-vars',
+      'hapi_cpu_limit=3',
+      '--extra-vars',
+      'hapi_hikari_max_pool_size=15',
+    ]);
+  });
+
+  it('up (db_max_connections override passed through)', () => {
+    expect(run('up', { db_max_connections: 200 }).argv.slice(-2)).toEqual(['--var', 'db_max_connections=200']);
   });
 
   it('expose-fhir (requires KUBECONFIG, same as pause/resume-autoscaling)', () => {
@@ -616,6 +691,33 @@ describe('GCP provider prerequisite wiring (cli-action-map.md -- backup-db DB re
     const seed = gcpProvider.actions.find((a) => a.name === 'seed')!;
     expect(seed.requiredPrerequisiteIds).not.toContain('postgresql-client');
     expect(seed.requiredPrerequisiteIds).not.toContain('cloud-sql-proxy');
+  });
+
+  it('assigns every GCP config field a group, so none falls into the UI catch-all "Other" section', () => {
+    const ungrouped = gcpProvider.configFields.filter((f) => !f.group).map((f) => f.key);
+    expect(ungrouped).toEqual([]);
+  });
+
+  it('scopes the provider-agnostic Ansible deploy knobs as common, and the Cloud SQL-specific ones as provider', () => {
+    const scopeOf = (key: string) => gcpProvider.configFields.find((f) => f.key === key)?.scope;
+    for (const key of [
+      'enable_pgbouncer',
+      'pgbouncer_default_pool_size',
+      'pgbouncer_replica_count',
+      'pgbouncer_cpu_request',
+      'pgbouncer_cpu_limit',
+      'hapi_min_replicas',
+      'hapi_max_replicas',
+      'hapi_cpu_request',
+      'hapi_cpu_limit',
+      'hapi_tomcat_max_threads',
+      'hapi_hikari_max_pool_size',
+    ]) {
+      expect(scopeOf(key), key).toBe('common');
+    }
+    for (const key of ['db_max_connections', 'db_work_mem_kb', 'enable_read_replica', 'db_sku']) {
+      expect(scopeOf(key), key).toBe('provider');
+    }
   });
 
   it('every requiredPrerequisiteId across all actions has a matching prerequisiteChecks entry', () => {

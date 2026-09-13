@@ -67,6 +67,57 @@
       no_log: true
 
   tasks:
+    # Re-checked against this lab's EFFECTIVE values before anything is
+    # rendered: CI only ever sees the committed group_vars defaults, while
+    # the pool size, replica count, CPU and the database's max_connections
+    # can all be overridden per lab from the Lab Control UI.
+    - name: Resolve effective PgBouncer sizing and the PostgreSQL connection budget
+      ansible.builtin.set_fact:
+        # Same fallbacks the PgBouncer Deployment template renders.
+        pgbouncer_effective_cpu_request: "{{ (pgbouncer_cpu_request | default('') | string | trim) or '100m' }}"
+        pgbouncer_effective_cpu_limit: "{{ (pgbouncer_cpu_limit | default('') | string | trim) or '500m' }}"
+        lab_postgres_max_connections: "{{ terraform_outputs.database_max_connections.value | default(postgres_max_connections) | int }}"
+        lab_postgres_connection_budget: "{{ (terraform_outputs.database_max_connections.value | default(postgres_max_connections) | int) - (postgres_reserved_connections | int) }}"
+
+    - name: Refuse malformed PgBouncer sizing
+      ansible.builtin.assert:
+        that:
+          - (pgbouncer_replica_count | string | trim) is match('^[1-9][0-9]*$')
+          - (pgbouncer_default_pool_size | string | trim) is match('^[1-9][0-9]*$')
+          - pgbouncer_effective_cpu_request is match('^([0-9]+m|[0-9]+([.][0-9]+)?)$')
+          - pgbouncer_effective_cpu_limit is match('^([0-9]+m|[0-9]+([.][0-9]+)?)$')
+        fail_msg: >-
+          pgbouncer_replica_count and pgbouncer_default_pool_size must be whole numbers
+          of at least 1, and PgBouncer CPU values Kubernetes CPU quantities such as
+          1000m or 1 (got replicas '{{ pgbouncer_replica_count }}', pool
+          '{{ pgbouncer_default_pool_size }}', request '{{ pgbouncer_effective_cpu_request }}',
+          limit '{{ pgbouncer_effective_cpu_limit }}').
+        quiet: true
+
+    - name: Refuse a PgBouncer CPU request above its limit
+      vars:
+        request_millicores: "{{ (pgbouncer_effective_cpu_request[:-1] | int) if pgbouncer_effective_cpu_request.endswith('m') else ((pgbouncer_effective_cpu_request | float) * 1000) | round | int }}"
+        limit_millicores: "{{ (pgbouncer_effective_cpu_limit[:-1] | int) if pgbouncer_effective_cpu_limit.endswith('m') else ((pgbouncer_effective_cpu_limit | float) * 1000) | round | int }}"
+      ansible.builtin.assert:
+        that:
+          - (request_millicores | int) <= (limit_millicores | int)
+        fail_msg: >-
+          PgBouncer CPU request {{ pgbouncer_effective_cpu_request }} exceeds its limit
+          {{ pgbouncer_effective_cpu_limit }} (Kubernetes would reject the Deployment).
+        quiet: true
+
+    - name: Refuse PgBouncer server connections beyond the PostgreSQL budget
+      ansible.builtin.assert:
+        that:
+          - ((pgbouncer_default_pool_size | int) * (pgbouncer_replica_count | int)) <= (lab_postgres_connection_budget | int)
+        fail_msg: >-
+          pgbouncer_default_pool_size {{ pgbouncer_default_pool_size }} x pgbouncer_replica_count
+          {{ pgbouncer_replica_count }} = {{ (pgbouncer_default_pool_size | int) * (pgbouncer_replica_count | int) }}
+          real PostgreSQL connections exceeds max_connections {{ lab_postgres_max_connections }}
+          - {{ postgres_reserved_connections }} reserved = {{ lab_postgres_connection_budget }}.
+          Lower the pool size or replicas, or raise db_max_connections.
+        quiet: true
+
     - name: Ensure local generated artifact directory exists
       ansible.builtin.file:
         path: "{{ pgbouncer_deployment_output_path | dirname }}"

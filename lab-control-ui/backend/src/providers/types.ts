@@ -10,10 +10,38 @@
 export type ConfigFieldScope = 'common' | 'provider';
 export type ConfigFieldType = 'string' | 'number' | 'enum' | 'boolean';
 
+/**
+ * Logical sub-section a config field renders under, inside its scope's
+ * fieldset (e.g. "Database", "Connection pooling") -- the ConfigField
+ * counterpart of ActionGroupId. Provider-agnostic workflow concepts, kept as
+ * a small fixed set so the frontend's CONFIG_FIELD_GROUP_ORDER/LABELS stay
+ * exhaustive and a typo is a compile error rather than a silently-dropped
+ * heading.
+ */
+export type ConfigFieldGroupId =
+  | 'lab'
+  | 'location'
+  | 'cluster'
+  | 'database'
+  | 'pooling'
+  | 'hapi'
+  | 'scaling'
+  | 'data'
+  | 'benchmark'
+  | 'exposure';
+
 export interface ConfigField {
   key: string;
   label: string;
   scope: ConfigFieldScope;
+  /**
+   * Which sub-section of its scope's fieldset this field renders under, so a
+   * long settings list reads as related blocks instead of one flat column.
+   * Optional -- a field without one renders under a catch-all "Other"
+   * heading rather than being dropped. `scope` (FR-017's common vs
+   * provider-specific split) is unchanged by this.
+   */
+  group?: ConfigFieldGroupId;
   type: ConfigFieldType;
   /** Only meaningful when type === 'enum'. */
   enumValues?: string[];

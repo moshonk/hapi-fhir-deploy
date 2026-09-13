@@ -3,10 +3,26 @@
 export type ConfigFieldScope = 'common' | 'provider';
 export type ConfigFieldType = 'string' | 'number' | 'enum' | 'boolean';
 
+/** Mirrors backend/src/providers/types.ts's ConfigFieldGroupId. */
+export type ConfigFieldGroupId =
+  | 'lab'
+  | 'location'
+  | 'cluster'
+  | 'database'
+  | 'pooling'
+  | 'hapi'
+  | 'scaling'
+  | 'data'
+  | 'benchmark'
+  | 'exposure';
+
 export interface ConfigField {
   key: string;
   label: string;
   scope: ConfigFieldScope;
+  /** Sub-section inside the scope fieldset. Optional -- a field without one
+   * renders under a catch-all "Other" heading. */
+  group?: ConfigFieldGroupId;
   type: ConfigFieldType;
   enumValues?: string[];
   default: string | number | boolean | null;

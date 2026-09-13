@@ -11,7 +11,12 @@ it — **no other file in this codebase should need to change.**
 
 1. Create `aws.ts` (or `azure.ts`) implementing `ProviderAdapter`:
    - `configFields`: that provider's `ConfigField[]`, each marked
-     `scope: 'common' | 'provider'`. Reuse the same `key`s as `gcp.ts` for
+     `scope: 'common' | 'provider'` and, optionally, a `group`
+     (`ConfigFieldGroupId` in `types.ts`: `lab`, `location`, `cluster`,
+     `database`, `pooling`, `hapi`, `scaling`, `data`, `benchmark`,
+     `exposure`). `ConfigForm` renders each group as a titled sub-section
+     inside its scope's fieldset, in that fixed order; a field without a
+     group lands under "Other" rather than being dropped. Reuse the same `key`s as `gcp.ts` for
      any field that means the same thing across providers (`lab_name`,
      `ttl_hours`, `k6_profile`, the eCHIS fields) — the frontend's
      `ConfigForm` renders `scope: 'common'` fields identically regardless

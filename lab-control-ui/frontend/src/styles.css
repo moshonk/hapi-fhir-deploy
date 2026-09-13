@@ -57,6 +57,20 @@ fieldset {
   font-size: 0.9em;
 }
 
+.config-group {
+  margin-bottom: 0.75rem;
+}
+
+.config-group-label {
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+  margin: 0.75rem 0 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
 .action-group {
   margin-bottom: 1.25rem;
 }

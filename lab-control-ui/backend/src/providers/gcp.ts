@@ -11,6 +11,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'lab_name',
     label: 'Lab name',
     scope: 'common',
+    group: 'lab',
     type: 'string',
     default: 'hapi-fhir-lab',
     helpText: 'Terraform workspace / --name. Must match ^[a-z][a-z0-9-]{2,31}$.',
@@ -20,6 +21,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'ttl_hours',
     label: 'TTL (hours)',
     scope: 'common',
+    group: 'lab',
     type: 'number',
     default: 4,
     helpText: 'How long before this lab should be considered stale and torn down.',
@@ -29,6 +31,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'echis_tier',
     label: 'eCHIS tier',
     scope: 'common',
+    group: 'data',
     type: 'enum',
     enumValues: ['none', 'T2', 'T3'],
     default: 'none',
@@ -40,6 +43,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'enable_pgbouncer',
     label: 'Enable PgBouncer pooled tier',
     scope: 'common',
+    group: 'pooling',
     type: 'boolean',
     default: false,
     helpText:
@@ -50,16 +54,29 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'pgbouncer_default_pool_size',
     label: 'PgBouncer pool size',
     scope: 'common',
+    group: 'pooling',
     type: 'number',
     default: 20,
     helpText:
-      'Real PostgreSQL connections each PgBouncer replica maintains (DEFAULT_POOL_SIZE/MAX_DB_CONNECTIONS, ansible/templates/pgbouncer-deployment.runtime.yaml.j2). Total real connections = this * pgbouncer_replica_count (2, not yet UI-configurable) -- must stay <= (postgres_max_connections - reserved_connections) = 50 (docs/autoscaling.md); the committed default of 20 gives 40. Only takes effect on the next Deploy.',
+      'Real PostgreSQL connections each PgBouncer replica maintains (DEFAULT_POOL_SIZE/MAX_DB_CONNECTIONS, ansible/templates/pgbouncer-deployment.runtime.yaml.j2). Total real connections = this * PgBouncer replicas, which must stay <= database max connections - 50 reserved (docs/autoscaling.md); the deploy checks this. The committed defaults (20 * 2 against 100 max connections) give 40 of the 50 available. Only takes effect on the next Deploy.',
     cliMapping: '--extra-vars pgbouncer_default_pool_size={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_replica_count',
+    label: 'PgBouncer replicas',
+    scope: 'common',
+    group: 'pooling',
+    type: 'number',
+    default: 2,
+    helpText:
+      'Number of PgBouncer pods. Real PostgreSQL connections = PgBouncer pool size x this, and the deploy refuses a total above the database connection budget (max connections minus the 50 kept in reserve). PgBouncer is single-threaded, so extra replicas spread its CPU; lower the pool size when adding replicas to keep the total the same. Only used when PgBouncer is enabled. Takes effect on the next Deploy.',
+    cliMapping: '--extra-vars pgbouncer_replica_count={value} (deploy only)',
   },
   {
     key: 'households',
     label: 'Households',
     scope: 'common',
+    group: 'data',
     type: 'number',
     default: 33333,
     helpText: 'T2 shape (docs/echis-benchmark-tiers.md). T3 is 333333.',
@@ -69,6 +86,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'individuals_per_household',
     label: 'Individuals per household',
     scope: 'common',
+    group: 'data',
     type: 'number',
     default: 3,
     helpText: 'Held constant across all tiers.',
@@ -78,6 +96,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'echis_seed',
     label: 'Seed',
     scope: 'common',
+    group: 'data',
     type: 'number',
     default: 12345,
     helpText: 'Deterministic seed; keep constant across comparable runs.',
@@ -87,6 +106,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'k6_profile',
     label: 'k6 profile',
     scope: 'common',
+    group: 'benchmark',
     type: 'enum',
     enumValues: ['smoke', 'baseline', 'load', 'stress'],
     default: 'load',
@@ -98,6 +118,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'project_id',
     label: 'GCP project ID',
     scope: 'provider',
+    group: 'location',
     type: 'string',
     default: null,
     helpText: 'The only field this system cannot guess for you.',
@@ -107,6 +128,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'region',
     label: 'Region',
     scope: 'provider',
+    group: 'location',
     type: 'string',
     default: 'us-central1',
     helpText: '',
@@ -116,6 +138,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'zone',
     label: 'Zone',
     scope: 'provider',
+    group: 'location',
     type: 'string',
     default: 'us-central1-a',
     helpText: '',
@@ -125,6 +148,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'kubernetes_version',
     label: 'Kubernetes version',
     scope: 'provider',
+    group: 'cluster',
     type: 'string',
     default: '1.35.6-gke.1250000',
     helpText: '',
@@ -134,6 +158,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'node_size',
     label: 'Node size',
     scope: 'provider',
+    group: 'cluster',
     type: 'string',
     default: 'e2-standard-4',
     helpText: 'c3-standard-8 for T3-scale runs (see the T3 runbook).',
@@ -143,6 +168,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'cluster_node_count',
     label: 'Cluster node count',
     scope: 'provider',
+    group: 'cluster',
     type: 'number',
     default: 3,
     helpText: '',
@@ -152,6 +178,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'cluster_min_nodes',
     label: 'Cluster min nodes',
     scope: 'provider',
+    group: 'cluster',
     type: 'number',
     default: 3,
     helpText: '',
@@ -161,6 +188,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'cluster_max_nodes',
     label: 'Cluster max nodes',
     scope: 'provider',
+    group: 'cluster',
     type: 'number',
     default: 6,
     helpText: '',
@@ -170,6 +198,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'db_edition',
     label: 'Cloud SQL edition',
     scope: 'provider',
+    group: 'database',
     type: 'enum',
     enumValues: ['ENTERPRISE', 'ENTERPRISE_PLUS'],
     default: 'ENTERPRISE',
@@ -180,6 +209,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'db_sku',
     label: 'Cloud SQL SKU',
     scope: 'provider',
+    group: 'database',
     type: 'string',
     default: 'db-custom-2-7680',
     helpText: '',
@@ -189,15 +219,28 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'db_disk_size_gb',
     label: 'Cloud SQL disk size (GB)',
     scope: 'provider',
+    group: 'database',
     type: 'number',
     default: 256,
     helpText: '',
     cliMapping: '--var db_disk_size_gb={value}',
   },
   {
+    key: 'db_max_connections',
+    label: 'Database max connections',
+    scope: 'provider',
+    group: 'database',
+    type: 'number',
+    default: 100,
+    helpText:
+      "PostgreSQL max_connections on the Cloud SQL instance. 50 of these stay reserved for admin, migrations and monitoring; the deploy refuses a HAPI/PgBouncer configuration whose real connections exceed the rest. Raise it together with the PgBouncer pool size or replicas when the database has CPU headroom. Changing it on an existing lab restarts the database (a few minutes of downtime).",
+    cliMapping: '--var db_max_connections={value} (up only)',
+  },
+  {
     key: 'expose_source_ranges',
     label: 'Public exposure source ranges',
     scope: 'provider',
+    group: 'exposure',
     type: 'string',
     default: '0.0.0.0/0',
     helpText:
@@ -208,6 +251,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'pause_replicas',
     label: 'Bulk-load pinned replicas',
     scope: 'provider',
+    group: 'scaling',
     type: 'number',
     default: 5,
     helpText:
@@ -218,6 +262,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'shard_output_capacity_gb',
     label: 'Shard output storage capacity (GB)',
     scope: 'provider',
+    group: 'benchmark',
     type: 'number',
     default: 1024,
     helpText:
@@ -229,6 +274,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'enable_read_replica',
     label: 'Cloud SQL read replica',
     scope: 'provider',
+    group: 'database',
     type: 'boolean',
     default: false,
     helpText:
@@ -239,6 +285,7 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     key: 'db_work_mem_kb',
     label: 'Cloud SQL work_mem (kB, 0 = default)',
     scope: 'provider',
+    group: 'database',
     type: 'number',
     default: 0,
     helpText:
@@ -248,7 +295,8 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
   {
     key: 'hapi_min_replicas',
     label: 'HAPI min replicas (blank = manifest default)',
-    scope: 'provider',
+    scope: 'common',
+    group: 'scaling',
     type: 'string',
     default: '',
     helpText:
@@ -258,7 +306,8 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
   {
     key: 'hapi_max_replicas',
     label: 'HAPI max replicas (blank = manifest default)',
-    scope: 'provider',
+    scope: 'common',
+    group: 'scaling',
     type: 'string',
     default: '',
     helpText:
@@ -268,17 +317,30 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
   {
     key: 'hapi_cpu_request',
     label: 'HAPI CPU request (blank = chart default 500m)',
-    scope: 'provider',
+    scope: 'common',
+    group: 'hapi',
     type: 'string',
     default: '',
     helpText:
-      'Kubernetes CPU request per HAPI pod, e.g. 1500m. Blank keeps the chart default of 500m, which understates real use: under T3 load HAPI used 1.3-1.6 cores per pod, so 8 replicas crammed onto 3 nodes at 100% CPU and the autoscaler never added nodes (it only reacts to pods that cannot be scheduled). Set it near real usage so scaling up actually adds nodes. Only the request changes; the 2-core limit stays.',
+      'Kubernetes CPU request per HAPI pod, e.g. 1500m. Blank keeps the chart default of 500m, which understates real use: under T3 load HAPI used 1.3-1.6 cores per pod, so 8 replicas crammed onto 3 nodes at 100% CPU and the autoscaler never added nodes (it only reacts to pods that cannot be scheduled). Set it near real usage so scaling up actually adds nodes. Only the request changes; set the limit with HAPI CPU limit.',
     cliMapping: '--extra-vars hapi_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'hapi_cpu_limit',
+    label: 'HAPI CPU limit (blank = chart default 2)',
+    scope: 'common',
+    group: 'hapi',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU limit per HAPI pod, e.g. 3 or 2500m. Blank keeps the chart default of 2 cores. Under T3 load a HAPI pod that fell behind was throttled 60-84% of the time at the 2-core limit and could not catch up. Must be at least the HAPI CPU request (the deploy checks). A higher limit only helps when the node has spare CPU.',
+    cliMapping: '--extra-vars hapi_cpu_limit={value} (deploy only)',
   },
   {
     key: 'pgbouncer_cpu_request',
     label: 'PgBouncer CPU request (blank = 100m)',
-    scope: 'provider',
+    scope: 'common',
+    group: 'pooling',
     type: 'string',
     default: '',
     helpText:
@@ -288,7 +350,8 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
   {
     key: 'pgbouncer_cpu_limit',
     label: 'PgBouncer CPU limit (blank = 500m)',
-    scope: 'provider',
+    scope: 'common',
+    group: 'pooling',
     type: 'string',
     default: '',
     helpText:
@@ -298,12 +361,24 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
   {
     key: 'hapi_tomcat_max_threads',
     label: 'HAPI Tomcat max threads (blank = 200)',
-    scope: 'provider',
+    scope: 'common',
+    group: 'hapi',
     type: 'string',
     default: '',
     helpText:
       'Worker threads per HAPI pod (server.tomcat.threads.max). Blank keeps Tomcat\'s default of 200. Under T3 load single pods jammed with 200 requests in flight against a 20-connection database pool, throttled at their CPU limit, and stayed stuck while load lasted -- one pod in eight carried the whole p95/p99 tail. Try about twice the pool size (e.g. 40); extra connections wait in the queue without holding a thread.',
     cliMapping: '--extra-vars hapi_tomcat_max_threads={value} (deploy only)',
+  },
+  {
+    key: 'hapi_hikari_max_pool_size',
+    label: 'HAPI database pool size (blank = tier default)',
+    scope: 'common',
+    group: 'hapi',
+    type: 'string',
+    default: '',
+    helpText:
+      'Database connections each HAPI pod may hold (Hikari maximum pool size). Blank keeps the tier default: 10 without PgBouncer, 20 with it. Keep HAPI Tomcat max threads at about twice this. Without PgBouncer these are real database connections, so the deploy refuses max replicas x this above the connection budget; with PgBouncer it refuses more HAPI client connections than PgBouncer accepts. Must be a whole number.',
+    cliMapping: '--extra-vars hapi_hikari_max_pool_size={value} (deploy only)',
   },];
 
 export const GCP_ACTIONS: ActionDef[] = [
@@ -613,6 +688,8 @@ export function gcpBuildCommand(
           `enable_read_replica=${f('enable_read_replica', 'false')}`,
           '--var',
           `db_work_mem_kb=${f('db_work_mem_kb', '0')}`,
+          '--var',
+          `db_max_connections=${f('db_max_connections', '100')}`,
         ],
         env: {},
       };
@@ -657,6 +734,16 @@ export function gcpBuildCommand(
           // clearing the field reverts an earlier override.
           '--extra-vars',
           `hapi_min_replicas=${f('hapi_min_replicas', '')}`,
+          // Always passed (number field with a default of 2), like the pool
+          // size it multiplies into the real connection count.
+          '--extra-vars',
+          `pgbouncer_replica_count=${f('pgbouncer_replica_count', '2')}`,
+          // Blank passed explicitly for both (blank = chart CPU limit / tier
+          // Hikari default), so clearing a field reverts an earlier override.
+          '--extra-vars',
+          `hapi_cpu_limit=${f('hapi_cpu_limit', '')}`,
+          '--extra-vars',
+          `hapi_hikari_max_pool_size=${f('hapi_hikari_max_pool_size', '')}`,
         ],
         env: {},
       };

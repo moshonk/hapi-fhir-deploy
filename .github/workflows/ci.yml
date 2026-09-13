@@ -287,8 +287,17 @@ jobs:
           failures << "runtime rollout patch must set terminationGracePeriodSeconds >= 60" unless rollout_patch.dig("spec", "template", "spec", "terminationGracePeriodSeconds").to_i >= 60
           failures << "runtime rollout patch must set preStop sleep to 15 seconds" unless patch_container&.dig("lifecycle", "preStop", "sleep", "seconds") == 15
 
-          postgres_max_connections = 100
-          reserved_connections = 50
+          budget_vars = YAML.safe_load(
+            File.read("ansible/group_vars/lab.yml", encoding: "UTF-8"),
+            permitted_classes: [],
+            permitted_symbols: [],
+            aliases: false
+          )
+          postgres_max_connections = budget_vars["postgres_max_connections"].to_i
+          reserved_connections = budget_vars["postgres_reserved_connections"].to_i
+          terraform_max_connections_default = File.read("infra/terraform/gcp/variables.tf", encoding: "UTF-8")[/variable "db_max_connections" \{.*?default\s*=\s*(\d+)/m, 1].to_i
+          failures << "ansible/group_vars/lab.yml postgres_max_connections (#{postgres_max_connections}) must match infra/terraform/gcp/variables.tf db_max_connections default (#{terraform_max_connections_default})" unless postgres_max_connections == terraform_max_connections_default
+          failures << "postgres_reserved_connections must be greater than zero and below postgres_max_connections" unless reserved_connections.positive? && reserved_connections < postgres_max_connections
           failures << "Hikari maximumPoolSize must be greater than zero" unless hikari_maximum_pool_size.positive?
           replica_ceiling = hikari_maximum_pool_size.positive? ? (postgres_max_connections - reserved_connections) / hikari_maximum_pool_size : 0
           autoscaler_spec = autoscaler["spec"]
@@ -419,8 +428,8 @@ jobs:
           pgbouncer_replica_count = lab_vars["pgbouncer_replica_count"].to_i
           pgbouncer_max_client_conn = lab_vars["pgbouncer_max_client_conn"].to_i
 
-          postgres_max_connections = 100
-          reserved_connections = 50
+          postgres_max_connections = lab_vars["postgres_max_connections"].to_i
+          reserved_connections = lab_vars["postgres_reserved_connections"].to_i
 
           pooled_values = YAML.safe_load(
             File.read(pooled_values_path, encoding: "UTF-8"),

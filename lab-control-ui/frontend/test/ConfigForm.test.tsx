@@ -2,11 +2,12 @@
 // field leaves the others unchanged.
 
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { ConfigForm } from '../src/components/ConfigForm.js';
 import { gcpProviderFixture } from './fixtures/gcpProvider.js';
+import type { ConfigField, ProviderPublicShape } from '../src/api/types.js';
 
 function Harness() {
   const [values, setValues] = useState<Record<string, unknown>>(() => {
@@ -64,5 +65,60 @@ describe('ConfigForm', () => {
 
     await user.click(pgbouncerCheckbox);
     expect(pgbouncerCheckbox.checked).toBe(true);
+  });
+
+  it('keeps the common/provider fieldsets and renders group headings inside each, in a fixed order regardless of field order', () => {
+    const field = (key: string, scope: ConfigField['scope'], group?: ConfigField['group']): ConfigField => ({
+      key,
+      label: key,
+      scope,
+      group,
+      type: 'string',
+      default: '',
+      helpText: '',
+      cliMapping: '',
+    });
+    const provider: ProviderPublicShape = {
+      ...gcpProviderFixture,
+      configFields: [
+        field('pool_size', 'common', 'pooling'),
+        field('db_tier', 'provider', 'database'),
+        field('lab_name', 'common', 'lab'),
+        field('region', 'provider', 'location'),
+        field('replicas', 'common', 'scaling'),
+        field('node_size', 'provider', 'cluster'),
+      ],
+    };
+    render(<ConfigForm provider={provider} values={{}} onChange={() => {}} />);
+
+    const common = screen.getByRole('group', { name: 'Common settings' });
+    expect(within(common).getAllByRole('heading').map((h) => h.textContent)).toEqual([
+      'Lab',
+      'Connection pooling',
+      'Autoscaling',
+    ]);
+    const specific = screen.getByRole('group', { name: `${provider.label} settings` });
+    expect(within(specific).getAllByRole('heading').map((h) => h.textContent)).toEqual([
+      'Cloud location',
+      'Kubernetes cluster',
+      'Database',
+    ]);
+    expect(within(common).getByLabelText('pool_size')).toBeInTheDocument();
+    expect(within(specific).getByLabelText('db_tier')).toBeInTheDocument();
+  });
+
+  it('renders a field with no group under a catch-all "Other" heading within its own scope instead of dropping it', () => {
+    const provider: ProviderPublicShape = {
+      ...gcpProviderFixture,
+      configFields: [
+        { key: 'mystery', label: 'Mystery knob', scope: 'provider', type: 'string', default: '', helpText: '', cliMapping: '' },
+      ],
+    };
+    render(<ConfigForm provider={provider} values={{}} onChange={() => {}} />);
+
+    const specific = screen.getByRole('group', { name: `${provider.label} settings` });
+    expect(within(specific).getByRole('heading', { name: 'Other' })).toBeInTheDocument();
+    expect(within(specific).getByLabelText('Mystery knob')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Common settings' })).not.toBeInTheDocument();
   });
 });

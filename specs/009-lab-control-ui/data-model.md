@@ -23,7 +23,8 @@ feature). Documented here because every other entity below is shaped by it.
 |---|---|---|
 | `key` | string | e.g. `"node_size"`, `"project_id"`. |
 | `label` | string | Form label. |
-| `scope` | `"common" \| "provider"` | Satisfies FR-017: common fields (name, ttl_hours, k6 profile, eCHIS tier/households/individuals/seed) render identically across providers; provider fields render only for the selected provider. |
+| `scope` | `"common" \| "provider"` | Satisfies FR-017: common fields (name, ttl_hours, k6 profile, eCHIS tier/households/individuals/seed, and the provider-agnostic Ansible `deploy` knobs for PgBouncer and HAPI) render identically across providers; provider fields render only for the selected provider. |
+| `group` | `"lab" \| "location" \| "cluster" \| "database" \| "pooling" \| "hapi" \| "scaling" \| "data" \| "benchmark" \| "exposure"` (optional) | Sub-section the field renders under inside its scope's fieldset, in that fixed order (same pattern as `ActionDef.group`). A field without one renders under a catch-all "Other" heading. Does not change `scope`. |
 | `type` | `"string" \| "number" \| "enum" \| "boolean"` | Drives form control. |
 | `enumValues` | string[] | Only for `type: "enum"`. |
 | `default` | value \| `null` | `null` marks the field as blocking (FR-002) — only `project_id` has `default: null` for the GCP adapter at launch. |
@@ -34,38 +35,43 @@ feature). Documented here because every other entity below is shaped by it.
 GCP adapter's `configFields` (defaults sourced from
 `docs/gcp-echis-t3-lab-runbook.md` Steps 3/5 and `docs/lab-cli.md`):
 
-| key | scope | default |
-|---|---|---|
-| `lab_name` | common | `"hapi-fhir-lab"` (pattern `^[a-z][a-z0-9-]{2,31}$`, validated client-side to match the CLI's own naming rule, not re-validated server-side beyond passing it through) |
-| `ttl_hours` | common | `4` |
-| `echis_tier` | common | `null` selection defaulting to a "custom households" mode; when a tier (`T2`/`T3`) is picked, `households`/`individuals_per_household`/`seed` autofill from `docs/echis-benchmark-tiers.md`'s published tier shapes |
-| `households` | common | `33333` (T2 shape) |
-| `individuals_per_household` | common | `3` |
-| `echis_seed` | common | `12345` |
-| `k6_profile` | common | `"load"` |
-| `project_id` | provider | `null` (blocking) |
-| `region` | provider | `"us-central1"` |
-| `zone` | provider | `"us-central1-a"` |
-| `kubernetes_version` | provider | `"1.35.6-gke.1250000"` |
-| `node_size` | provider | `"e2-standard-4"` |
-| `cluster_node_count` | provider | `3` |
-| `cluster_min_nodes` | provider | `3` |
-| `cluster_max_nodes` | provider | `6` |
-| `db_edition` | provider | `"ENTERPRISE"` |
-| `db_sku` | provider | `"db-custom-2-7680"` |
-| `db_disk_size_gb` | provider | `256` |
-| `expose_source_ranges` | provider | `"0.0.0.0/0"` (matches the CLI's own default; the confirmation dialog for `expose-fhir`/`expose-prometheus`/`expose-grafana` names this value explicitly per FR-012) |
-| `shard_output_capacity_gb` | provider | `1024` (Filestore BASIC_HDD's billed floor; `provision-shard-storage`'s confirmation dialog names this value explicitly per FR-012) |
-| `enable_pgbouncer` | common | `false` (spec 007's opt-in pooled connection tier; `deploy` always passes this explicitly via `--extra-vars`, true or false, per `contracts/cli-action-map.md`) |
-| `pgbouncer_default_pool_size` | common | `20` (real Postgres connections per PgBouncer replica; total = this * `pgbouncer_replica_count`, must stay within the budget in `docs/autoscaling.md`) |
-| `enable_read_replica` | provider | `false` (opt-in Cloud SQL read replica; `up` only via `--var`; billable, and HAPI does not route reads to it) |
-| `db_work_mem_kb` | provider | `0` (Cloud SQL `work_mem` in kB; `up` only via `--var`; `0` leaves PostgreSQL's default, otherwise a whole number of at least 64) |
-| `hapi_max_replicas` | provider | `""` (blank = the tier ScaledObject's `maxReplicaCount`, 5 native / 8 pooled; otherwise a whole number; `deploy` only, always passed) |
-| `hapi_min_replicas` | provider | `""` (blank = the tier ScaledObject's `minReplicaCount`, 2; otherwise a whole number from 2 to the effective max; `deploy` only, always passed) |
-| `hapi_cpu_request` | provider | `""` (blank = the chart's 500m HAPI CPU request, e.g. `1500m`; `deploy` only, always passed) |
-| `hapi_tomcat_max_threads` | provider | `""` (blank = Tomcat's 200 worker threads per HAPI pod; `deploy` only, always passed) |
-| `pgbouncer_cpu_request` | provider | `""` (blank = 100m per PgBouncer pod; `deploy` only, always passed) |
-| `pgbouncer_cpu_limit` | provider | `""` (blank = 500m per PgBouncer pod; PgBouncer is single-threaded, so more than ~1000m buys nothing; `deploy` only, always passed) |
+| key | scope | group | default |
+|---|---|---|---|
+| `lab_name` | common | `lab` | `"hapi-fhir-lab"` (pattern `^[a-z][a-z0-9-]{2,31}$`, validated client-side to match the CLI's own naming rule, not re-validated server-side beyond passing it through) |
+| `ttl_hours` | common | `lab` | `4` |
+| `echis_tier` | common | `data` | `null` selection defaulting to a "custom households" mode; when a tier (`T2`/`T3`) is picked, `households`/`individuals_per_household`/`seed` autofill from `docs/echis-benchmark-tiers.md`'s published tier shapes |
+| `households` | common | `data` | `33333` (T2 shape) |
+| `individuals_per_household` | common | `data` | `3` |
+| `echis_seed` | common | `data` | `12345` |
+| `k6_profile` | common | `benchmark` | `"load"` |
+| `project_id` | provider | `location` | `null` (blocking) |
+| `region` | provider | `location` | `"us-central1"` |
+| `zone` | provider | `location` | `"us-central1-a"` |
+| `kubernetes_version` | provider | `cluster` | `"1.35.6-gke.1250000"` |
+| `node_size` | provider | `cluster` | `"e2-standard-4"` |
+| `cluster_node_count` | provider | `cluster` | `3` |
+| `cluster_min_nodes` | provider | `cluster` | `3` |
+| `cluster_max_nodes` | provider | `cluster` | `6` |
+| `db_edition` | provider | `database` | `"ENTERPRISE"` |
+| `db_sku` | provider | `database` | `"db-custom-2-7680"` |
+| `db_disk_size_gb` | provider | `database` | `256` |
+| `db_max_connections` | provider | `database` | `100` (PostgreSQL `max_connections`; `up` only via `--var`; the deploy refuses connection sizing beyond this minus 50 reserved; changing it restarts Cloud SQL) |
+| `expose_source_ranges` | provider | `exposure` | `"0.0.0.0/0"` (matches the CLI's own default; the confirmation dialog for `expose-fhir`/`expose-prometheus`/`expose-grafana` names this value explicitly per FR-012) |
+| `shard_output_capacity_gb` | provider | `benchmark` | `1024` (Filestore BASIC_HDD's billed floor; `provision-shard-storage`'s confirmation dialog names this value explicitly per FR-012) |
+| `enable_pgbouncer` | common | `pooling` | `false` (spec 007's opt-in pooled connection tier; `deploy` always passes this explicitly via `--extra-vars`, true or false, per `contracts/cli-action-map.md`) |
+| `pgbouncer_default_pool_size` | common | `pooling` | `20` (real Postgres connections per PgBouncer replica; total = this * `pgbouncer_replica_count`, must stay within the budget in `docs/autoscaling.md`) |
+| `pgbouncer_replica_count` | common | `pooling` | `2` (PgBouncer pods; real Postgres connections = pool size x this; `deploy`, always passed) |
+| `enable_read_replica` | provider | `database` | `false` (opt-in Cloud SQL read replica; `up` only via `--var`; billable, and HAPI does not route reads to it) |
+| `db_work_mem_kb` | provider | `database` | `0` (Cloud SQL `work_mem` in kB; `up` only via `--var`; `0` leaves PostgreSQL's default, otherwise a whole number of at least 64) |
+| `hapi_max_replicas` | common | `scaling` | `""` (blank = the tier ScaledObject's `maxReplicaCount`, 5 native / 8 pooled; otherwise a whole number; `deploy` only, always passed) |
+| `pause_replicas` | provider | `scaling` | `5` (replica count `pause-autoscaling` pins HAPI to during a bulk data load; `--replicas {value}`) |
+| `hapi_min_replicas` | common | `scaling` | `""` (blank = the tier ScaledObject's `minReplicaCount`, 2; otherwise a whole number from 2 to the effective max; `deploy` only, always passed) |
+| `hapi_cpu_request` | common | `hapi` | `""` (blank = the chart's 500m HAPI CPU request, e.g. `1500m`; `deploy` only, always passed) |
+| `hapi_cpu_limit` | common | `hapi` | `""` (blank = the chart's 2-core HAPI CPU limit; must be >= the effective request; `deploy` only, always passed) |
+| `hapi_tomcat_max_threads` | common | `hapi` | `""` (blank = Tomcat's 200 worker threads per HAPI pod; `deploy` only, always passed) |
+| `hapi_hikari_max_pool_size` | common | `hapi` | `""` (blank = tier default, 10 native / 20 pooled; whole number; checked against the connection budget; `deploy` only, always passed) |
+| `pgbouncer_cpu_request` | common | `pooling` | `""` (blank = 100m per PgBouncer pod; `deploy` only, always passed) |
+| `pgbouncer_cpu_limit` | common | `pooling` | `""` (blank = 500m per PgBouncer pod; PgBouncer is single-threaded, so more than ~1000m buys nothing; `deploy` only, always passed) |
 
 ### ActionDef
 

@@ -101,6 +101,45 @@
           stringData: "{{ {hapi_database_secret_key: lab_database_password} }}"
       no_log: true
 
+    # Effective values = the per-lab override, else the chart/tier default read
+    # straight from the values files (never duplicated here).
+    - name: Resolve effective HAPI CPU and Hikari pool settings
+      ansible.builtin.set_fact:
+        hapi_effective_cpu_request: "{{ (hapi_cpu_request | default('') | string | trim) or ((lookup('file', values_path) | from_yaml)['hapi-fhir-jpaserver'].resources.requests.cpu | string) }}"
+        hapi_effective_cpu_limit: "{{ (hapi_cpu_limit | default('') | string | trim) or ((lookup('file', values_path) | from_yaml)['hapi-fhir-jpaserver'].resources.limits.cpu | string) }}"
+        hapi_effective_hikari_pool: >-
+          {{
+            (hapi_hikari_max_pool_size | default('') | string | trim)
+            or (((lookup('file', pgbouncer_values_path if (enable_pgbouncer | default(false) | bool) else values_path)
+                 | from_yaml)['hapi-fhir-jpaserver'].extraConfig | from_yaml).spring.datasource.hikari.maximumPoolSize | string)
+          }}
+
+    - name: Refuse malformed HAPI CPU or Hikari pool overrides
+      ansible.builtin.assert:
+        that:
+          - hapi_effective_cpu_request is match('^([0-9]+m|[0-9]+([.][0-9]+)?)$')
+          - hapi_effective_cpu_limit is match('^([0-9]+m|[0-9]+([.][0-9]+)?)$')
+          - (hapi_effective_hikari_pool | string | trim) is match('^[1-9][0-9]*$')
+        fail_msg: >-
+          HAPI CPU values must be Kubernetes CPU quantities such as 1500m or 2, and
+          hapi_hikari_max_pool_size a whole number of at least 1 (effective request
+          '{{ hapi_effective_cpu_request }}', limit '{{ hapi_effective_cpu_limit }}',
+          pool '{{ hapi_effective_hikari_pool | trim }}').
+        quiet: true
+
+    - name: Refuse a HAPI CPU request above its limit
+      vars:
+        request_millicores: "{{ (hapi_effective_cpu_request[:-1] | int) if hapi_effective_cpu_request.endswith('m') else ((hapi_effective_cpu_request | float) * 1000) | round | int }}"
+        limit_millicores: "{{ (hapi_effective_cpu_limit[:-1] | int) if hapi_effective_cpu_limit.endswith('m') else ((hapi_effective_cpu_limit | float) * 1000) | round | int }}"
+      ansible.builtin.assert:
+        that:
+          - (request_millicores | int) <= (limit_millicores | int)
+        fail_msg: >-
+          HAPI CPU request {{ hapi_effective_cpu_request }} exceeds its limit
+          {{ hapi_effective_cpu_limit }} (Kubernetes would reject the Deployment);
+          raise hapi_cpu_limit or lower hapi_cpu_request.
+        quiet: true
+
     - name: Render runtime Helm values without secret material
       ansible.builtin.template:
         src: ../templates/hapi-fhir-values.runtime.yaml.j2
@@ -202,8 +241,8 @@
 
     # Lower bound 2: specs/003-autoscaling-connection-budget SC-001 -- the
     # autoscaler must never permit fewer than two HAPI FHIR replicas.
-    - name: Refuse a minReplicaCount outside 2..maxReplicaCount for the active tier
-      vars:
+    - name: Resolve the effective KEDA ScaledObject for the active tier
+      ansible.builtin.set_fact:
         hapi_scaledobject_effective: >-
           {{
             lookup('file', pgbouncer_scaledobject_path
@@ -212,6 +251,8 @@
             | from_yaml
             | combine(hapi_scaledobject_override, recursive=True)
           }}
+
+    - name: Refuse a minReplicaCount outside 2..maxReplicaCount for the active tier
       ansible.builtin.assert:
         that:
           - (hapi_scaledobject_effective.spec.minReplicaCount | int) >= 2
@@ -223,6 +264,39 @@
           hapi_max_replicas='{{ hapi_max_replicas | default('') }}').
         quiet: true
       when: apply_autoscaling | bool
+
+    # Connection budget (docs/autoscaling.md), re-checked against this lab's
+    # EFFECTIVE values: CI only ever sees the committed defaults, and every
+    # input here can be overridden per lab from the Lab Control UI.
+    - name: Resolve the lab's PostgreSQL connection budget
+      ansible.builtin.set_fact:
+        lab_postgres_max_connections: "{{ terraform_outputs.database_max_connections.value | default(postgres_max_connections) | int }}"
+        lab_postgres_connection_budget: "{{ (terraform_outputs.database_max_connections.value | default(postgres_max_connections) | int) - (postgres_reserved_connections | int) }}"
+
+    - name: Refuse native-tier HAPI connections beyond the PostgreSQL budget
+      ansible.builtin.assert:
+        that:
+          - ((hapi_scaledobject_effective.spec.maxReplicaCount | int) * (hapi_effective_hikari_pool | int)) <= (lab_postgres_connection_budget | int)
+        fail_msg: >-
+          Without PgBouncer each HAPI pod holds real database connections:
+          maxReplicaCount {{ hapi_scaledobject_effective.spec.maxReplicaCount }} x Hikari pool
+          {{ hapi_effective_hikari_pool | trim }} = {{ (hapi_scaledobject_effective.spec.maxReplicaCount | int) * (hapi_effective_hikari_pool | int) }}
+          exceeds max_connections {{ lab_postgres_max_connections }} - {{ postgres_reserved_connections }} reserved
+          = {{ lab_postgres_connection_budget }}. Lower hapi_max_replicas or hapi_hikari_max_pool_size,
+          raise db_max_connections, or enable PgBouncer.
+        quiet: true
+      when: not (enable_pgbouncer | default(false) | bool)
+
+    - name: Refuse more pooled HAPI client connections than PgBouncer accepts
+      ansible.builtin.assert:
+        that:
+          - ((hapi_scaledobject_effective.spec.maxReplicaCount | int) * (hapi_effective_hikari_pool | int)) <= (pgbouncer_max_client_conn | int)
+        fail_msg: >-
+          maxReplicaCount {{ hapi_scaledobject_effective.spec.maxReplicaCount }} x Hikari pool
+          {{ hapi_effective_hikari_pool | trim }} = {{ (hapi_scaledobject_effective.spec.maxReplicaCount | int) * (hapi_effective_hikari_pool | int) }}
+          client connections exceeds pgbouncer_max_client_conn {{ pgbouncer_max_client_conn }}.
+        quiet: true
+      when: enable_pgbouncer | default(false) | bool
 
     - name: Report the KEDA minReplicaCount actually being applied
       ansible.builtin.debug:

@@ -78,6 +78,20 @@ hapi_cpu_request: ""
 # carried the whole p95/p99 tail). Set near 2x the Hikari pool (e.g. 40) to
 # cap per-pod concurrency; queued connections wait without a thread.
 hapi_tomcat_max_threads: ""
+
+# Empty = the chart's HAPI CPU limit (charts/hapi-fhir-deploy/values.yaml, 2).
+# Under T3 load a HAPI pod that fell behind was CFS-throttled 60-84% at the
+# 2-core limit (hapi-lab-t4, 2026-09-13). Must be >= the effective CPU request
+# (hapi_cpu_request, or the chart's 500m); the deploy asserts it.
+hapi_cpu_limit: ""
+
+# Empty = the tier's Hikari maximumPoolSize (10 native in values.yaml, 20
+# pooled in values-pgbouncer-tier.yaml). Set as SPRING_DATASOURCE_HIKARI_*
+# env on HAPI, which outranks the chart's extraConfig. Keep
+# hapi_tomcat_max_threads near 2x this. The deploy checks it against the
+# connection budget below (native tier) or pgbouncer_max_client_conn
+# (pooled tier).
+hapi_hikari_max_pool_size: ""
 enable_prometheus_remote_write: true
 
 prometheus_namespace: monitoring
@@ -116,6 +130,16 @@ pgbouncer_scaledobject_name: hapi-fhir-pgbouncer
 # support in transaction mode (research.md Decision 3).
 pgbouncer_image: "docker.io/edoburu/pgbouncer:v1.25.2-p0@sha256:68969403ee54dbf98601b49a1e92db644a9fdeed5c40969f7f0adce5193ac5b8"
 pgbouncer_listen_port: 5432
+
+# Connection budget shared by both tiers (docs/autoscaling.md). The deploy
+# reads the lab's real max_connections from terraform-output.json
+# (database_max_connections, set by Terraform's db_max_connections) and only
+# falls back to postgres_max_connections for a lab whose outputs predate that
+# output; CI checks this fallback matches Terraform's default.
+# postgres_reserved_connections stay free for admin access, migrations and
+# monitoring.
+postgres_max_connections: 100
+postgres_reserved_connections: 50
 
 # Pooled connection-budget inputs (contracts/connection-budget-formula.md).
 # pgbouncer_server_connections = default_pool_size * replica_count

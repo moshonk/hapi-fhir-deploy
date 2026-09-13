@@ -66,6 +66,11 @@ output "database_psc_dns_name" {
   value       = google_sql_database_instance.postgres.dns_name
 }
 
+output "database_max_connections" {
+  description = "PostgreSQL max_connections set on the Cloud SQL instance (var.db_max_connections). The Ansible deploy checks HAPI/PgBouncer connection sizing against this minus postgres_reserved_connections (ansible/group_vars/lab.yml)."
+  value       = var.db_max_connections
+}
+
 output "database_name" {
   description = "FHIR database name."
   value       = google_sql_database.fhir.name
