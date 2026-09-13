@@ -59,6 +59,14 @@ hapi_max_replicas: ""
 # autoscaler adds nodes -- with 500m, 8 replicas "fit" 3 saturated nodes
 # and no node is ever added. Only requests.cpu changes; limits stay.
 hapi_cpu_request: ""
+
+# Empty = Tomcat's default of 200 worker threads per HAPI pod. Measured on
+# hapi-lab-t4 (2026-09-13): under T3 load single pods jammed with 200
+# requests in flight against a 20-connection Hikari pool, throttled at the
+# 2-core CPU limit, and stayed stuck while the load lasted (one pod in eight
+# carried the whole p95/p99 tail). Set near 2x the Hikari pool (e.g. 40) to
+# cap per-pod concurrency; queued connections wait without a thread.
+hapi_tomcat_max_threads: ""
 enable_prometheus_remote_write: true
 
 prometheus_namespace: monitoring

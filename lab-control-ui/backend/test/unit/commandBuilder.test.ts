@@ -105,6 +105,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'pgbouncer_cpu_request=',
         '--extra-vars',
         'pgbouncer_cpu_limit=',
+        '--extra-vars',
+        'hapi_tomcat_max_threads=',
     ]);
   });
 
@@ -128,6 +130,8 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
         'pgbouncer_cpu_request=',
         '--extra-vars',
         'pgbouncer_cpu_limit=',
+        '--extra-vars',
+        'hapi_tomcat_max_threads=',
       ],
     );
   });
@@ -153,6 +157,32 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'pgbouncer_cpu_request=1000m',
       '--extra-vars',
       'pgbouncer_cpu_limit=1000m',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=',
+    ]);
+  });
+
+  it('deploy (HAPI Tomcat max threads override passed through)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, hapi_tomcat_max_threads: '40' }).argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=40',
     ]);
   });
 

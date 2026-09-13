@@ -46,3 +46,15 @@ hapi-fhir-jpaserver:
         secretKeyRef:
           name: "{{ hapi_database_secret_name }}"
           key: "{{ hapi_database_secret_key }}"
+{% if hapi_tomcat_max_threads | default('') | string | trim | length > 0 %}
+    # Per-lab Tomcat worker-thread cap (hapi_tomcat_max_threads); blank keeps
+    # Tomcat's default of 200. On hapi-lab-t4 (2026-09-13) single HAPI pods
+    # repeatedly jammed under T3 load: 200 requests in flight, all 20 Hikari
+    # connections checked out with ~177 threads queued behind them, CPU
+    # throttled 60-74% at the 2-core limit, ~1.8s mean -- while the other
+    # pods sat at 2-8 in flight and ~40ms. A cap near the pool size stops a
+    # pod piling hundreds of threads onto two cores; Tomcat's NIO connector
+    # keeps excess connections queued without holding a thread.
+    - name: SERVER_TOMCAT_THREADS_MAX
+      value: "{{ hapi_tomcat_max_threads | string | trim }}"
+{% endif %}

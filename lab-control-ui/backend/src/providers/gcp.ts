@@ -284,6 +284,16 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     helpText:
       'Kubernetes CPU limit per PgBouncer pod. Blank keeps 500m, which was the ceiling at true T3 load: both pods ran at the limit, throttled about half the time, with clients queueing. PgBouncer is single-threaded, so values above 1000m buy nothing -- add PgBouncer replicas instead. Only used when PgBouncer is enabled.',
     cliMapping: '--extra-vars pgbouncer_cpu_limit={value} (deploy only)',
+  },
+  {
+    key: 'hapi_tomcat_max_threads',
+    label: 'HAPI Tomcat max threads (blank = 200)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Worker threads per HAPI pod (server.tomcat.threads.max). Blank keeps Tomcat\'s default of 200. Under T3 load single pods jammed with 200 requests in flight against a 20-connection database pool, throttled at their CPU limit, and stayed stuck while load lasted -- one pod in eight carried the whole p95/p99 tail. Try about twice the pool size (e.g. 40); extra connections wait in the queue without holding a thread.',
+    cliMapping: '--extra-vars hapi_tomcat_max_threads={value} (deploy only)',
   },];
 
 export const GCP_ACTIONS: ActionDef[] = [
@@ -629,6 +639,10 @@ export function gcpBuildCommand(
           `pgbouncer_cpu_request=${f('pgbouncer_cpu_request', '')}`,
           '--extra-vars',
           `pgbouncer_cpu_limit=${f('pgbouncer_cpu_limit', '')}`,
+          // Blank passed explicitly (blank = Tomcat's default 200), so
+          // clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_tomcat_max_threads=${f('hapi_tomcat_max_threads', '')}`,
         ],
         env: {},
       };
