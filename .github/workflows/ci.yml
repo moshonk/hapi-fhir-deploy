@@ -80,6 +80,21 @@ jobs:
           ruby -rjson -e 'm = JSON.parse(File.read("/tmp/synthea-loader-metadata.json")); abort "patient count mismatch" unless m.dig("synthea", "patients") == 1; abort "seed mismatch" unless m.dig("synthea", "seed") == 123; abort "Patient count mismatch" unless m.dig("synthea", "resource_counts", "Patient") == 1; abort "Observation count mismatch" unless m.dig("synthea", "resource_counts", "Observation") == 1; abort "unexpected import errors" unless m.dig("import", "error_count") == 0'
           ruby test/synthea_loader_http_test.rb
 
+      - name: Check eCHIS seed generator
+        run: |
+          ruby -c scripts/echis_seed.rb
+          ruby -c scripts/verify_echis_catchment_data.rb
+          scripts/echis_seed.rb \
+            --households 100 \
+            --individuals-per-household 3 \
+            --seed 12345 \
+            --run-id ci-echis-seed \
+            --metadata /tmp/echis-seed-metadata.json \
+            --metadata-only
+          ruby -rjson -e 'm = JSON.parse(File.read("/tmp/echis-seed-metadata.json")); counts = m.dig("echis", "resource_counts"); abort "household count mismatch" unless counts["Group"] == 100; abort "Location count mismatch" unless counts["Location"] == 3; abort "Organization count mismatch" unless counts["Organization"] == 1; abort "Practitioner count mismatch" unless counts["Practitioner"] == 1; abort "unexpected Specimen without --include-specimen" if counts.key?("Specimen"); abort "unexpected import errors" unless m.dig("import", "error_count") == 0'
+          ruby test/echis_seed_test.rb
+          ruby test/merge_seed_shards_test.rb
+
       - name: Check k6 benchmark profiles
         run: |
           FHIR_BASE_URL=http://example.invalid/fhir scripts/lab benchmark --profile smoke --run ci-benchmark --dry-run >/tmp/lab-benchmark-dry-run.txt
