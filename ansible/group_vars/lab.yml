@@ -53,6 +53,15 @@ apply_autoscaling: true
 # by formula alone is exactly what collapsed throughput ~6x at 50.
 hapi_max_replicas: ""
 
+# Empty = the committed ScaledObject's minReplicaCount (2 on both tiers).
+# Raise it to keep warm HAPI capacity up before load arrives. Measured on
+# hapi-lab-t4 (2026-09-13): with 2, the opening ramp of every T3 run
+# swamped the two minimum pods for ~3 minutes (new pods take 90-120s to be
+# ready) and /metadata requests timed out, failing fhir_health_success.
+# Costs idle capacity: that many pods x hapi_cpu_request stay scheduled.
+# Must be between 1 and the effective maxReplicaCount (the deploy asserts).
+hapi_min_replicas: ""
+
 # Empty = the chart's HAPI CPU request (charts/hapi-fhir-deploy/values.yaml,
 # 500m). Set it near real usage under load (measured 1.3-1.6 cores/pod on
 # the T3 shape) so replica scale-up leaves pods Pending and the cluster

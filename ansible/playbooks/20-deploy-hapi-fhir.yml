@@ -164,14 +164,58 @@
     # without hand-editing a manifest mid-experiment. Same
     # lookup()|from_yaml|combine shape the runtime rollout patch above
     # already uses, rather than turning the manifests into .j2 templates.
-    - name: Resolve optional KEDA maxReplicaCount override
+    # hapi_min_replicas follows the same empty-means-manifest rule. Raising
+    # the floor keeps warm capacity in place before load arrives: on
+    # hapi-lab-t4 (2026-09-13) every T3 run failed fhir_health_success
+    # because the 2 minimum replicas (one of them freshly cold after an idle
+    # cluster-autoscaler scale-down) absorbed the opening ramp alone for ~3
+    # minutes while new pods took 90-120s each to become ready, and /metadata
+    # requests hit k6's 60s timeout.
+    - name: Resolve optional KEDA minReplicaCount / maxReplicaCount overrides
       ansible.builtin.set_fact:
         hapi_scaledobject_override: >-
           {{
-            {'spec': {'maxReplicaCount': hapi_max_replicas | int}}
-            if (hapi_max_replicas | default('') | string | trim | length > 0)
+            {'spec': (
+              ({'minReplicaCount': hapi_min_replicas | int}
+                if (hapi_min_replicas | default('') | string | trim | length > 0) else {})
+              | combine(
+                ({'maxReplicaCount': hapi_max_replicas | int}
+                  if (hapi_max_replicas | default('') | string | trim | length > 0) else {}))
+            )}
+            if ((hapi_min_replicas | default('') | string | trim | length > 0)
+                or (hapi_max_replicas | default('') | string | trim | length > 0))
             else {}
           }}
+
+    - name: Refuse a minReplicaCount outside 1..maxReplicaCount for the active tier
+      vars:
+        hapi_scaledobject_effective: >-
+          {{
+            lookup('file', pgbouncer_scaledobject_path
+                   if (enable_pgbouncer | default(false) | bool)
+                   else autoscaling_manifest_path)
+            | from_yaml
+            | combine(hapi_scaledobject_override, recursive=True)
+          }}
+      ansible.builtin.assert:
+        that:
+          - (hapi_scaledobject_effective.spec.minReplicaCount | int) >= 1
+          - (hapi_scaledobject_effective.spec.minReplicaCount | int) <= (hapi_scaledobject_effective.spec.maxReplicaCount | int)
+        fail_msg: >-
+          minReplicaCount {{ hapi_scaledobject_effective.spec.minReplicaCount }} must be
+          between 1 and maxReplicaCount {{ hapi_scaledobject_effective.spec.maxReplicaCount }}
+          (hapi_min_replicas='{{ hapi_min_replicas | default('') }}',
+          hapi_max_replicas='{{ hapi_max_replicas | default('') }}').
+        quiet: true
+      when: apply_autoscaling | bool
+
+    - name: Report the KEDA minReplicaCount actually being applied
+      ansible.builtin.debug:
+        msg: >-
+          minReplicaCount overridden to {{ hapi_min_replicas }} -- that many warm HAPI
+          pods (each requesting hapi_cpu_request) stay up even when idle, so the
+          cluster keeps the nodes to hold them.
+      when: hapi_min_replicas | default('') | string | trim | length > 0
 
     - name: Report the KEDA maxReplicaCount actually being applied
       ansible.builtin.debug:

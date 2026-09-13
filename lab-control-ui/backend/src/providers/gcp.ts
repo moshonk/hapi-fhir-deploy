@@ -246,6 +246,16 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     cliMapping: '--var db_work_mem_kb={value} (up only)',
   },
   {
+    key: 'hapi_min_replicas',
+    label: 'HAPI min replicas (blank = manifest default)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Blank uses the minimum committed in the tier ScaledObject manifest (2). Raise it to keep warm HAPI pods ready before load arrives: under T3 load the opening ramp swamped the 2 minimum pods for about 3 minutes while new pods took 90-120s each to start, and health checks timed out. The cost is idle capacity -- that many pods (each requesting the HAPI CPU request) stay up even when nothing is running. Must not exceed max replicas.',
+    cliMapping: '--extra-vars hapi_min_replicas={value} (deploy only)',
+  },
+  {
     key: 'hapi_max_replicas',
     label: 'HAPI max replicas (blank = manifest default)',
     scope: 'provider',
@@ -643,6 +653,10 @@ export function gcpBuildCommand(
           // clearing the field reverts an earlier override.
           '--extra-vars',
           `hapi_tomcat_max_threads=${f('hapi_tomcat_max_threads', '')}`,
+          // Blank passed explicitly (blank = manifest minReplicaCount), so
+          // clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_min_replicas=${f('hapi_min_replicas', '')}`,
         ],
         env: {},
       };
