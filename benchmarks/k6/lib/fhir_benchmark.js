@@ -1,4 +1,5 @@
 import http from "k6/http";
+import encoding from "k6/encoding";
 import { check, group, sleep } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 
@@ -79,6 +80,10 @@ export const registrationWriteTotal = new Counter("fhir_operation_registration_w
 export const worklistReadTotal = new Counter("fhir_operation_worklist_read_total");
 export const householdRosterReadTotal = new Counter("fhir_operation_household_roster_read_total");
 export const supervisorDashboardReadTotal = new Counter("fhir_operation_supervisor_dashboard_read_total");
+export const syncDownloadReadTotal = new Counter("fhir_operation_sync_download_read_total");
+export const patientEverythingReadTotal = new Counter("fhir_operation_patient_everything_read_total");
+export const householdScopedReadTotal = new Counter("fhir_operation_household_scoped_read_total");
+export const syncUploadWriteTotal = new Counter("fhir_operation_sync_upload_write_total");
 
 const OPERATION_COUNTERS = {
   capability_statement: capabilityStatementTotal,
@@ -92,7 +97,11 @@ const OPERATION_COUNTERS = {
   registration_write: registrationWriteTotal,
   worklist_read: worklistReadTotal,
   household_roster_read: householdRosterReadTotal,
-  supervisor_dashboard_read: supervisorDashboardReadTotal
+supervisor_dashboard_read: supervisorDashboardReadTotal,
+  sync_download_read: syncDownloadReadTotal,
+  patient_everything_read: patientEverythingReadTotal,
+  household_scoped_read: householdScopedReadTotal,
+  sync_upload_write: syncUploadWriteTotal
 };
 
 export function profileOptions(profile) {
@@ -150,7 +159,12 @@ export function benchmarkSetup(profile, workload = "generic") {
     patientIds,
     bulkExportEnabled: envBool("BULK_EXPORT_ENABLED", false),
     observationDateStart: __ENV.OBSERVATION_DATE_START || "1900-01-01",
-    supervisorCountWindowHours: envNumber("SUPERVISOR_COUNT_WINDOW_HOURS", 1),
+supervisorCountWindowHours: envNumber("SUPERVISOR_COUNT_WINDOW_HOURS", 1),
+echisSeededHouseholds: envNumber("ECHIS_SEEDED_HOUSEHOLDS", 0),
+echisSeededIndividualsPerHousehold: envNumber("ECHIS_SEEDED_INDIVIDUALS_PER_HOUSEHOLD", 3),
+echisSyncPageSize: envNumber("ECHIS_SYNC_PAGE_SIZE", 200),
+echisSyncMaxPages: envNumber("ECHIS_SYNC_MAX_PAGES", 3),
+echisSyncWindowMinutes: envNumber("ECHIS_SYNC_WINDOW_MINUTES", 60),
     sleepSeconds: config.sleepSeconds,
     prometheusBefore
   };
@@ -162,7 +176,7 @@ export function runFhirWorkload(data) {
   }
 
   const workloadConfig = workloadFor(data.workload);
-  dispatchOperation(data, workloadConfig.operationWeights, workloadConfig.handlers, data.bulkExportEnabled);
+  dispatchOperation(data, operationWeightsFor(data, workloadConfig), workloadConfig.handlers, data.bulkExportEnabled);
 
   sleep(data.sleepSeconds);
 }
@@ -177,7 +191,7 @@ export function runFhirWorkloadExcluding(data, ...excludedOperations) {
   }
 
   const workloadConfig = workloadFor(data.workload);
-  const weights = workloadConfig.operationWeights.filter(([name]) => !excludedOperations.includes(name));
+  const weights = operationWeightsFor(data, workloadConfig).filter(([name]) => !excludedOperations.includes(name));
   // chooseOperation() re-adds bulk_export on its own whenever bulkExportEnabled is true
   // and a handler exists, regardless of what's in the filtered weights -- so excluding
   // "bulk_export" here must also suppress it via bulkExportEnabled, not just the weights.
@@ -403,15 +417,41 @@ const ECHIS_OPERATION_WEIGHTS = [
   ["registration_write", 10],
   ["worklist_read", 20],
   ["household_roster_read", 15],
-  ["supervisor_dashboard_read", 5]
+["supervisor_dashboard_read", 5]
 ];
+
+// Sync-engine operations against a dataset scripts/echis_seed.rb loaded,
+// from the "OHS FHIR Sync -- API Call Inventory & Performance Simulation
+// Baseline" document: tag-scoped first/incremental pulls, Patient
+// $everything, known-household roster reads, and PUT+PATCH uploads. Unlike
+// the operations above these read SEEDED ids, so they join the draw only
+// when ECHIS_SEEDED_HOUSEHOLDS is set to that seed run's --households;
+// unset, the echis mix (and every existing tier's comparability) is
+// unchanged.
+const ECHIS_SEEDED_SYNC_OPERATION_WEIGHTS = [
+  ["sync_download_read", 20],
+  ["patient_everything_read", 8],
+  ["household_scoped_read", 7],
+  ["sync_upload_write", 5]
+];
+
+function operationWeightsFor(data, workloadConfig) {
+  if (data.workload === "echis" && data.echisSeededHouseholds > 0) {
+    return workloadConfig.operationWeights.concat(ECHIS_SEEDED_SYNC_OPERATION_WEIGHTS);
+  }
+  return workloadConfig.operationWeights;
+}
 
 const echisOperationHandlers = {
   household_sync_write: householdSyncWrite,
   worklist_read: worklistRead,
   household_roster_read: householdRosterRead,
   registration_write: registrationWrite,
-  supervisor_dashboard_read: supervisorDashboardRead
+supervisor_dashboard_read: supervisorDashboardRead,
+  sync_download_read: syncDownloadRead,
+  patient_everything_read: patientEverythingRead,
+  household_scoped_read: householdScopedRead,
+  sync_upload_write: syncUploadWrite
 };
 
 // Generalizes the operation-weight/handler set so `generic` (today's
@@ -554,6 +594,7 @@ const SHARD_ID = __ENV.SHARD_INDEX || "0";
 function householdSyncWrite(data) {
   const vu = __VU;
   const iter = __ITER;
+  const unitId = selfContainedUnitId();
   const householdId = `echis-hh-s${SHARD_ID}-vu${vu}`;
   const patientId = `echis-p-s${SHARD_ID}-vu${vu}`;
   const chwId = `echis-chw-s${SHARD_ID}-vu${vu}`;
@@ -568,18 +609,18 @@ function householdSyncWrite(data) {
     // taskResource below references this by id -- must exist in the same
     // transaction, since nothing else in this workload ever creates a
     // PractitionerRole, and Task.owner is validated on write (HAPI-1094).
-    practitionerRoleResource(chwId),
-    householdResource(householdId, [patientId]),
-    patientResource(patientId, vu),
-    encounterResource(encounterId, patientId, now),
-    observationResource(observationId, patientId, now, iter),
-    conditionResource(conditionId, patientId, vu),
-    questionnaireResponseResource(questionnaireResponseId, patientId, encounterId),
+    practitionerRoleResource(chwId, unitId),
+    householdResource(householdId, [patientId], chwId, unitId),
+    patientResource(patientId, vu, unitId, chwId),
+    encounterResource(encounterId, patientId, now, unitId),
+    observationResource(observationId, patientId, encounterId, questionnaireResponseId, now, iter, unitId),
+    conditionResource(conditionId, patientId, vu, unitId),
+    questionnaireResponseResource(questionnaireResponseId, patientId, encounterId, now, iter, unitId),
     // "requested", not "completed": worklistRead() searches status=requested,
     // so the follow-up task this visit creates/refreshes must match that
     // query -- otherwise a VU's own household_sync_write writes would never
     // be findable by its own worklist_read (review comment).
-    taskResource(taskId, patientId, chwId, "requested")
+    taskResource(taskId, patientId, chwId, "requested", unitId)
   ]);
 
   requestWriteOperation(data, "household_sync_write", "POST", "/", bundle, (response) => (
@@ -590,14 +631,18 @@ function householdSyncWrite(data) {
 function registrationWrite(data) {
   const vu = __VU;
   const iter = __ITER;
+  const unitId = selfContainedUnitId();
   const householdId = `echis-hh-s${SHARD_ID}-vu${vu}-reg${iter}`;
   const headPatientId = `echis-p-s${SHARD_ID}-vu${vu}-reg${iter}`;
   const relatedPersonId = `echis-rp-s${SHARD_ID}-vu${vu}-reg${iter}`;
 
+  // No managingEntity/generalPractitioner here: this bundle carries no
+  // PractitionerRole, and a registration can run before this VU's first
+  // household_sync_write has created one (HAPI enforces the reference).
   const bundle = echisTransactionBundle([
-    householdResource(householdId, [headPatientId]),
-    patientResource(headPatientId, vu * 100000 + iter),
-    relatedPersonResource(relatedPersonId, headPatientId)
+    householdResource(householdId, [headPatientId], null, unitId),
+    patientResource(headPatientId, vu * 100000 + iter, unitId, null),
+    relatedPersonResource(relatedPersonId, headPatientId, unitId)
   ]);
 
   requestWriteOperation(data, "registration_write", "POST", "/", bundle, (response) => (
@@ -699,151 +744,373 @@ function echisTransactionBundle(resources) {
   return {
     resourceType: "Bundle",
     type: "transaction",
-    entry: resources.map((resource) => ({
-      resource,
-      request: { method: "PUT", url: `${resource.resourceType}/${resource.id}` }
-    }))
+    entry: resources.map(putEntry)
   };
 }
 
-function householdResource(id, memberPatientIds) {
-  return {
+function putEntry(resource) {
+  return { resource, request: { method: "PUT", url: `${resource.resourceType}/${resource.id}` } };
+}
+
+// --- echis resource shapes ---
+//
+// Mirror scripts/echis_seed.rb and the eCHIS dev server
+// (docs/echis-data-model.md): supervision-location sync tag on every
+// patient-data resource, NPHIIS CHV role, field Encounters linked to their
+// PlanDefinition, and under-5 assessment responses whose Observations are
+// derivedFrom the response. The self-contained operations tag their writes
+// with a per-shard pseudo-unit so they never mix into a seeded unit's sync
+// scope.
+const SUPERVISION_LOCATION_TAG_SYSTEM = "https://www.example.com/CodeSystem/supervision-location";
+const PLAN_DEFINITION_EXTENSION = "http://icl.ohs.echis.reference/fhir/StructureDefinition/instantiates-plan-definition";
+const LAST_LAUNCHED_EXTENSION = "http://github.com/google-android/questionnaire-lastLaunched-timestamp";
+const ECHIS_QUESTIONNAIRE_BASE = "https://echisv3.intellisoftkenya.com/fhir/Questionnaire";
+const UNDER_FIVE_OBSERVATION_SYSTEM = "https://echisv3.intellisoftkenya.com/fhir/CodeSystem/under-5-observation";
+const NPHIIS_ROLE_SYSTEM = "https://nphiis.health.go.ke/fhir/CodeSystem/nphiis-roles";
+
+function selfContainedUnitId() {
+  return `echis-loc-chu-k6-s${SHARD_ID}`;
+}
+
+function syncTag(unitId) {
+  return { tag: [{ system: SUPERVISION_LOCATION_TAG_SYSTEM, code: unitId }] };
+}
+
+function planDefinitionExtension(planDefinitionId) {
+  return { url: PLAN_DEFINITION_EXTENSION, valueCanonical: `PlanDefinition/${planDefinitionId}` };
+}
+
+function householdResource(id, memberPatientIds, chwId, unitId) {
+  const resource = {
     resourceType: "Group",
     id,
+    meta: syncTag(unitId),
+    identifier: [{ system: "urn:demo:household", value: id }],
+    active: true,
     type: "person",
     actual: true,
-    quantity: memberPatientIds.length,
+    name: `${id} Household`,
     member: memberPatientIds.map((patientId) => ({ entity: { reference: `Patient/${patientId}` } }))
   };
+  if (chwId) {
+    resource.managingEntity = { reference: `PractitionerRole/${chwId}` };
+  }
+  return resource;
 }
 
-function patientResource(id, index) {
+function patientResource(id, index, unitId, chwId) {
   const birthYear = 1950 + (index % 60);
-  return {
+  const resource = {
     resourceType: "Patient",
     id,
-    identifier: [{ system: "urn:hapi-fhir-deploy:echis-benchmark", value: id }],
+    meta: syncTag(unitId),
+    identifier: [{ system: "urn:demo:patient", value: id }],
     active: true,
-    name: [{ family: `EchisHousehold${index}`, given: [`Member${index}`] }],
+    name: [{ use: "official", family: `EchisHousehold${index}`, given: [`Member${index}`] }],
+    telecom: [{ system: "phone", value: `07${String(index % 100000000).padStart(8, "0")}`, use: "mobile" }],
     gender: index % 2 === 0 ? "female" : "male",
-    birthDate: `${birthYear}-${String((index % 12) + 1).padStart(2, "0")}-${String((index % 28) + 1).padStart(2, "0")}`
+    birthDate: `${birthYear}-${String((index % 12) + 1).padStart(2, "0")}-${String((index % 28) + 1).padStart(2, "0")}`,
+    address: [{ use: "home", city: "Benchmark Village", state: "Nairobi", country: "KE" }]
   };
+  if (chwId) {
+    resource.generalPractitioner = [{ reference: `PractitionerRole/${chwId}` }];
+  }
+  return resource;
 }
 
-function relatedPersonResource(id, headPatientId) {
+function relatedPersonResource(id, headPatientId, unitId) {
   return {
     resourceType: "RelatedPerson",
     id,
+    meta: syncTag(unitId),
+    active: true,
     patient: { reference: `Patient/${headPatientId}` },
     relationship: [{
-      coding: [{
-        system: "http://terminology.hl7.org/CodeSystem/v2-0131",
-        code: "C",
-        display: "Emergency Contact"
-      }]
+      coding: [{ system: "http://terminology.hl7.org/CodeSystem/v3-RoleCode", code: "SPS", display: "Spouse" }]
     }],
     name: [{ family: "EchisDependent", given: ["Member"] }]
   };
 }
 
-function encounterResource(id, patientId, timestamp) {
+function encounterResource(id, patientId, timestamp, unitId, planDefinitionId = "plandefinition-under-5-workflow") {
   return {
     resourceType: "Encounter",
     id,
+    meta: syncTag(unitId),
+    extension: [planDefinitionExtension(planDefinitionId)],
     status: "finished",
-    class: {
-      system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
-      code: "HH",
-      display: "home health"
-    },
+    class: { system: "http://terminology.hl7.org/CodeSystem/v3-ActCode", code: "FLD", display: "Field" },
     subject: { reference: `Patient/${patientId}` },
     period: { start: timestamp, end: timestamp }
   };
 }
 
-const ECHIS_OBSERVATION_CODES = [
-  { code: "8867-4", display: "Heart rate", unit: "beats/minute", ucumCode: "/min", min: 60, range: 50 },
-  { code: "8302-2", display: "Body height", unit: "cm", ucumCode: "cm", min: 50, range: 130 },
-  { code: "29463-7", display: "Body weight", unit: "kg", ucumCode: "kg", min: 3, range: 80 }
+const ECHIS_OBSERVATION_ANSWERS = [
+  {
+    code: "fever",
+    display: "Does {{name}} have a fever (hotness of the body)?",
+    value: { valueCodeableConcept: { coding: [{ code: "no", display: "No" }] } }
+  },
+  { code: "breaths-per-minute", display: "How many breaths per minute?", value: { valueInteger: 32 } },
+  {
+    code: "muac-color",
+    display: "What is the MUAC color?",
+    value: { valueCodeableConcept: { coding: [{ code: "green", display: "Green" }] } }
+  }
 ];
 
-function observationResource(id, patientId, timestamp, iter) {
-  const selected = ECHIS_OBSERVATION_CODES[iter % ECHIS_OBSERVATION_CODES.length];
-  return {
-    resourceType: "Observation",
-    id,
-    status: "final",
-    code: { coding: [{ system: "http://loinc.org", code: selected.code, display: selected.display }] },
-    subject: { reference: `Patient/${patientId}` },
-    effectiveDateTime: timestamp,
-    valueQuantity: {
-      value: selected.min + (iter % selected.range),
-      unit: selected.unit,
-      system: "http://unitsofmeasure.org",
-      code: selected.ucumCode
-    }
-  };
+function observationResource(id, patientId, encounterId, questionnaireResponseId, timestamp, iter, unitId) {
+  const selected = ECHIS_OBSERVATION_ANSWERS[iter % ECHIS_OBSERVATION_ANSWERS.length];
+  return Object.assign(
+    {
+      resourceType: "Observation",
+      id,
+      meta: syncTag(unitId),
+      status: "final",
+      code: { coding: [{ system: UNDER_FIVE_OBSERVATION_SYSTEM, code: selected.code, display: selected.display }] },
+      subject: { reference: `Patient/${patientId}` },
+      encounter: { reference: `Encounter/${encounterId}` },
+      effectiveDateTime: timestamp
+    },
+    selected.value,
+    { derivedFrom: [{ reference: `QuestionnaireResponse/${questionnaireResponseId}` }] }
+  );
 }
 
 const ECHIS_CONDITION_CODES = [
-  { code: "38341003", display: "Hypertensive disorder, systemic arterial" },
-  { code: "73211009", display: "Diabetes mellitus" },
-  { code: "271737000", display: "Anemia" }
+  { code: "61462000", display: "Malaria" },
+  { code: "44054006", display: "Diabetes mellitus type 2" },
+  { code: "56717001", display: "Tuberculosis" }
 ];
 
-function conditionResource(id, patientId, vu) {
+function conditionResource(id, patientId, vu, unitId) {
   const selected = ECHIS_CONDITION_CODES[vu % ECHIS_CONDITION_CODES.length];
   return {
     resourceType: "Condition",
     id,
+    meta: syncTag(unitId),
     clinicalStatus: {
       coding: [{ system: "http://terminology.hl7.org/CodeSystem/condition-clinical", code: "active" }]
     },
     verificationStatus: {
-      coding: [{ system: "http://terminology.hl7.org/CodeSystem/condition-ver-status", code: "unconfirmed" }]
+      coding: [{ system: "http://terminology.hl7.org/CodeSystem/condition-ver-status", code: "provisional" }]
     },
     code: { coding: [{ system: "http://snomed.info/sct", code: selected.code, display: selected.display }] },
     subject: { reference: `Patient/${patientId}` }
   };
 }
 
-function questionnaireResponseResource(id, patientId, encounterId) {
+function questionnaireResponseResource(id, patientId, encounterId, timestamp, iter, unitId) {
   return {
     resourceType: "QuestionnaireResponse",
     id,
+    meta: syncTag(unitId),
+    extension: [
+      { url: LAST_LAUNCHED_EXTENSION, valueDateTime: timestamp },
+      planDefinitionExtension("plandefinition-under-5-workflow")
+    ],
+    questionnaire: `${ECHIS_QUESTIONNAIRE_BASE}/under-5-assessment-service-questionnaire`,
     status: "completed",
     subject: { reference: `Patient/${patientId}` },
     encounter: { reference: `Encounter/${encounterId}` },
+    authored: timestamp,
     item: [
-      { linkId: "danger-signs", text: "Any danger signs observed?", answer: [{ valueBoolean: false }] }
+      {
+        linkId: "page-intro",
+        text: "Introduction",
+        item: [{ linkId: "is-child-name-sick", text: "Is the child sick?", answer: [{ valueCoding: { code: "yes", display: "Yes" } }] }]
+      },
+      {
+        linkId: "page-breathing",
+        text: "Breathing",
+        item: [{ linkId: "how-many-breaths-per-minute", text: "How many breaths per minute?", answer: [{ valueInteger: 30 + (iter % 12) }] }]
+      },
+      {
+        linkId: "page-nutrition-muac",
+        text: "Nutrition (MUAC)",
+        item: [{ linkId: "what-is-the-muac-color", text: "What is the MUAC color?", answer: [{ valueCoding: { code: "green", display: "Green" } }] }]
+      }
     ]
   };
 }
 
-function practitionerRoleResource(id) {
+function referralFollowUpResponse(id, patientId, encounterId, timestamp, unitId) {
   return {
-    resourceType: "PractitionerRole",
+    resourceType: "QuestionnaireResponse",
     id,
-    active: true,
-    code: [{
-      coding: [{
-        system: "http://terminology.hl7.org/CodeSystem/practitioner-role",
-        code: "chw",
-        display: "Community Health Worker"
-      }]
-    }]
+    meta: syncTag(unitId),
+    extension: [
+      { url: LAST_LAUNCHED_EXTENSION, valueDateTime: timestamp },
+      planDefinitionExtension("plandefinition-referral-follow-up")
+    ],
+    questionnaire: `${ECHIS_QUESTIONNAIRE_BASE}/referral-follow-up-questionnaire`,
+    status: "completed",
+    subject: { reference: `Patient/${patientId}` },
+    encounter: { reference: `Encounter/${encounterId}` },
+    authored: timestamp,
+    item: [
+      { linkId: "is-available", text: "Is the client available?", answer: [{ valueCoding: { code: "yes", display: "Yes" } }] },
+      { linkId: "did-go-to-the-health-facility", text: "Did the client go to the health facility?", answer: [{ valueCoding: { code: "yes", display: "Yes" } }] }
+    ]
   };
 }
 
-function taskResource(id, patientId, chwId, status) {
+function practitionerRoleResource(id, unitId) {
+  return {
+    resourceType: "PractitionerRole",
+    id,
+    meta: syncTag(unitId),
+    active: true,
+    code: [{ coding: [{ system: NPHIIS_ROLE_SYSTEM, code: "CHV", display: "CHV" }] }]
+  };
+}
+
+function taskResource(id, patientId, chwId, status, unitId) {
   return {
     resourceType: "Task",
     id,
+    meta: syncTag(unitId),
+    extension: [planDefinitionExtension("plandefinition-referral-follow-up-alert")],
+    instantiatesCanonical: "ActivityDefinition/act-refer-patient",
     status,
     intent: "order",
+    priority: "urgent",
+    code: { coding: [{ code: "follow-up-on-referral", display: "Follow up on referral" }] },
     for: { reference: `Patient/${patientId}` },
     owner: { reference: `PractitionerRole/${chwId}` }
   };
+}
+
+// --- echis seeded-dataset sync operations (opt-in, ECHIS_SEEDED_HOUSEHOLDS) ---
+//
+// Ids and catchment sizing mirror scripts/echis_seed.rb: 1,000 households
+// per Community Health Unit (the sync-tag scope), and household sizes that
+// cycle N, N+1, N-1 around ECHIS_SEEDED_INDIVIDUALS_PER_HOUSEHOLD.
+const SEEDED_HOUSEHOLDS_PER_UNIT = 1000;
+const SYNC_DOWNLOAD_TYPES = ["Group", "Patient", "Task", "QuestionnaireResponse", "Encounter", "Observation"];
+const FIRST_SYNC_SHARE = 0.2;
+
+function isBundleResponse(response) {
+  return response.status === 200 && jsonResourceType(response) === "Bundle";
+}
+
+function zeroPad(value, width) {
+  return String(value).padStart(width, "0");
+}
+
+function seededHouseholdIndex(data) {
+  return Math.floor(Math.random() * data.echisSeededHouseholds);
+}
+
+function seededUnitId(householdIndex) {
+  return `echis-loc-chu${zeroPad(Math.floor(householdIndex / SEEDED_HOUSEHOLDS_PER_UNIT), 6)}`;
+}
+
+function seededHouseholdId(householdIndex) {
+  return `echis-hh${zeroPad(householdIndex, 8)}`;
+}
+
+function seededHeadPatientId(data, householdIndex) {
+  const perHousehold = data.echisSeededIndividualsPerHousehold;
+  const first = perHousehold < 2
+    ? householdIndex * perHousehold
+    : householdIndex * perHousehold + (householdIndex % 3 === 2 ? 1 : 0);
+  return `echis-p${zeroPad(first, 8)}`;
+}
+
+// Floored to the minute for the same reason as supervisorDashboardRead():
+// HAPI caches searches by URL, and devices syncing within the same minute
+// realistically share a floor.
+function syncWindowStart(data) {
+  const start = new Date(Date.now() - data.echisSyncWindowMinutes * 60 * 1000);
+  start.setUTCSeconds(0, 0);
+  return encodeURIComponent(start.toISOString());
+}
+
+function tagParam(unitId) {
+  return encodeURIComponent(`${SUPERVISION_LOCATION_TAG_SYSTEM}|${unitId}`);
+}
+
+function nextLink(response) {
+  const link = (parseJson(response).link || []).find((candidate) => candidate.relation === "next");
+  return link ? link.url : null;
+}
+
+// Pages a search the way the sync engine does, following each Bundle's
+// "next" link up to ECHIS_SYNC_MAX_PAGES. The link is re-rooted on
+// data.baseUrl because HAPI builds it from the address it saw (e.g. an
+// in-cluster Service name behind a port-forward), not the one k6 dialed.
+function requestPagedOperation(data, operation, path) {
+  let response = requestOperation(data, operation, path, isBundleResponse);
+  for (let page = 1; page < data.echisSyncMaxPages && response.status === 200; page += 1) {
+    const next = nextLink(response);
+    const queryStart = next ? next.indexOf("?") : -1;
+    if (queryStart < 0) {
+      break;
+    }
+    response = requestOperation(data, operation, next.substring(queryStart), isBundleResponse);
+  }
+}
+
+function syncDownloadRead(data) {
+  const unitId = seededUnitId(seededHouseholdIndex(data));
+  const type = SYNC_DOWNLOAD_TYPES[Math.floor(Math.random() * SYNC_DOWNLOAD_TYPES.length)];
+  // Most pulls are incremental; FIRST_SYNC_SHARE are a device's first sync
+  // of this type, with no _lastUpdated floor.
+  const floor = Math.random() < FIRST_SYNC_SHARE ? "" : `&_lastUpdated=gt${syncWindowStart(data)}`;
+  requestPagedOperation(
+    data,
+    "sync_download_read",
+    `/${type}?_tag=${tagParam(unitId)}&_count=${data.echisSyncPageSize}&_sort=_lastUpdated${floor}`
+  );
+}
+
+function patientEverythingRead(data) {
+  const patientId = seededHeadPatientId(data, seededHouseholdIndex(data));
+  const since = Math.random() < 0.5 ? `?_since=${syncWindowStart(data)}` : "";
+  requestPagedOperation(data, "patient_everything_read", `/Patient/${patientId}/$everything${since}`);
+}
+
+function householdScopedRead(data) {
+  const first = seededHouseholdIndex(data);
+  const ids = [first, first + 1, first + 2]
+    .filter((householdIndex) => householdIndex < data.echisSeededHouseholds)
+    .map(seededHouseholdId);
+  const floor = Math.random() < 0.5 ? `&_lastUpdated=gt${syncWindowStart(data)}` : "";
+  requestOperation(data, "household_scoped_read", `/Group?_id=${ids.join(",")}&_include=Group:member${floor}`, isBundleResponse);
+}
+
+// Upload sub-phase: new visit resources as PUTs plus a JSON Patch to an
+// existing seeded Patient, in one transaction -- the patch makes a real
+// change (HumanName.text), so it creates a new Patient version the way a
+// device edit would.
+function syncUploadWrite(data) {
+  const householdIndex = seededHouseholdIndex(data);
+  const unitId = seededUnitId(householdIndex);
+  const patientId = seededHeadPatientId(data, householdIndex);
+  const suffix = `s${SHARD_ID}-vu${__VU}-${__ITER}`;
+  const encounterId = `echis-enc-sync-${suffix}`;
+  const now = new Date().toISOString();
+  const patch = [{ op: "add", path: "/name/0/text", value: `Synced ${now.substring(0, 16)}` }];
+
+  const bundle = {
+    resourceType: "Bundle",
+    type: "transaction",
+    entry: [
+      putEntry(encounterResource(encounterId, patientId, now, unitId, "plandefinition-referral-follow-up")),
+      putEntry(referralFollowUpResponse(`echis-qr-sync-${suffix}`, patientId, encounterId, now, unitId)),
+      {
+        resource: {
+          resourceType: "Binary",
+          contentType: "application/json-patch+json",
+          data: encoding.b64encode(JSON.stringify(patch))
+        },
+        request: { method: "PATCH", url: `Patient/${patientId}` }
+      }
+    ]
+  };
+
+  requestWriteOperation(data, "sync_upload_write", "POST", "/", bundle, isBundleResponse);
 }
 
 function requestOperation(data, operation, path, successful, headers) {
@@ -999,7 +1266,11 @@ function operationMix(metrics) {
     registration_write: metricValue(metrics.fhir_operation_registration_write_total, "count") || 0,
     worklist_read: metricValue(metrics.fhir_operation_worklist_read_total, "count") || 0,
     household_roster_read: metricValue(metrics.fhir_operation_household_roster_read_total, "count") || 0,
-    supervisor_dashboard_read: metricValue(metrics.fhir_operation_supervisor_dashboard_read_total, "count") || 0
+supervisor_dashboard_read: metricValue(metrics.fhir_operation_supervisor_dashboard_read_total, "count") || 0,
+sync_download_read: metricValue(metrics.fhir_operation_sync_download_read_total, "count") || 0,
+patient_everything_read: metricValue(metrics.fhir_operation_patient_everything_read_total, "count") || 0,
+household_scoped_read: metricValue(metrics.fhir_operation_household_scoped_read_total, "count") || 0,
+sync_upload_write: metricValue(metrics.fhir_operation_sync_upload_write_total, "count") || 0
   };
 }
 
