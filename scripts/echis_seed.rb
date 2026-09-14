@@ -1349,7 +1349,12 @@ begin
   catchment_cache = {}
   emitted_unit_indices = Set.new
   emitted_chw_indices = Set.new
-  organization_emitted = false
+  # "Type/id" of every shared (non-household) resource this shard has sent.
+  # Neighbouring units share their facility, ward, and sub-county Locations,
+  # so a bundle spanning two units would otherwise carry those twice -- HAPI
+  # rejects the whole transaction (HAPI-0535), and every later bundle then
+  # fails on the CHV and Location references it never created.
+  emitted_shared_keys = Set.new
   last_reported_percent = -1
 
   # Counts one submitted bundle's response into the metadata tallies.
@@ -1403,15 +1408,14 @@ begin
   (start_index...end_index).each_slice(batch_size) do |household_indices|
     transaction_bundle_count += 1
     resources = []
+    accepted = false
+    sent_unit_indices = []
+    sent_chw_indices = []
+    sent_shared_keys = []
 
     household_indices.each do |household_index|
-      unless organization_emitted
-        resources << organization_resource
-        organization_emitted = true
-      end
-
-      # emitted_*_indices are per-invocation (per-shard), not global: a
-      # catchment straddling a shard boundary is PUT once by each shard that
+      # Shared resources are tracked per invocation (per shard), not globally:
+      # a catchment straddling a shard boundary is PUT once by each shard that
       # touches it. That is idempotent-safe (identical content) and avoids
       # cross-shard coordination; it can inflate the *reported* counts for
       # Location/Practitioner/PractitionerRole/CareTeam/Organization when
@@ -1420,13 +1424,24 @@ begin
       chw_index = chw_index_for(household_index)
       unit_index = unit_index_for(chw_index)
       catchment = catchment_for(unit_index, content, seed, catchment_cache)
+      shared = [organization_resource]
       unless emitted_unit_indices.include?(unit_index)
-        resources.concat(catchment_resources(catchment))
+        shared.concat(catchment_resources(catchment))
         emitted_unit_indices << unit_index
+        sent_unit_indices << unit_index
       end
       unless emitted_chw_indices.include?(chw_index)
-        resources.concat(chw_resources(chw_index, catchment, seed))
+        shared.concat(chw_resources(chw_index, catchment, seed))
         emitted_chw_indices << chw_index
+        sent_chw_indices << chw_index
+      end
+      shared.each do |resource|
+        key = "#{resource["resourceType"]}/#{resource["id"]}"
+        next if emitted_shared_keys.include?(key)
+
+        emitted_shared_keys << key
+        sent_shared_keys << key
+        resources << resource
       end
 
       resources.concat(resources_for_household(household_index, individuals_per_household, content, seed, options[:include_specimen], catchment_cache))
@@ -1438,6 +1453,7 @@ begin
     progress_total = end_index - start_index
 
     if metadata_only
+      accepted = true
       imported_entry_count += entries.length
       last_reported_percent = report_progress("Would import", progress_done, progress_total, shard_index, shard_count, last_reported_percent)
       next
@@ -1445,10 +1461,19 @@ begin
 
     bundle = { "resourceType" => "Bundle", "type" => "transaction", "entry" => entries }
     response = post_bundle_with_retries(uri, bundle, timeout, max_retries)
-    record_response.call(response, entries, transaction_bundle_count, true)
+    accepted = record_response.call(response, entries, transaction_bundle_count, true)
     last_reported_percent = report_progress("Imported", progress_done, progress_total, shard_index, shard_count, last_reported_percent)
   rescue StandardError => e
     errors << { "batch" => transaction_bundle_count, "message" => "#{e.class}: #{e.message}" }
+  ensure
+    # A rejected transaction created none of its shared resources, so send
+    # them again with the next bundle instead of letting every later bundle
+    # fail on references to them.
+    unless accepted
+      emitted_unit_indices.subtract(sent_unit_indices)
+      emitted_chw_indices.subtract(sent_chw_indices)
+      emitted_shared_keys.subtract(sent_shared_keys)
+    end
   end
 
   completed_at = Time.now.utc
