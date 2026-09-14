@@ -520,7 +520,7 @@ jobs:
           [
             "pgbouncer_server_connections = pgbouncer_default_pool_size * pgbouncer_replica_count",
             "maxReplicas_pooled <= floor(pgbouncer_max_client_conn / hikari_maximum_pool_size)",
-            "This ceiling is provisional pending T4 load-test evidence"
+            "This ceiling is provisional pending further load-test evidence"
           ].each do |expected|
             normalized_expected = expected.gsub(/\s+/, " ").strip
             failures << "autoscaling docs missing pooled-tier text: #{expected}" unless autoscaling_docs.include?(normalized_expected)
