@@ -59,6 +59,36 @@ export async function readLogSoFar(logFilePath: string): Promise<string> {
   }
 }
 
+/** Same content as readLogSoFar, but capped to the LAST maxLines -- for
+ * the SSE stream's replay-on-connect burst (routes/runs.ts), never for
+ * live-appended lines after connecting. A run that logs at a very high
+ * rate for even a few minutes (a real one: ~2,300 lines/sec during a
+ * connectivity outage, 544K lines / 110MB total for the whole run) turns
+ * "replay the whole log as individual SSE events" into hundreds of
+ * thousands of separate browser-side state updates -- an O(n^2) React
+ * rendering pattern that froze the tab for minutes on every reload,
+ * caught live against exactly that log. The full, untruncated log always
+ * remains on disk at logFilePath regardless of this cap; only the SSE
+ * replay burst is bounded, not the file itself or the plain-text /log
+ * endpoint (an explicit "give me everything" request, not a rendering
+ * concern the way the SSE replay is).
+ */
+export async function readLogTail(logFilePath: string, maxLines: number): Promise<string> {
+  const full = await readLogSoFar(logFilePath);
+  if (!full) return full;
+
+  // A trailing newline would otherwise produce one spurious empty "line".
+  const lines = full.endsWith('\n') ? full.slice(0, -1).split('\n') : full.split('\n');
+  if (lines.length <= maxLines) return full;
+
+  const omitted = lines.length - maxLines;
+  const tail = lines.slice(-maxLines);
+  return (
+    `[lab-control-ui] ${omitted} earlier line(s) omitted from this live view -- ` +
+    `see the full log at ${logFilePath}\n${tail.join('\n')}\n`
+  );
+}
+
 /** Spawns the action. Resolves once the process has started (not once it
  * finishes) -- callers get an immediate runId/streamUrl per contracts/api.md,
  * consistent with a 202-Accepted trigger response. */
@@ -101,9 +131,21 @@ export function spawnAction(deps: RunnerDeps, input: SpawnActionInput): void {
 
   function finish(exitCode: number): void {
     logStream.end();
-    markActionRunFinished(deps.db, input.runId, exitCode);
-    emitter.emit('status', exitCode === 0 ? 'succeeded' : 'failed');
-    inFlight.delete(key);
+    // inFlight.delete(key) MUST run even if markActionRunFinished throws
+    // (e.g. a transient sqlite lock/error) -- otherwise the in-memory
+    // concurrency lock (FR-016) outlives the process it was guarding,
+    // permanently wedging this (labConfigurationId, actionName) pair:
+    // every future trigger 409s with "action already running" against a
+    // runId whose own DB row is stuck at status=running forever, with no
+    // operator-facing way to clear it short of restarting the server.
+    // Caught live: a run killed out-of-band (its child process reaped
+    // directly, not through this handler) left exactly this state.
+    try {
+      markActionRunFinished(deps.db, input.runId, exitCode);
+      emitter.emit('status', exitCode === 0 ? 'succeeded' : 'failed');
+    } finally {
+      inFlight.delete(key);
+    }
     // Give any attached SSE clients a tick to receive the final status
     // event before the emitter is dropped; readLogSoFar covers late joiners.
     setTimeout(() => runEmitters.delete(input.runId), 5000);

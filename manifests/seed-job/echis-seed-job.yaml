@@ -53,6 +53,8 @@ spec:
             - "/shard-output/shard-$(SHARD_INDEX)-dataset-metadata.json"
             - "--fhir-base-url"
             - "<FHIR_BASE_URL>"
+            - "--content"
+            - "/scripts/echis-content.json.gz"
             - "--shard-index"
             - "$(SHARD_INDEX)"
             - "--shard-count"

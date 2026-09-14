@@ -11,6 +11,30 @@ export interface AppConfig {
   labCliPath: string;
   dbPath: string;
   runsDir: string;
+  /** Where `scripts/lab seed`/`benchmark`/`report --run {cliRunLabel}`
+   * write result artifacts (dataset-metadata.json, k6-summary.json,
+   * report.md, ...) -- scripts/lab's own RUN_ROOT, NOT `runsDir` above
+   * (that's this UI's own per-actionRun *log* directory, a distinct
+   * concept; see cli-action-map.md's cliRunLabel-vs-actionRunId note).
+   * Same env var name as scripts/lab's LAB_RUNS_DIR so one override
+   * affects both. */
+  cliRunsDir: string;
+  /** Where `scripts/lab report`'s default publisher (scripts/publish_results.rb)
+   * writes the human-readable report tree (report.md, environment.json,
+   * summary.csv, raw/) -- scripts/lab's own RESULT_ROOT. Same env var name
+   * so one override affects both. */
+  resultsDir: string;
+  /** Cap on how many of a run's log lines the SSE stream replays as its
+   * initial connect/reconnect burst (routes/runs.ts's readLogTail). A run
+   * that logs at a very high rate for even a few minutes -- a real one
+   * hit ~2,300 lines/sec during a connectivity outage, 544K lines total --
+   * turns "replay the whole log as individual SSE events" into hundreds
+   * of thousands of separate browser-side state updates, an O(n^2)
+   * rendering pattern that froze the tab for minutes on every page
+   * reload. Only bounds the replay burst; live-appended lines after
+   * connecting are unaffected, and the full untruncated log always stays
+   * on disk. */
+  logReplayMaxLines: number;
   secureCookies: boolean;
   /**
    * Where the built frontend (lab-control-ui/frontend/dist) lives. Defaults
@@ -57,6 +81,13 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new ConfigError(`LAB_UI_PORT must be a positive integer, got: ${env.LAB_UI_PORT}`);
   }
 
+  const logReplayMaxLines = Number.parseInt(env.LAB_UI_LOG_REPLAY_MAX_LINES ?? '2000', 10);
+  if (!Number.isInteger(logReplayMaxLines) || logReplayMaxLines <= 0) {
+    throw new ConfigError(
+      `LAB_UI_LOG_REPLAY_MAX_LINES must be a positive integer, got: ${env.LAB_UI_LOG_REPLAY_MAX_LINES}`,
+    );
+  }
+
   return {
     sharedSecret,
     port,
@@ -66,6 +97,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       env.LAB_UI_DB_PATH ??
       resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'lab-control-ui.db'),
     runsDir: env.LAB_UI_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'ui', 'runs'),
+    cliRunsDir: env.LAB_RUNS_DIR ?? resolve(repoRoot, 'ansible', 'artifacts', 'lab', 'runs'),
+    resultsDir: env.LAB_RESULTS_DIR ?? resolve(repoRoot, 'results'),
+    logReplayMaxLines,
     secureCookies: env.LAB_UI_COOKIE_SECURE === 'true',
     frontendDistPath:
       env.LAB_UI_FRONTEND_DIST ?? resolve(repoRoot, 'lab-control-ui', 'frontend', 'dist'),

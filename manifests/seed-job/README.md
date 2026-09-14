@@ -31,11 +31,20 @@ Create the scripts ConfigMap before applying (name must match
 `<SEED_SCRIPTS_CONFIGMAP>`):
 
 ```sh
+gzip -9 -n -c benchmarks/echis/content/echis-content.json > /tmp/echis-content.json.gz
 kubectl create configmap echis-seed-job-scripts \
   --from-file=minimal_fhir_seed.rb=scripts/minimal_fhir_seed.rb \
   --from-file=echis_seed.rb=scripts/echis_seed.rb \
+  --from-file=echis-content.json.gz=/tmp/echis-content.json.gz \
   -n fhir
 ```
+
+The Job passes `--content /scripts/echis-content.json.gz`: the generator loads
+the eCHIS reference content snapshot (Questionnaires, PlanDefinitions,
+ActivityDefinitions, country/county Locations) before any household data.
+It is gzipped because the raw snapshot would push the ConfigMap past the
+262KB last-applied-configuration annotation `kubectl apply` writes.
+`scripts/lab seed --in-cluster` does all of this for you.
 
 ## Merging shard output
 

@@ -2,7 +2,7 @@
 
 Step-by-step operator procedure for provisioning a GCP benchmark lab and running
 the eCHIS **T3** tier (1,000 concurrent VUs / 333,333 households / 999,999
-individuals / 5,839,996 total synthetic FHIR records) against it. This document
+individuals / 5,459,398 total synthetic FHIR records) against it. This document
 exists to let you run T3 on GCP by hand, repeatably, without re-deriving the
 command sequence each time.
 
@@ -231,7 +231,7 @@ outlive the lab itself.
 
 ## 8. Bulk data-load window, then seed T3's dataset
 
-333,333 households (5,839,996 total records) will import far faster with a
+333,333 households (5,459,398 total records) will import far faster with a
 temporarily higher pinned replica count than the committed serving ceiling
 (native tier caps at `maxReplicaCount: 5`, per `docs/autoscaling.md`). Pin to
 the ceiling for the load window, then release it before benchmarking:
@@ -256,7 +256,7 @@ kubectl -n fhir get scaledobject hapi-fhir-jpaserver \
 kubectl -n fhir get deploy hapi-fhir-hapi-fhir-jpaserver
 ```
 
-A single local `echis_seed.rb` process generating/importing ~5.8M records can
+A single local `echis_seed.rb` process generating/importing ~5.5M records can
 take a long time and eat into your `ttl_hours` budget. If it's too slow,
 distribute it across a Kubernetes Job instead:
 

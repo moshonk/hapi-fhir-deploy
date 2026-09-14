@@ -37,7 +37,33 @@ spec:
   completionMode: Indexed
   parallelism: <SHARD_COUNT>
   completions: <SHARD_COUNT>
-  backoffLimit: 1
+  # backoffLimitPerIndex (not the old single job-wide backoffLimit): each
+  # shard index gets its own retry budget, so one shard's k6 threshold
+  # breach (a REAL, expected outcome under heavy load -- the whole point of
+  # a stress-scale run) doesn't invalidate the other N-1 shards' results.
+  # Root-caused live: a 10-shard run where 3 shards legitimately breached
+  # their http_req_duration/http_req_failed thresholds under sustained
+  # overload hit the OLD job-wide backoffLimit, which marked the ENTIRE Job
+  # Failed and deleted the other 7 shards' pods -- discarding their
+  # already-complete, perfectly valid results along with the 3 that failed.
+  # maxFailedIndexes tolerates that many shards failing before the overall
+  # Job is marked Failed; <MAX_FAILED_SHARDS> is ~30% of shard count
+  # (scripts/lab's cmd_benchmark_in_cluster), reflecting "some shards
+  # breaching thresholds under stress is expected and shouldn't discard
+  # everyone else's data" without masking a truly systemic failure.
+  #
+  # backoffLimitPerIndex is deliberately 0, not 1: root-caused live (a
+  # second incident, after the one above) that a threshold-breach exit
+  # after a shard's FULL 42-minute run already IS a complete, valid result
+  # -- k6 already wrote its summary JSON before exiting non-zero. A retry
+  # doesn't "fix" anything here (there's nothing broken to fix), it just
+  # re-runs an already-answered 42-minute question from scratch AND races
+  # a fresh pod's own SIGTERM-triggered partial summary against the
+  # original complete one on the SAME output path -- whoever's operator
+  # deletes the Job to collect results loses the good data to the retry
+  # pod's ~100-second partial one. 0 retries removes that race entirely.
+  backoffLimitPerIndex: 0
+  maxFailedIndexes: <MAX_FAILED_SHARDS>
   template:
     metadata:
       labels:
@@ -45,6 +71,51 @@ spec:
         app.kubernetes.io/part-of: hapi-fhir
     spec:
       restartPolicy: Never
+      # Spread shards across nodes. Without this (no CPU requests, no
+      # affinity) the scheduler packed them onto one node: 8 of 10 in the
+      # Stage 6 run on hapi-lab-t4, all 10 in Stage 7 -- on the only node
+      # at 99% CPU, which also hosted 2 HAPI pods. The shards' own timings
+      # then showed p99 blocked 1.65s and TCP connect 1.40s while HAPI's
+      # server-side mean was 41-55ms on every pod, so a large part of the
+      # measured tail was the starved load generator, not the server.
+      # ScheduleAnyway: prefer an even spread, but never leave a shard
+      # Pending because one node is full.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: echis-k6-shard-job
+      # Root-caused live, in two layers:
+      #   1. The grafana/k6 image bakes in `USER k6` (uid 12345) -- NOT
+      #      root, contrary to this comment's original (wrong) assumption
+      #      that a bare image with no securityContext defaults to root.
+      #      A fresh Filestore export's root directory is owned root:root
+      #      mode 0755, so uid 12345 had no write access at all -- nothing
+      #      to do with NFS behavior, just an ordinary POSIX permission
+      #      check. `securityContext.runAsUser/runAsGroup: 0` below
+      #      overrides the image's own USER directive so this
+      #      initContainer actually runs as root.
+      #   2. Separately (and still worth keeping): Filestore's default NFS
+      #      export also squashes root -- remaps client uid 0 to an
+      #      unprivileged anonymous user server-side -- which would have
+      #      blocked a genuinely-root process too. infra/terraform/gcp
+      #      main.tf's nfs_export_options sets NO_ROOT_SQUASH for this
+      #      share so (1)'s fix actually has an effect.
+      # Every shard failed with a permission error writing its own summary
+      # JSON, discovered only after a full 42-minute run, discarding all
+      # 10 shards' results, until both layers were fixed.
+      initContainers:
+        - name: fix-shard-output-permissions
+          image: docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629
+          command: ["sh", "-c", "chmod 0777 /shard-output"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: shard-output
+              mountPath: /shard-output
       containers:
         - name: k6
           image: docker.io/grafana/k6:2.1.0@sha256:68e78d94140704ec4ee0cb7c5cf6cd12a32b7d310a6f98d94931ee9b0b9dc629
@@ -54,6 +125,32 @@ spec:
             - "FHIR_BASE_URL=<FHIR_BASE_URL>"
             - "-e"
             - "K6_FHIR_SUMMARY_PATH=/shard-output/shard-$(SHARD_INDEX)-k6-fhir-summary.json"
+            # Streams this shard's own live metrics to Prometheus remote-write
+            # (K6_PROMETHEUS_RW_SERVER_URL below), same as a local (non
+            # --in-cluster) benchmark's "Live k6 metrics in Grafana" --
+            # except no port-forward is needed here, since this pod already
+            # runs inside the cluster and can reach the Service by its
+            # cluster-DNS name directly (scripts/lab's cmd_benchmark_in_cluster
+            # sets that URL).
+            # Every shard runs the identical script with identical tags, so
+            # without a per-shard differentiator every shard's samples for a
+            # given metric (e.g. k6_http_reqs) land on the SAME Prometheus
+            # series (identical __name__ + label set) -- discovered live: 5
+            # concurrent shards all writing that series with interleaved,
+            # non-monotonic timestamps trips this cluster's Prometheus
+            # `outOfOrderTimeWindow: 0s` and most/all remote-write pushes are
+            # rejected with 400 ("Failed to send the time series data").
+            # Since contracts/merged-report.md requires multi-shard latency
+            # percentiles to come from Prometheus (shard-derived percentiles
+            # can't be validly combined), losing this isn't just a dashboard
+            # gap -- it silently drops the run's only valid latency source.
+            # Tagging each shard's samples with its own SHARD_INDEX gives
+            # each shard a distinct label, so its series are independently
+            # (and correctly) ordered.
+            - "--tag"
+            - "shard=$(SHARD_INDEX)"
+            - "--out"
+            - "experimental-prometheus-rw"
             - "--summary-export"
             - "/shard-output/shard-$(SHARD_INDEX)-k6-summary.json"
             - "/scripts/echis_load_100.js"
@@ -64,6 +161,21 @@ spec:
                   fieldPath: "metadata.annotations['batch.kubernetes.io/job-completion-index']"
             - name: SHARD_COUNT
               value: "<SHARD_COUNT>"
+            - name: K6_PROMETHEUS_RW_SERVER_URL
+              value: "<PROMETHEUS_REMOTE_WRITE_URL>"
+            # --households of the seeded eCHIS dataset; "0" keeps the echis
+            # workload's original self-contained operation mix.
+            - name: ECHIS_SEEDED_HOUSEHOLDS
+              value: "<ECHIS_SEEDED_HOUSEHOLDS>"
+          # A CPU request makes the scheduler, and the cluster autoscaler,
+          # account for the load generator instead of treating it as free.
+          # Observed 128-154m per shard at 100 VUs while CPU-starved; 250m
+          # leaves headroom. No limits on purpose: throttling k6 would
+          # distort the very latencies it measures.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
           volumeMounts:
             - name: scripts
               mountPath: /scripts

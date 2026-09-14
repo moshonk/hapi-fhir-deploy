@@ -41,6 +41,17 @@ function FieldInput({
     );
   }
 
+  if (field.type === 'boolean') {
+    return (
+      <input
+        id={field.key}
+        type="checkbox"
+        checked={value === true}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.checked)}
+      />
+    );
+  }
+
   return (
     <input
       id={field.key}

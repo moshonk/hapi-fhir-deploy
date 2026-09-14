@@ -41,9 +41,36 @@ export interface PrerequisiteCheckDef {
   severity: PrerequisiteSeverity;
 }
 
+/**
+ * Logical grouping for action buttons in the UI -- a provider-agnostic
+ * workflow concept ("these buttons all relate to X"), not a
+ * `scripts/lab`/CLI one. Kept as a small fixed set (rather than a free
+ * string) so the frontend's ACTION_GROUP_LABELS/ACTION_GROUP_ORDER stay
+ * exhaustive and a typo here is a compile error, not a silently-dropped
+ * heading.
+ */
+export type ActionGroupId = 'lifecycle' | 'data' | 'scaling' | 'benchmark' | 'exposure';
+
 export interface ActionDef {
   name: string;
   label: string;
+  /**
+   * Plain-language, jargon-free explanation of what clicking this button
+   * does -- shown as a hover tooltip on the action button (a layman-facing
+   * companion to `label`/`confirmationMessage`, neither of which is written
+   * for someone unfamiliar with this toolchain). Optional so a provider
+   * that hasn't filled it in yet just renders no tooltip rather than an
+   * `undefined` string.
+   */
+  description?: string;
+  /**
+   * Which section of the action list this button renders under (e.g.
+   * "Infrastructure lifecycle", "Data"), so operators can find related
+   * actions at a glance instead of scanning one long flat list. Optional --
+   * an action without one renders in a catch-all "Other" section rather
+   * than being dropped.
+   */
+  group?: ActionGroupId;
   /** The literal `scripts/lab` subcommand invoked. */
   cliSubcommand: string;
   scope: ConfigFieldScope;
@@ -71,6 +98,15 @@ export interface ActionDef {
    * FR-006's refusal passthrough instead, never gated here).
    */
   sequenceAfter?: string;
+  /**
+   * Relaxes sequenceAfter from "most recent run succeeded" to "any run has
+   * ever succeeded". Use for actions gated on a durable side effect (e.g.
+   * backup-db only needs a database to exist -- a seed that already
+   * succeeded left one, and a later, unrelated failed run doesn't erase it)
+   * rather than on the freshness of the prior action's own outcome.
+   * Defaults to false (the Edge Case 3 "most recent" semantics above).
+   */
+  sequenceAfterAnySuccess?: boolean;
 }
 
 export interface ProviderAdapter {

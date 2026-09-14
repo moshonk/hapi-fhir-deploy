@@ -37,6 +37,26 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
     cliMapping: '--echis-tier {value} (benchmark only)',
   },
   {
+    key: 'enable_pgbouncer',
+    label: 'Enable PgBouncer pooled tier',
+    scope: 'common',
+    type: 'boolean',
+    default: false,
+    helpText:
+      "Deploys the opt-in PgBouncer connection-pooling tier (spec 007, ansible/group_vars/lab.yml) alongside HAPI FHIR -- swaps in the pooled ScaledObject in place of the native one. Required for eCHIS tiers T4/T5. maxReplicaCount was lowered from the originally-committed 50 to 5 after a live load test, and later raised to 8 after a further load test: 50 bounded PgBouncer's client-accept capacity, not its real ~40-connection backend budget, and collapsed throughput/latency/failure-rate badly under the k6 load profile -- see manifests/autoscaling/hapi-fhir-scaledobject-pgbouncer.yaml's connection-budget annotation and docs/autoscaling.md.",
+    cliMapping: '--extra-vars enable_pgbouncer={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_default_pool_size',
+    label: 'PgBouncer pool size',
+    scope: 'common',
+    type: 'number',
+    default: 20,
+    helpText:
+      'Real PostgreSQL connections each PgBouncer replica maintains (DEFAULT_POOL_SIZE/MAX_DB_CONNECTIONS, ansible/templates/pgbouncer-deployment.runtime.yaml.j2). Total real connections = this * pgbouncer_replica_count (2, not yet UI-configurable) -- must stay <= (postgres_max_connections - reserved_connections) = 50 (docs/autoscaling.md); the committed default of 20 gives 40. Only takes effect on the next Deploy.',
+    cliMapping: '--extra-vars pgbouncer_default_pool_size={value} (deploy only)',
+  },
+  {
     key: 'households',
     label: 'Households',
     scope: 'common',
@@ -194,12 +214,105 @@ export const GCP_CONFIG_FIELDS: ConfigField[] = [
       'Do not exceed the native connection-budget ceiling (maxReplicaCount: 5, docs/autoscaling.md).',
     cliMapping: '--replicas {value}',
   },
-];
+  {
+    key: 'shard_output_capacity_gb',
+    label: 'Shard output storage capacity (GB)',
+    scope: 'provider',
+    type: 'number',
+    default: 1024,
+    helpText:
+      "Filestore BASIC_HDD's billed floor is 1024GB (~$0.20/GB-month); only raise this if a run's shard count/size needs more headroom.",
+    cliMapping: '--capacity-gb {value}',
+  },
+
+  {
+    key: 'enable_read_replica',
+    label: 'Cloud SQL read replica',
+    scope: 'provider',
+    type: 'boolean',
+    default: false,
+    helpText:
+      'Provisions a same-tier read replica of the primary. Infrastructure only -- nothing routes queries to it yet, because the pinned HAPI image has no read/write datasource routing. Costs roughly the same again as the primary, so leave off unless you are working on that routing.',
+    cliMapping: '--var enable_read_replica={value} (up only)',
+  },
+  {
+    key: 'db_work_mem_kb',
+    label: 'Cloud SQL work_mem (kB, 0 = default)',
+    scope: 'provider',
+    type: 'number',
+    default: 0,
+    helpText:
+      'Leave 0 unless you are deliberately retesting this. Measured: 32768 (32MB) on db-custom-2-7680 made the 10-shard T3 load benchmark MUCH worse (271 -> 93 req/s, 0.05% -> 5.5% failures) -- work_mem is charged per sort per connection, so a big global value starves a small instance. Only raise it alongside a bigger DB tier, and re-benchmark.',
+    cliMapping: '--var db_work_mem_kb={value} (up only)',
+  },
+  {
+    key: 'hapi_min_replicas',
+    label: 'HAPI min replicas (blank = manifest default)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Blank uses the minimum committed in the tier ScaledObject manifest (2). Raise it to keep warm HAPI pods ready before load arrives: under T3 load the opening ramp swamped the 2 minimum pods for about 3 minutes while new pods took 90-120s each to start, and health checks timed out. The cost is idle capacity -- that many pods (each requesting the HAPI CPU request) stay up even when nothing is running. Must be a whole number from 2 (the minimum HA replica count) up to max replicas.',
+    cliMapping: '--extra-vars hapi_min_replicas={value} (deploy only)',
+  },
+  {
+    key: 'hapi_max_replicas',
+    label: 'HAPI max replicas (blank = manifest default)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Blank uses the ceiling committed in the tier ScaledObject manifest (5 without PgBouncer, 8 with). Raise ONE step at a time with a benchmark at each step -- jumping to 50 by formula once collapsed throughput ~6x. More replicas do not add real database connections: with PgBouncer those stay capped at pool size x PgBouncer replicas, so extra replicas buy parallelism and cost per-request latency.',
+    cliMapping: '--extra-vars hapi_max_replicas={value} (deploy only)',
+  },
+  {
+    key: 'hapi_cpu_request',
+    label: 'HAPI CPU request (blank = chart default 500m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU request per HAPI pod, e.g. 1500m. Blank keeps the chart default of 500m, which understates real use: under T3 load HAPI used 1.3-1.6 cores per pod, so 8 replicas crammed onto 3 nodes at 100% CPU and the autoscaler never added nodes (it only reacts to pods that cannot be scheduled). Set it near real usage so scaling up actually adds nodes. Only the request changes; the 2-core limit stays.',
+    cliMapping: '--extra-vars hapi_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_cpu_request',
+    label: 'PgBouncer CPU request (blank = 100m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU request per PgBouncer pod, e.g. 1000m. Set it together with the limit below so the scheduler actually reserves the CPU; a low request lets PgBouncer land on a saturated node. Must not exceed the limit. Only used when PgBouncer is enabled.',
+    cliMapping: '--extra-vars pgbouncer_cpu_request={value} (deploy only)',
+  },
+  {
+    key: 'pgbouncer_cpu_limit',
+    label: 'PgBouncer CPU limit (blank = 500m)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Kubernetes CPU limit per PgBouncer pod. Blank keeps 500m, which was the ceiling at true T3 load: both pods ran at the limit, throttled about half the time, with clients queueing. PgBouncer is single-threaded, so values above 1000m buy nothing -- add PgBouncer replicas instead. Only used when PgBouncer is enabled.',
+    cliMapping: '--extra-vars pgbouncer_cpu_limit={value} (deploy only)',
+  },
+  {
+    key: 'hapi_tomcat_max_threads',
+    label: 'HAPI Tomcat max threads (blank = 200)',
+    scope: 'provider',
+    type: 'string',
+    default: '',
+    helpText:
+      'Worker threads per HAPI pod (server.tomcat.threads.max). Blank keeps Tomcat\'s default of 200. Under T3 load single pods jammed with 200 requests in flight against a 20-connection database pool, throttled at their CPU limit, and stayed stuck while load lasted -- one pod in eight carried the whole p95/p99 tail. Try about twice the pool size (e.g. 40); extra connections wait in the queue without holding a thread.',
+    cliMapping: '--extra-vars hapi_tomcat_max_threads={value} (deploy only)',
+  },];
 
 export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'up',
     label: 'Provision infrastructure',
+    group: 'lifecycle',
+    description:
+      'Creates the cloud computer cluster and database this lab runs on. Costs real money while it exists. Nothing else on this page works until this finishes.',
     cliSubcommand: 'up',
     scope: 'common',
     requiresConfirmation: true,
@@ -213,6 +326,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'deploy',
     label: 'Deploy HAPI FHIR',
+    group: 'lifecycle',
+    description:
+      'Installs and starts the HAPI FHIR application on the infrastructure created by "Provision infrastructure". Safe to run again to apply new settings to an already-running lab.',
     cliSubcommand: 'deploy',
     scope: 'common',
     requiresConfirmation: false,
@@ -223,6 +339,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'expose-fhir',
     label: 'Expose FHIR endpoint publicly',
+    group: 'exposure',
+    description:
+      'Opens the FHIR server up to the public internet so it can be reached from outside this lab, with no login screen protecting it. Anyone with the address can read and write data.',
     cliSubcommand: 'expose-fhir',
     scope: 'provider',
     requiresConfirmation: true,
@@ -233,6 +352,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'unexpose-fhir',
     label: 'Close public FHIR exposure',
+    group: 'exposure',
+    description:
+      'Closes the public internet access that "Expose FHIR endpoint publicly" opened up.',
     cliSubcommand: 'unexpose-fhir',
     scope: 'provider',
     requiresConfirmation: false,
@@ -242,6 +364,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'expose-prometheus',
     label: 'Expose Prometheus publicly',
+    group: 'exposure',
+    description:
+      'Opens the Prometheus monitoring dashboard up to the public internet, with no login screen protecting it.',
     cliSubcommand: 'expose-prometheus',
     scope: 'provider',
     requiresConfirmation: true,
@@ -252,6 +377,8 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'unexpose-prometheus',
     label: 'Close public Prometheus exposure',
+    group: 'exposure',
+    description: 'Closes the public internet access that "Expose Prometheus publicly" opened up.',
     cliSubcommand: 'unexpose-prometheus',
     scope: 'provider',
     requiresConfirmation: false,
@@ -261,6 +388,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'expose-grafana',
     label: 'Expose Grafana publicly',
+    group: 'exposure',
+    description:
+      'Opens the Grafana dashboards up to the public internet. Unlike the FHIR/Prometheus exposure buttons, this one does have a login screen.',
     cliSubcommand: 'expose-grafana',
     scope: 'provider',
     requiresConfirmation: true,
@@ -276,6 +406,8 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'unexpose-grafana',
     label: 'Close public Grafana exposure',
+    group: 'exposure',
+    description: 'Closes the public internet access that "Expose Grafana publicly" opened up.',
     cliSubcommand: 'unexpose-grafana',
     scope: 'provider',
     requiresConfirmation: false,
@@ -285,6 +417,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'pause-autoscaling',
     label: 'Pin replicas for bulk-load window',
+    group: 'scaling',
+    description:
+      'Temporarily locks the number of running application copies in place, so they don\'t shrink automatically while a lot of data is being loaded in. Undo with "Resume normal autoscaling" afterwards.',
     cliSubcommand: 'pause-autoscaling',
     scope: 'common',
     requiresConfirmation: false,
@@ -294,6 +429,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'resume-autoscaling',
     label: 'Resume normal autoscaling',
+    group: 'scaling',
+    description:
+      'Lets the number of running application copies grow and shrink automatically again, undoing "Pin replicas for bulk-load window".',
     cliSubcommand: 'resume-autoscaling',
     scope: 'common',
     requiresConfirmation: false,
@@ -303,16 +441,72 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'seed',
     label: 'Seed synthetic data',
+    group: 'data',
+    description:
+      'Fills the database with realistic-looking fake patient records for testing, or restores a previous "Backup database" copy instead of generating new ones.',
     cliSubcommand: 'seed',
     scope: 'common',
     requiresConfirmation: false,
     confirmationMessage: null,
+    // 'postgresql-client'/'cloud-sql-proxy' are deliberately NOT listed
+    // here: restoring from a backup (an ephemeral, per-trigger choice --
+    // see ActionList.tsx/routes/actions.ts, same pattern as benchmark's
+    // in_cluster) is only one of the two things this button can do.
+    // Requiring pg_restore/cloud-sql-proxy up front would block the (much
+    // more common) generate-fresh path for operators who never intend to
+    // restore from a backup at all. If restore-from-backup IS chosen and
+    // either tool is genuinely missing, scripts/lab itself fails loudly at
+    // trigger time instead.
     requiredPrerequisiteIds: ['ruby'],
     sequenceAfter: 'deploy',
   },
   {
+    name: 'backup-db',
+    label: 'Backup database',
+    group: 'data',
+    description:
+      'Saves a copy of the current database to disk, so this exact data can be restored later without regenerating and re-loading it from scratch.',
+    cliSubcommand: 'backup-db',
+    scope: 'common',
+    requiresConfirmation: false,
+    confirmationMessage: null,
+    // cloud-sql-proxy is required alongside postgresql-client (not just
+    // recommended) because start_cloud_sql_proxy_if_needed (scripts/lab)
+    // always starts it once terraform-output.json carries a
+    // database_connection_name -- true for every lab `up` since that
+    // output was added -- regardless of whether this host could actually
+    // reach the database's private IP directly.
+    requiredPrerequisiteIds: ['postgresql-client', 'cloud-sql-proxy', 'gcloud'],
+    // Backing up only makes sense once there's data worth keeping -- and
+    // that data outlives any single seed run, so this checks "has a seed
+    // ever succeeded" rather than "did the *latest* seed succeed" (a later
+    // failed seed attempt shouldn't gray this out while the earlier
+    // successfully-seeded database is still sitting there).
+    sequenceAfter: 'seed',
+    sequenceAfterAnySuccess: true,
+  },
+  {
+    name: 'provision-shard-storage',
+    label: 'Provision RWX shard storage',
+    group: 'benchmark',
+    description:
+      'Sets up shared disk space that multiple benchmark workers can all write to at once. Only needed before running a benchmark split across more than one worker.',
+    cliSubcommand: 'provision-shard-storage',
+    scope: 'provider',
+    requiresConfirmation: true,
+    // {field_key} placeholder resolved against this lab's live field values
+    // by resolveConfirmationMessage, same as up/down/expose-*.
+    confirmationMessage:
+      "This provisions a billable GCP Filestore instance (BASIC_HDD, ~$0.20/GB-month, {shard_output_capacity_gb}GB) for lab '{lab_name}'. Required once before running 'Run k6 benchmark' in-cluster with more than 1 parallel shard; torn down automatically by 'Destroy infrastructure'.",
+    requiredPrerequisiteIds: ['terraform', 'gcloud', 'kubectl'],
+    sequenceAfter: 'up',
+  },
+  {
     name: 'benchmark',
     label: 'Run k6 benchmark',
+    group: 'benchmark',
+    description:
+      'Runs a load test that simulates many users using the FHIR server at the same time, to measure how fast and reliable it is under pressure.',
     cliSubcommand: 'benchmark',
     scope: 'common',
     requiresConfirmation: false,
@@ -323,6 +517,8 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'report',
     label: 'Publish report',
+    group: 'benchmark',
+    description: 'Turns the results of the last benchmark run into a readable summary report.',
     cliSubcommand: 'report',
     scope: 'common',
     requiresConfirmation: false,
@@ -333,6 +529,9 @@ export const GCP_ACTIONS: ActionDef[] = [
   {
     name: 'down',
     label: 'Destroy infrastructure',
+    group: 'lifecycle',
+    description:
+      'Permanently deletes the cloud computer cluster and database for this lab, and stops the billing for them. This cannot be undone -- all data in the database is lost.',
     cliSubcommand: 'down',
     scope: 'common',
     requiresConfirmation: true,
@@ -410,12 +609,57 @@ export function gcpBuildCommand(
           `db_disk_size_gb=${f('db_disk_size_gb')}`,
           '--var',
           `ttl_hours=${f('ttl_hours')}`,
+          '--var',
+          `enable_read_replica=${f('enable_read_replica', 'false')}`,
+          '--var',
+          `db_work_mem_kb=${f('db_work_mem_kb', '0')}`,
         ],
         env: {},
       };
 
     case 'deploy':
-      return { argv: ['deploy', '--cloud', 'gcp', '--name', labName], env: {} };
+      return {
+        // Always passed explicitly (never conditionally omitted) so toggling
+        // this field OFF on a later redeploy actually disables the pooled
+        // tier again, rather than leaving a prior true value stuck via
+        // Ansible's own enable_pgbouncer: false group_vars default.
+        argv: [
+          'deploy',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          '--extra-vars',
+          `enable_pgbouncer=${f('enable_pgbouncer', 'false')}`,
+          '--extra-vars',
+          `pgbouncer_default_pool_size=${f('pgbouncer_default_pool_size', '20')}`,
+          // Passed even when blank: an empty value is Ansible's documented
+          // "use the manifest's own committed ceiling" signal, so clearing
+          // the field on a later redeploy actually reverts an earlier
+          // override instead of leaving it stuck.
+          '--extra-vars',
+          `hapi_max_replicas=${f('hapi_max_replicas', '')}`,
+          // Blank passed explicitly, like hapi_max_replicas: it means "chart
+          // default", so clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_cpu_request=${f('hapi_cpu_request', '')}`,
+          // Blank passed explicitly too (blank = the template's 100m / 500m),
+          // so clearing either field reverts an earlier override.
+          '--extra-vars',
+          `pgbouncer_cpu_request=${f('pgbouncer_cpu_request', '')}`,
+          '--extra-vars',
+          `pgbouncer_cpu_limit=${f('pgbouncer_cpu_limit', '')}`,
+          // Blank passed explicitly (blank = Tomcat's default 200), so
+          // clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_tomcat_max_threads=${f('hapi_tomcat_max_threads', '')}`,
+          // Blank passed explicitly (blank = manifest minReplicaCount), so
+          // clearing the field reverts an earlier override.
+          '--extra-vars',
+          `hapi_min_replicas=${f('hapi_min_replicas', '')}`,
+        ],
+        env: {},
+      };
 
     case 'expose-fhir':
       return {
@@ -538,31 +782,121 @@ export function gcpBuildCommand(
         FHIR_BASE_URL: f('fhir_base_url', 'http://localhost:8080/fhir'),
         LAB_SEED_GENERATOR_MODE: 'native',
       };
-      return {
-        argv: [
-          'seed',
+      // Ephemeral per-trigger option (routes/actions.ts / ActionList.tsx),
+      // not a persisted ConfigField -- same pattern as benchmark's
+      // in_cluster/parallel_shards. Restoring a prior `backup-db` dump is
+      // far faster than regenerating + re-loading synthetic data, but it's
+      // a choice an operator makes at the moment they click "Seed synthetic
+      // data", not part of the lab's saved configuration.
+      const restoreFromBackup = fieldValues.restore_from_backup === true;
+      // --cloud/--name are only load-bearing for the restore path (locates
+      // this lab's terraform-output.json for direct DB connection details)
+      // but are harmless to always pass -- scripts/lab's native/synthea
+      // generation paths never read them.
+      const argv = ['seed', '--cloud', 'gcp', '--name', labName];
+      if (restoreFromBackup) {
+        argv.push('--restore-from-backup', '--backup-dir', f('backup_dir'));
+      } else {
+        argv.push(
           '--households',
           f('households'),
           '--individuals-per-household',
           f('individuals_per_household'),
           '--seed',
           f('echis_seed'),
-          '--run',
-          cliRunLabel,
-        ],
-        env,
-      };
+        );
+      }
+      argv.push('--run', cliRunLabel);
+      return { argv, env };
     }
+
+    case 'backup-db':
+      return {
+        argv: [
+          'backup-db',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          // Ephemeral per-trigger option, same as seed's backup_dir --
+          // omitted entirely (rather than passed empty) so scripts/lab
+          // falls back to its own default (this lab's state_dir()/db-backup)
+          // when the operator hasn't overridden it.
+          ...(str(fieldValues.backup_dir, '').trim() ? ['--backup-dir', f('backup_dir')] : []),
+        ],
+        env: {},
+      };
+
+    case 'provision-shard-storage':
+      return {
+        argv: [
+          'provision-shard-storage',
+          '--cloud',
+          'gcp',
+          '--name',
+          labName,
+          '--auto-approve',
+          '--var',
+          `project_id=${projectId}`,
+          '--capacity-gb',
+          f('shard_output_capacity_gb', '1024'),
+        ],
+        // The PV/PVC apply step (manifests/k6-shard-job's static PV/PVC)
+        // shells out to kubectl same as pause-autoscaling/expose-fhir --
+        // scripts/lab's kubectl-using commands never resolve a kubeconfig
+        // themselves, they expect the caller to set KUBECONFIG. Omitting
+        // this makes kubectl fall back to no config at all (resolves to
+        // localhost:8080, "connection refused") rather than this lab's
+        // real cluster.
+        env: { KUBECONFIG: kubeconfigPathFor(labName) },
+      };
 
     case 'benchmark': {
       const tier = f('echis_tier');
+      // Ephemeral per-trigger options (routes/actions.ts), not a persisted
+      // ConfigField -- an operator picks this at the moment they click
+      // "Run k6 benchmark", not when configuring the lab.
+      const inCluster = fieldValues.in_cluster === true;
       const env: Record<string, string> = {
-        FHIR_BASE_URL: f('fhir_base_url', 'http://localhost:8080/fhir'),
+        FHIR_BASE_URL: inCluster
+          ? // A local kubectl-port-forward URL (localhost:8080) is
+            // meaningless from inside a k6 shard pod running in-cluster --
+            // it would resolve to the shard pod itself, not FHIR. Use the
+            // Service's cluster-DNS name instead, matching scripts/lab's
+            // own HAPI_NAMESPACE/HAPI_SERVICE_NAME defaults (fhir /
+            // hapi-fhir-hapi-fhir-jpaserver) -- neither is a configurable
+            // ConfigField here, same as scripts/lab itself.
+            f(
+              'fhir_base_url_in_cluster',
+              'http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir',
+            )
+          : f('fhir_base_url', 'http://localhost:8080/fhir'),
+        // Not required by benchmark itself (only FHIR_BASE_URL is), but
+        // ensure_local_prometheus_remote_write (scripts/lab) uses it to
+        // open a local-only port-forward to Prometheus so this run's live
+        // metrics land in Grafana automatically -- without it, resolving
+        // a kubeconfig here would silently fail and every UI-triggered
+        // benchmark would run without live metrics (docs/lab-cli.md's
+        // "Live k6 metrics in Grafana" section).
+        KUBECONFIG: kubeconfigPathFor(labName),
       };
-      const script = ECHIS_TIER_K6_SCRIPT[tier];
-      if (script) env.K6_SCRIPT = script;
       const argv = ['benchmark', '--profile', f('k6_profile')];
-      if (tier && tier !== 'none') argv.push('--echis-tier', tier);
+      if (inCluster) {
+        // scripts/lab's cmd_benchmark_in_cluster always targets
+        // benchmarks/k6/echis_load_100.js -- the k6-shard-job manifest's
+        // ConfigMap mapping is static -- and DIES if K6_SCRIPT names
+        // anything else, so it's deliberately never set here regardless of
+        // echis_tier. --echis-tier is also deliberately omitted: it would
+        // additionally trigger tier-sequence gating (requiring a prior
+        // tier's benchmark to have already succeeded) that has nothing to
+        // do with this standalone in-cluster run.
+        const shards = Number(fieldValues.parallel_shards ?? 1);
+        argv.push('--in-cluster', '--parallel-shards', String(shards));
+      } else {
+        const script = ECHIS_TIER_K6_SCRIPT[tier];
+        if (script) env.K6_SCRIPT = script;
+        if (tier && tier !== 'none') argv.push('--echis-tier', tier);
+      }
       argv.push('--run', cliRunLabel);
       return { argv, env };
     }
@@ -624,9 +958,19 @@ export const gcpProvider: ProviderAdapter = {
     { id: 'ruby', label: 'Ruby', severity: 'blocking' },
     { id: 'k6', label: 'k6', severity: 'blocking' },
     { id: 'java', label: 'Java 17+', severity: 'blocking' },
+    {
+      id: 'postgresql-client',
+      label: 'PostgreSQL client (pg_dump/pg_restore)',
+      severity: 'blocking',
+    },
     { id: 'gcloud', label: 'gcloud CLI', severity: 'blocking' },
     { id: 'gke-gcloud-auth-plugin', label: 'gke-gcloud-auth-plugin', severity: 'blocking' },
     { id: 'gcloud-adc', label: 'gcloud Application Default Credentials', severity: 'warning' },
+    {
+      id: 'cloud-sql-proxy',
+      label: 'Cloud SQL Auth Proxy',
+      severity: 'blocking',
+    },
   ],
   buildCommand: gcpBuildCommand,
 };

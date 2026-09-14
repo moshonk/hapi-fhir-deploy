@@ -11,8 +11,8 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 
 | Action | `scripts/lab` invocation | Confirmation required |
 |---|---|---|
-| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours}` | Yes — billable resource creation |
-| `deploy` | `deploy --cloud gcp --name {lab_name}` | No |
+| `up` | `up --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version} --var node_size={node_size} --var cluster_node_count={cluster_node_count} --var cluster_min_nodes={cluster_min_nodes} --var cluster_max_nodes={cluster_max_nodes} --var db_edition={db_edition} --var db_sku={db_sku} --var db_disk_size_gb={db_disk_size_gb} --var ttl_hours={ttl_hours} --var enable_read_replica={enable_read_replica} --var db_work_mem_kb={db_work_mem_kb}` | Yes — billable resource creation |
+| `deploy` | `deploy --cloud gcp --name {lab_name} --extra-vars enable_pgbouncer={enable_pgbouncer} --extra-vars pgbouncer_default_pool_size={pgbouncer_default_pool_size} --extra-vars hapi_max_replicas={hapi_max_replicas} --extra-vars hapi_cpu_request={hapi_cpu_request} --extra-vars pgbouncer_cpu_request={pgbouncer_cpu_request} --extra-vars pgbouncer_cpu_limit={pgbouncer_cpu_limit} --extra-vars hapi_tomcat_max_threads={hapi_tomcat_max_threads} --extra-vars hapi_min_replicas={hapi_min_replicas}` | No |
 | `expose-fhir` | `expose-fhir --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | Yes — names the exposure scope |
 | `unexpose-fhir` | `unexpose-fhir --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `expose-prometheus` | `expose-prometheus --cloud gcp --name {lab_name} --var project_id={project_id} --source-ranges {expose_source_ranges}` (env: `KUBECONFIG` as above) | Yes — names the exposure scope |
@@ -21,8 +21,10 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 | `unexpose-grafana` | `unexpose-grafana --cloud gcp --name {lab_name} --var project_id={project_id}` (env: `KUBECONFIG` as above) | No |
 | `pause-autoscaling` | `pause-autoscaling --replicas {pause_replicas}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `resume-autoscaling` | `resume-autoscaling` (env: `KUBECONFIG` as above) | No |
-| `seed` | `seed --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`) | No |
-| `benchmark` | `benchmark --profile {k6_profile} [--echis-tier {echis_tier}] --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `K6_SCRIPT` per tier) | No |
+| `provision-shard-storage` | `provision-shard-storage --cloud gcp --name {lab_name} --auto-approve --var project_id={project_id} --capacity-gb {shard_output_capacity_gb}` (env: `KUBECONFIG` set from this lab's saved kubeconfig path -- its PV/PVC apply step shells out to `kubectl`, same requirement as `expose-fhir`/`pause-autoscaling`) | Yes — billable Filestore instance creation |
+| `seed` | Generate (default): `seed --cloud gcp --name {lab_name} --households {households} --individuals-per-household {individuals_per_household} --seed {echis_seed} --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `LAB_SEED_GENERATOR_MODE=native`). Restore (`restoreFromBackup` trigger option): `seed --cloud gcp --name {lab_name} --restore-from-backup --backup-dir {backupDir} --run {cliRunLabel}` (same env) | No |
+| `backup-db` | `backup-db --cloud gcp --name {lab_name} [--backup-dir {backupDir}]` | No |
+| `benchmark` | `benchmark --profile {k6_profile} [--echis-tier {echis_tier}] --run {cliRunLabel}` (env: `FHIR_BASE_URL`, `K6_SCRIPT` per tier, `KUBECONFIG` set from this lab's saved kubeconfig path) | No |
 | `report` | `report --run {cliRunLabel} --cloud gcp --name {lab_name} --profile {k6_profile}` | No |
 | `down` | `down --cloud gcp --name {lab_name} --yes --var project_id={project_id} --var region={region} --var zone={zone} --var kubernetes_version={kubernetes_version}` | Yes — destroys infrastructure |
 | `doctor` (prerequisites) | `doctor --cloud gcp --format json` | No — read-only (research.md §5; this is a new subcommand this feature adds to `scripts/lab` itself) |
@@ -30,6 +32,37 @@ All invocations run with `cwd` = repository root. `{field}` interpolates a
 
 Notes:
 
+- `restoreFromBackup`/`backupDir` (`seed`) and `backupDir` (`backup-db`) are
+  ephemeral per-trigger request-body options (`POST /api/labs/:id/actions/seed`
+  and `.../backup-db`), not persisted `ConfigField`s -- same pattern as
+  `benchmark`'s `inCluster`/`parallelShards`. `backup-db` pg_dumps this lab's
+  database (directory format, parallel jobs) to `backupDir` (server-side
+  default: this lab's own `state_dir()/db-backup` when omitted); `seed`'s
+  restore path pg_restores that same directory straight back in, skipping
+  Synthea/native generation entirely -- much faster on repeat runs than
+  regenerating and re-POSTing synthetic data. `restoreFromBackup: true`
+  requires a non-empty `backupDir`; the trigger endpoint refuses with `400`
+  otherwise. Both actions require `--cloud`/`--name` (unlike `seed`'s
+  generate path) to locate this lab's `terraform-output.json`, which is
+  where the database connection details (`database_endpoint`,
+  `database_port`, `database_name`, `database_username`,
+  `database_password` -- identical output keys across every cloud module)
+  come from. On GCP the database is private-IP-only inside the lab's own
+  VPC, which the Lab Control UI's control-plane host can't reach directly;
+  `scripts/lab` auto-starts a Cloud SQL Auth Proxy in `--psc` mode
+  (reconciling a per-lab PSC consumer endpoint + shared per-region private
+  DNS zone) whenever `terraform-output.json` carries the GCP-only
+  `database_connection_name`/`database_psc_service_attachment_link`/
+  `database_psc_dns_name` outputs, so `pg_dump`/`pg_restore` connect through
+  `127.0.0.1`. A GCP lab whose `up` predates those outputs aborts with a
+  re-run-`up` instruction rather than falling back to an unreachable mode.
+  aws/azure connect directly (in-VPC reachability required, as before).
+  Because of the proxy, `backup-db`'s `requiredPrerequisiteIds` are
+  `['postgresql-client', 'cloud-sql-proxy', 'gcloud']` (`gcloud` because
+  reconciling the PSC consumer endpoint shells out to it); `seed` lists none of them, since
+  restore-from-backup is an ephemeral per-trigger choice and the
+  generate-fresh path needs no DB client (`scripts/lab` fails loudly at
+  trigger time if the tool is genuinely missing on the restore path).
 - `cliRunLabel` for `seed`/`benchmark`/`report` is derived from `lab_name`
   plus a short suffix disambiguating repeated runs against the same lab
   (e.g. `{lab_name}-{short-timestamp}`), not a separate form field — matches
@@ -49,6 +82,14 @@ Notes:
   shown as the default with the same ceiling warning the runbook itself
   gives (Step 8), rather than silently letting the field drift from that
   doc if the ceiling ever changes.
+- `benchmark`'s `KUBECONFIG` isn't needed by `benchmark` itself (only
+  `FHIR_BASE_URL` is) -- it's for `scripts/lab`'s
+  `ensure_local_prometheus_remote_write`, which auto-detects a kubeconfig
+  to open a local-only port-forward into Prometheus's remote-write
+  endpoint, streaming live k6 metrics into Grafana by default regardless
+  of which tier/profile is running (`docs/lab-cli.md`'s "Live k6 metrics
+  in Grafana" section). Without it, every UI-triggered benchmark would
+  silently run without live metrics.
 - eCHIS tier selection (`echis_tier`) drives which `K6_SCRIPT` is passed for
   `benchmark` (`echis_load_100.js` for T2, `echis_load_1000.js` for T3, per
   `docs/echis-benchmark-tiers.md`) — this mapping lives in the GCP
@@ -61,8 +102,42 @@ Notes:
   `cli_run_label`), or, if omitted, the lab's most recent **succeeded**
   `benchmark` run. If neither resolves, the trigger is refused with `400`
   rather than silently generating a label that doesn't exist on disk.
+- `hapi_max_replicas` (`deploy`) is always passed explicitly too, including
+  as an EMPTY value, which is the documented "use the ceiling committed in
+  the tier's own ScaledObject manifest" signal (`ansible/group_vars/lab.yml`'s
+  `hapi_max_replicas: ""`). Clearing the field on a later redeploy therefore
+  reverts a previous override instead of leaving it stuck, for the same
+  reason `enable_pgbouncer` is never conditionally omitted.
+- `hapi_cpu_request` (`deploy`) is passed explicitly too, blank meaning the
+  chart's own CPU request, for the same revert-on-clear reason.
+- `pgbouncer_cpu_request` and `pgbouncer_cpu_limit` (`deploy`) are passed
+  explicitly as well, blank meaning the PgBouncer template's 100m request and
+  500m limit, for the same revert-on-clear reason.
+- `hapi_tomcat_max_threads` (`deploy`) is passed explicitly too, blank meaning
+  Tomcat's default of 200 worker threads, for the same revert-on-clear reason.
+- `hapi_min_replicas` (`deploy`) is passed explicitly too, blank meaning the
+  tier ScaledObject manifest's own `minReplicaCount`, for the same
+  revert-on-clear reason. The deploy asserts it is a whole number within
+  2..effective `maxReplicaCount` (`specs/003-autoscaling-connection-budget`
+  SC-001: never fewer than two HAPI replicas); `hapi_max_replicas` must be a
+  whole number too.
+- `enable_pgbouncer` (`deploy`) is always passed explicitly, true or false,
+  never conditionally omitted -- so toggling it OFF on a later redeploy of
+  an already-pooled lab actually disables the tier again (`ansible/
+  group_vars/lab.yml`'s own `enable_pgbouncer: false` default only applies
+  when the extra-var is absent entirely). Spec 007's opt-in pooled
+  connection tier: swaps in the pooled `ScaledObject` in place of the
+  native one (`docs/autoscaling.md`), required for eCHIS tiers T4/T5 and
+  recommended before `load`/`stress` k6 profiles.
+- `provision-shard-storage` is the UI's entry point for the ReadWriteMany
+  PVC `benchmark --in-cluster --parallel-shards N` (N > 1) requires --
+  `manifests/k6-shard-job/README.md`'s documented prerequisite. GCP-only,
+  same as the `expose-*` actions; a targeted Terraform apply against the
+  lab's existing `up` workspace (no other resource touched), then a static
+  PV/PVC applied via `kubectl`. Torn down automatically by `down`'s
+  `terraform destroy` -- no separate unprovision action.
 - `ActionDef.confirmationMessage` (`up`, `down`, `expose-fhir`,
-  `expose-prometheus`, `expose-grafana`) may contain `{field_key}`
+  `expose-prometheus`, `expose-grafana`, `provision-shard-storage`) may contain `{field_key}`
   placeholders referencing this provider's own `ConfigField` keys (e.g.
   `{expose_source_ranges}`). `expose-grafana`'s message also contains a
   literal `{.data.admin-password}` kubectl jsonpath expression, which is

@@ -77,7 +77,7 @@ actually runs, so the preview can never drift from what executing it does.
 
 ### `POST /api/labs/:id/actions/:actionName`
 
-Body: `{ "confirmed": boolean, "overridePrerequisites"?: boolean, "targetRunId"?: string }`.
+Body: `{ "confirmed": boolean, "overridePrerequisites"?: boolean, "targetRunId"?: string, "inCluster"?: boolean, "parallelShards"?: number }`.
 If `ActionDef.requiresConfirmation` is true for this action and `confirmed`
 is not `true`, responds `409` with
 `{ "error": "confirmation required", "confirmationMessage": string }`
@@ -102,6 +102,24 @@ an `actionRunId` of a prior run belonging to this same lab, whose
 most recent succeeded `benchmark` run). Responds `400` if `targetRunId`
 doesn't resolve to a run on this lab, or if omitted and no succeeded
 `benchmark` run exists yet to default to.
+
+`inCluster`/`parallelShards` are only meaningful for `benchmark`: `inCluster:
+true` runs `scripts/lab benchmark --in-cluster --parallel-shards N` (a
+Kubernetes Job of k6 shard pod(s) hitting the FHIR Service by its
+cluster-DNS name, load-balanced across every backing pod by real kube-proxy
+routing) instead of the default local `kubectl port-forward`-based run
+(which pins all traffic to a single backing pod — see docs/lab-cli.md).
+`parallelShards` defaults to `1` and must be a positive integer (`400` if
+not); more than 1 shard requires a `ReadWriteMany` PVC named
+`echis-shard-output` in the `fhir` namespace (e.g. GCP Filestore) — plain
+GCE PD storage classes only support `ReadWriteOnce`, i.e. `parallelShards:
+1`. `inCluster: true` also suppresses `--echis-tier` and `K6_SCRIPT`
+regardless of the lab's configured `echis_tier`, since
+`cmd_benchmark_in_cluster` (`scripts/lab`) always targets
+`benchmarks/k6/echis_load_100.js` and dies if `K6_SCRIPT` names anything
+else (`manifests/k6-shard-job/README.md`'s sharding strategy: aggregate
+concurrency is that script's own VU target — ~100 — multiplied by
+`parallelShards`).
 
 If the same `(labId, actionName)` pair already has a `running` row, responds
 `409` with `{ "error": "action already running", "actionRunId": string }`
@@ -131,8 +149,7 @@ after a page reload or an exposure closed some other way (`unexpose-*`,
     {
       "id": "prometheus",
       "label": "Prometheus",
-      "exposed": true,
-      "url": "http://203.0.113.5:9090",
+      "exposed": false,
       "port": "9090",
       "firewallRule": "allow-prometheus-9090-hapi-fhir-lab"
     },
@@ -140,9 +157,9 @@ after a page reload or an exposure closed some other way (`unexpose-*`,
       "id": "grafana",
       "label": "Grafana",
       "exposed": true,
-      "url": "http://203.0.113.5:3000",
-      "port": "3000",
-      "firewallRule": "allow-grafana-3000-hapi-fhir-lab",
+      "url": "http://203.0.113.5:3001",
+      "port": "3001",
+      "firewallRule": "allow-grafana-3001-hapi-fhir-lab",
       "credentialsAvailable": true,
       "username": "admin",
       "password": "..."
@@ -152,16 +169,27 @@ after a page reload or an exposure closed some other way (`unexpose-*`,
 ```
 
 `exposed` reflects the tracked port-forward process actually still being
-alive, not merely a state file existing (a stale file left by e.g. a host
-reboot without a matching `unexpose-*` reports `exposed: false`). Only the
-`grafana` record ever carries `credentialsAvailable`/`username`/`password` —
-FHIR and Prometheus have no auth in front of them in this lab
-(`docs/lab-cli.md`'s login-required note). Grafana's password is fetched
-live via `kubectl` on every call and never persisted by this endpoint or by
-`scripts/lab exposures` itself; when the fetch fails, `credentialsAvailable`
-is `false` and `credentialsReason` explains why. `502` with `{ "error":
-string }` if the CLI invocation itself fails (not to be confused with an
-individual service simply being `exposed: false`, which is a normal `200`).
+alive, not merely a state file existing. `port`/`firewallRule` are present
+whenever a state file exists AT ALL, regardless of `exposed` — this is the
+one signal that distinguishes "never exposed" (`fhir` above: no
+`firewallRule`) from "was exposed but the tunnel isn't alive right now"
+(`prometheus` above: `firewallRule` present, `exposed: false` — e.g. a
+container restart killed the port-forward while the GCP firewall rule
+survived). `url` is only ever included when `exposed` is `true` — showing a
+URL that won't currently connect would be actively misleading, unlike
+`port`/`firewallRule` which are just facts about what's on disk. The Lab
+Control UI's boot-time exposure-recovery hook
+(`lab-control-ui/backend/src/actions/exposureRecovery.ts`) is exactly this
+endpoint's second consumer: it re-runs `expose-*` for any record with
+`firewallRule` set and `exposed: false`. Only the `grafana` record ever
+carries `credentialsAvailable`/`username`/`password` — FHIR and Prometheus
+have no auth in front of them in this lab (`docs/lab-cli.md`'s
+login-required note). Grafana's password is fetched live via `kubectl` on
+every call and never persisted by this endpoint or by `scripts/lab
+exposures` itself; when the fetch fails, `credentialsAvailable` is `false`
+and `credentialsReason` explains why. `502` with `{ "error": string }` if
+the CLI invocation itself fails (not to be confused with an individual
+service simply being `exposed: false`, which is a normal `200`).
 
 ## Runs
 
@@ -195,3 +223,41 @@ event (`succeeded` or `failed`) and closes the stream when the process
 exits. Reconnecting after a drop simply reopens this same endpoint — the
 full-content replay on connect satisfies FR-008 without any client-tracked
 offset.
+
+### `GET /api/runs/:actionRunId/artifacts`
+
+Result artifacts for a `seed`/`benchmark`/`report` run — distinct from the
+raw process log above. Response `200`:
+
+```json
+{
+  "cliRunLabel": "hapi-fhir-lab-20260817-143105",
+  "files": [
+    { "name": "k6-fhir-summary.json", "kind": "json", "content": { "concurrency_target": 1000, "...": "..." } },
+    { "name": "benchmark-metadata.json", "kind": "json", "content": { "...": "..." } }
+  ]
+}
+```
+
+`files` is `[]` (never a `404`) both for actions with no run directory at
+all (`up`, `down`, `expose-*`, ...) and for a run that hasn't produced any
+of the known files yet (still running, or failed before writing anything)
+— "no results yet" is a normal state, not an error. `404` only when
+`actionRunId` itself doesn't resolve to a run.
+
+`kind: "json"` entries have `content` as the parsed file; `kind: "text"`
+entries (`report.md`, `summary.csv`) have `content` as the raw file text.
+Never includes `k6-raw.jsonl` (a multi-gigabyte NDJSON dump per real run) —
+`files` is built from a fixed allowlist of basenames inside the run's
+directory, never a directory listing.
+
+For `seed`/`benchmark` runs, files are read directly from
+`ansible/artifacts/lab/runs/{cliRunLabel}/` (the same directory
+`scripts/lab seed|benchmark --run {cliRunLabel}` itself wrote, per
+`cli-action-map.md`): `k6-fhir-summary.json`, `benchmark-metadata.json`,
+`k6-summary.json`, `dataset-metadata.json` — whichever exist. For `report`
+runs, the backend additionally recovers the published `results/<dir>/`
+path from the run's own log (`scripts/publish_results.rb`'s only stdout
+line on success is that directory) and, if it resolves to somewhere
+genuinely inside `RESULT_ROOT` (never elsewhere on disk), also includes
+`report.md`, `environment.json`, and `summary.csv` from there.

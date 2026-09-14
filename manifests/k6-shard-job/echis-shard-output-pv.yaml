@@ -1,0 +1,55 @@
+# Static ReadWriteMany PersistentVolume/Claim backing echis-k6-shard-job.yaml
+# (and manifests/seed-job's equivalent) for `--parallel-shards N` with N > 1,
+# where every shard pod mounts /shard-output concurrently -- something plain
+# GCE PD storage classes (ReadWriteOnce only) cannot do. Backed by the
+# Filestore instance infra/terraform/gcp/main.tf's google_filestore_instance
+# .shard_output provisions (opt-in via var.enable_shard_output_rwx --
+# `scripts/lab provision-shard-storage`), bound via the core `nfs` volume
+# plugin rather than the Filestore CSI driver -- no GKE addon/cluster change
+# needed.
+#
+# `persistentVolumeReclaimPolicy: Retain` is deliberate: Terraform, not
+# Kubernetes, owns the underlying Filestore instance's lifecycle (torn down
+# by `scripts/lab down`'s `terraform destroy` like every other resource in
+# that module). Deleting this PV/PVC from Kubernetes (e.g. `scripts/lab
+# down` running before a `kubectl delete`, or an operator cleaning up
+# in-cluster objects by hand) must never trigger Kubernetes to try deleting
+# the Filestore instance itself -- Retain guarantees that; Delete would not.
+#
+# This file uses <ANGLE_BRACKET> placeholder tokens, substituted by
+# `scripts/lab provision-shard-storage` (render_job_manifest, same mechanism
+# echis-k6-shard-job.yaml's own tokens use).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: echis-shard-output-pv
+  labels:
+    app.kubernetes.io/part-of: hapi-fhir
+spec:
+  capacity:
+    storage: <SHARD_OUTPUT_CAPACITY_GI>Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: <FILESTORE_IP>
+    path: /<FILESTORE_SHARE_NAME>
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: <SHARD_OUTPUT_PVC>
+  namespace: fhir
+  labels:
+    app.kubernetes.io/part-of: hapi-fhir
+spec:
+  # Empty string, not omitted: prevents a default StorageClass's dynamic
+  # provisioner from ever racing this static binding, matching the
+  # documented pattern for binding a PVC to a specific, pre-created PV.
+  storageClassName: ""
+  volumeName: echis-shard-output-pv
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: <SHARD_OUTPUT_CAPACITY_GI>Gi

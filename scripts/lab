@@ -21,14 +21,18 @@ ECHIS_TIER=""
 HOUSEHOLDS=""
 INDIVIDUALS_PER_HOUSEHOLD=""
 PARALLEL_SHARDS=""
+SHARD_OUTPUT_CAPACITY_GB=""
 IN_CLUSTER=false
 REPLICAS=""
 PORT=""
 SOURCE_RANGES=""
+BACKUP_DIR=""
+RESTORE_FROM_BACKUP=false
 AUTO_APPROVE=false
 YES=false
 DRY_RUN=false
 GENERATE_ONLY=false
+NO_PROMETHEUS_RW=false
 TF_VARS=()
 ANSIBLE_EXTRA_VARS=()
 SEED_GENERATOR_MODE="${LAB_SEED_GENERATOR_MODE:-synthea}"
@@ -45,9 +49,17 @@ Usage:
     (LAB_SEED_GENERATOR_MODE=native; add --in-cluster --parallel-shards N to run
     scripts/echis_seed.rb as a distributed Kubernetes Indexed Job instead of a
     single local process)
+  scripts/lab seed --restore-from-backup --cloud aws|azure|gcp --name NAME [--backup-dir DIR]
+    (skips Synthea/native generation entirely and pg_restore's a prior
+    `backup-db` directory-format dump straight into this lab's database --
+    much faster than regenerating + re-loading; --backup-dir defaults to
+    this lab's own backup directory, see `backup-db` below)
+  scripts/lab backup-db --cloud aws|azure|gcp --name NAME [--backup-dir DIR]
   scripts/lab benchmark --profile smoke|baseline|load|stress [--echis-tier T2|T3|T4|T5] [--run RUN_ID]
     (add --in-cluster --parallel-shards N to run benchmarks/k6/echis_load_100.js
-    as a distributed Kubernetes Indexed Job instead of a single local k6 process)
+    as a distributed Kubernetes Indexed Job instead of a single local k6 process;
+    streams live metrics to Prometheus/Grafana by default when a kubeconfig
+    resolves -- see --no-prometheus-remote-write)
   scripts/lab report --run RUN_ID [--cloud aws|azure|gcp] [--name NAME] [--profile smoke|baseline|load|stress]
   scripts/lab down --cloud aws|azure|gcp --name NAME [--yes]
   scripts/lab pause-autoscaling --replicas N
@@ -59,6 +71,7 @@ Usage:
   scripts/lab expose-grafana --cloud gcp --name NAME --var project_id=P [--port 3000] [--source-ranges CIDR[,CIDR...]]
   scripts/lab unexpose-grafana --cloud gcp --name NAME --var project_id=P
   scripts/lab exposures --cloud gcp --name NAME [--format text|json]
+  scripts/lab provision-shard-storage --cloud gcp --name NAME --var project_id=P [--capacity-gb N] [--auto-approve]
 
 Commands:
   up                  Provision cloud infrastructure with Terraform and save ignored local outputs.
@@ -72,7 +85,32 @@ Commands:
                        reused by `up` and `doctor` alike, so the two can never silently drift apart.
   deploy               Run the provider-neutral Ansible deployment workflow.
   seed                 Generate deterministic Synthea FHIR data and optionally invoke a loader.
-  benchmark            Run a k6 FHIR benchmark profile.
+                       Pass --restore-from-backup (plus --cloud/--name) to skip generation
+                       entirely and pg_restore a prior `backup-db` dump straight into the
+                       database instead -- see `backup-db` below.
+  backup-db            pg_dump this lab's database (directory format, parallel jobs) to
+                       --backup-dir (defaults to this lab's own artifact directory) so it can
+                       be pg_restore'd back in via `seed --restore-from-backup` on a later run
+                       instead of regenerating and re-POSTing synthetic data from scratch.
+                       Uses this lab's `up`-time Terraform outputs (terraform-output.json) to
+                       locate the database, and pg_dump/pg_restore must be installed locally.
+                       On GCP, if the database is only reachable via a private IP inside this
+                       lab's own VPC (the default), a Cloud SQL Auth Proxy is started
+                       automatically so a host outside that VPC (e.g. the Lab Control UI's
+                       control-plane host) can still connect -- see CLOUD_SQL_PROXY_BIN below;
+                       requires roles/cloudsql.client on the active gcloud/ADC identity.
+                       Overwrites any existing backup at the same --backup-dir.
+  benchmark            Run a k6 FHIR benchmark profile. By default, auto-detects a
+                       kubeconfig (LAB_KUBECONFIG > KUBECONFIG > --cloud/--name's
+                       generated one) and streams live metrics to Prometheus's
+                       remote-write endpoint over a local-only port-forward (no
+                       firewall rule opened), torn down again once the run ends --
+                       so a live k6 dashboard in Grafana works regardless of which
+                       tier/profile is running or what triggered it. Never blocks
+                       the run if no kubeconfig resolves or Prometheus isn't
+                       reachable. Pass --no-prometheus-remote-write to opt out, or
+                       set K6_PROMETHEUS_RW_SERVER_URL yourself to target a
+                       different Prometheus (always wins over auto-detection).
   report               Publish local benchmark result artifacts from a run directory.
   down                 Destroy cloud infrastructure. Use this promptly to control cloud cost.
   pause-autoscaling    Pin the KEDA-managed replica count to N for a bulk data-load window
@@ -112,6 +150,17 @@ Commands:
                        only reports it. --format json emits one {id,label,exposed,...} record per
                        service; used by the Lab Control UI (specs/009-lab-control-ui) to show a
                        link (and credentials, if applicable) once a service is exposed.
+  provision-shard-storage
+                       GCP only. Provisions a Filestore instance (BASIC_HDD tier, ~$0.20/GB-month
+                       billed hourly, 1TB floor) via a *targeted* Terraform apply against this
+                       lab's existing workspace -- touches no other resource regardless of which
+                       --var flags this lab was originally `up`'d with -- then applies a static
+                       ReadWriteMany PV/PVC pointing at it (manifests/k6-shard-job/echis-shard-output-pv.yaml).
+                       Required before `benchmark --in-cluster --parallel-shards N` with N > 1
+                       (plain GCE PD storage classes are ReadWriteOnce only, and every shard pod
+                       mounts the output PVC concurrently). Torn down automatically by `down`'s
+                       `terraform destroy` -- no unprovision command, no special-casing needed.
+                       --capacity-gb overrides the 1024 (BASIC_HDD's minimum) default.
 
 Environment:
   LAB_ARTIFACTS_DIR       Artifact root; defaults to ansible/artifacts/lab.
@@ -143,7 +192,22 @@ Environment:
   FHIR_BASE_URL           HAPI FHIR endpoint for seed loading and k6 benchmarks.
   K6_BIN                  k6 executable; defaults to k6.
   K6_SCRIPT               k6 script path; defaults to benchmarks/k6/PROFILE.js.
+  ECHIS_SEEDED_HOUSEHOLDS benchmark only. The --households of the eCHIS dataset loaded
+                          into FHIR_BASE_URL; when set (> 0), the echis workload adds
+                          the sync-engine operations (tag-scoped pulls, Patient
+                          $everything, known-household reads, PUT+PATCH uploads)
+                          against that seeded data. Unset keeps the original mix.
+                          Local mode also honors ECHIS_SEEDED_INDIVIDUALS_PER_HOUSEHOLD
+                          (default 3), ECHIS_SYNC_PAGE_SIZE (200), ECHIS_SYNC_MAX_PAGES (3),
+                          and ECHIS_SYNC_WINDOW_MINUTES (60).
   PROMETHEUS_BASE_URL     Required by baseline profile gates for pod restart and Hikari checks.
+  K6_PROMETHEUS_RW_SERVER_URL
+                          benchmark only. Overrides automatic live-metrics
+                          detection (see the benchmark command's own help above)
+                          -- set explicitly to target a different Prometheus, or
+                          leave unset to let benchmark auto-detect one.
+  NO_PROMETHEUS_RW        benchmark only. Set via --no-prometheus-remote-write;
+                          disables automatic live k6 metrics entirely.
   LAB_RESULTS_DIR         Published result root; defaults to results/.
   LAB_RESULT_PUBLISHER_CMD Optional publisher command; defaults to scripts/publish_results.rb.
   LAB_REPORT_CMD          Legacy report command invoked as: CMD RUN_DIR REPORT_PATH.
@@ -155,24 +219,56 @@ Environment:
                           synthea (default, existing behavior unchanged) or native
                           (invokes scripts/echis_seed.rb directly with --households,
                           skipping Synthea entirely; requires --households not
-                          --patients).
+                          --patients). Ignored entirely by `seed --restore-from-backup`.
+  PG_DUMP_BIN             pg_dump executable; defaults to pg_dump. Used by `backup-db`.
+  PG_RESTORE_BIN          pg_restore executable; defaults to pg_restore. Used by
+                          `seed --restore-from-backup`.
+  BACKUP_JOBS             Parallel pg_dump/pg_restore worker jobs for `backup-db` and
+                          `seed --restore-from-backup`; defaults to 4. Directory-format
+                          dump/restore is required for this to have any effect (plain
+                          format dumps are always single-threaded).
+  CLOUD_SQL_PROXY_BIN     cloud-sql-proxy executable; defaults to cloud-sql-proxy. GCP
+                          only. Used by `backup-db`/`seed --restore-from-backup` (in --psc
+                          mode) to reach a private-IP-only Cloud SQL instance from a host
+                          outside this lab's own VPC -- automatic whenever
+                          terraform-output.json has a database_connection_name (every lab
+                          `up` since this was added); requires the active gcloud/ADC
+                          identity to hold roles/cloudsql.client, roles/compute.networkAdmin,
+                          and roles/dns.admin (or equivalent) on the project.
+  CLOUD_SQL_PROXY_PORT    Local port the Cloud SQL Auth Proxy listens on; defaults to
+                          a free port chosen per run, so concurrent proxy-using
+                          actions never share one. Only used when the proxy
+                          actually starts (see CLOUD_SQL_PROXY_BIN above).
+  PSC_CONSUMER_NETWORK    VPC network/subnetwork/region this host creates its Private
+  PSC_CONSUMER_SUBNETWORK Service Connect endpoint in (ensure_cloud_sql_psc_endpoint,
+  PSC_CONSUMER_REGION     used by CLOUD_SQL_PROXY_BIN's --psc mode above). Autodetected
+                          from this host's own GCE instance metadata when unset -- only
+                          needed when running scripts/lab from a non-GCE host with routable
+                          access to the target network (e.g. over Cloud VPN/Interconnect).
   KUBECTL_BIN             kubectl executable; defaults to kubectl. Used by --in-cluster,
                           pause-autoscaling, and resume-autoscaling.
   LAB_SHARD_OUTPUT_PVC    PersistentVolumeClaim name shard pods mount for output;
-                          defaults to echis-shard-output. Used by --in-cluster.
+                          defaults to echis-shard-output. Used by --in-cluster and
+                          provision-shard-storage.
   HAPI_NAMESPACE          Kubernetes namespace for the HAPI FHIR deployment; defaults
                           to fhir. Used by pause-autoscaling, resume-autoscaling,
                           expose-fhir, and unexpose-fhir.
   HAPI_SERVICE_NAME       HAPI FHIR Kubernetes Service name; defaults to
                           hapi-fhir-hapi-fhir-jpaserver. Used by expose-fhir.
   PROMETHEUS_NAMESPACE    Kubernetes namespace for kube-prometheus-stack; defaults to
-                          monitoring. Used by expose-prometheus and unexpose-prometheus.
+                          monitoring. Used by expose-prometheus, unexpose-prometheus,
+                          and benchmark's automatic live-metrics port-forward.
   PROMETHEUS_SERVICE_NAME Prometheus Kubernetes Service name; defaults to
-                          prometheus-kube-prometheus-prometheus. Used by expose-prometheus.
+                          prometheus-kube-prometheus-prometheus. Used by expose-prometheus
+                          and benchmark's automatic live-metrics port-forward.
   GRAFANA_NAMESPACE       Kubernetes namespace for Grafana; defaults to monitoring.
                           Used by expose-grafana and unexpose-grafana.
   GRAFANA_SERVICE_NAME    Grafana Kubernetes Service name; defaults to prometheus-grafana.
                           Used by expose-grafana.
+  LAB_PORTFORWARD_WATCHDOG_INTERVAL
+                          Seconds between liveness checks for the auto-reconnect
+                          watchdog every expose-*/benchmark's own remote-write
+                          port-forward runs alongside its tunnel; defaults to 15.
 USAGE
 }
 
@@ -262,6 +358,11 @@ parse_args() {
         PARALLEL_SHARDS="$2"
         shift 2
         ;;
+      --capacity-gb)
+        [[ -n "${2:-}" ]] || die "--capacity-gb requires a value"
+        SHARD_OUTPUT_CAPACITY_GB="$2"
+        shift 2
+        ;;
       --in-cluster)
         IN_CLUSTER=true
         shift
@@ -280,6 +381,15 @@ parse_args() {
         [[ -n "${2:-}" ]] || die "--source-ranges requires a value"
         SOURCE_RANGES="$2"
         shift 2
+        ;;
+      --backup-dir)
+        [[ -n "${2:-}" ]] || die "--backup-dir requires a value"
+        BACKUP_DIR="$2"
+        shift 2
+        ;;
+      --restore-from-backup)
+        RESTORE_FROM_BACKUP=true
+        shift
         ;;
       --format)
         [[ -n "${2:-}" ]] || die "--format requires a value (text or json)"
@@ -301,6 +411,10 @@ parse_args() {
         ;;
       --generate-only)
         GENERATE_ONLY=true
+        shift
+        ;;
+      --no-prometheus-remote-write)
+        NO_PROMETHEUS_RW=true
         shift
         ;;
       --var|--terraform-var)
@@ -360,6 +474,116 @@ state_dir() {
 
 run_dir() {
   printf '%s/%s' "$RUN_ROOT" "$RUN_ID"
+}
+
+# Shared kubeconfig-resolution precedence, factored out of cmd_deploy so
+# ensure_local_prometheus_remote_write can reuse it without requiring
+# --cloud/--name (cmd_benchmark doesn't require either -- it only needs
+# FHIR_BASE_URL -- so this only falls through to state_dir()/kubeconfig
+# when both happen to be set, e.g. because the Lab Control UI's benchmark
+# action passes them or an operator exported them by hand).
+#
+# Precedence: LAB_KUBECONFIG (explicit override) > ambient KUBECONFIG (a
+# single real path, not a kubectl-style colon-separated merge list) >
+# this lab's generated kubeconfig under state_dir(). Echoes nothing if
+# none apply -- callers decide whether that's fatal.
+resolve_kubeconfig_file() {
+  if [[ -n "${LAB_KUBECONFIG:-}" ]]; then
+    printf '%s' "$LAB_KUBECONFIG"
+  elif [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" != *:* ]]; then
+    printf '%s' "$KUBECONFIG"
+  elif [[ -n "$CLOUD" && -n "$NAME" ]]; then
+    printf '%s/kubeconfig' "$(state_dir)"
+  fi
+}
+
+# Keeps ONE `kubectl port-forward` alive for as long as this watchdog
+# itself runs. kubectl port-forward has no built-in reconnect -- confirmed
+# live against this exact lab: the long-lived SPDY/websocket-style tunnel
+# it holds through the Kubernetes API server gets dropped after roughly
+# 30-40 minutes (a GKE control-plane/load-balancer session limit, not a
+# pod-health issue -- every backing pod stayed Running with zero restarts
+# across two separate drops caught mid-benchmark), and kubectl just exits
+# with "error: lost connection to pod" rather than reconnecting. Both
+# expose_public_service (long-lived, hours) and
+# ensure_local_prometheus_remote_write (one benchmark run, up to ~80
+# minutes) are long enough to hit this.
+#
+# kubeconfig: pass "" to rely on an already-exported ambient KUBECONFIG
+# (expose_public_service's own callers always have one); pass an explicit
+# path to set KUBECONFIG= just for the reconnect attempt (needed by
+# ensure_local_prometheus_remote_write, which doesn't require --cloud/
+# --name and so can't assume one is exported).
+# port: reused as-is on every reconnect (never re-randomized), so a
+# caller relying on a specific local port -- e.g. k6's
+# K6_PROMETHEUS_RW_SERVER_URL, resolved once and never re-read after k6
+# starts -- keeps pointing at a working tunnel across a reconnect.
+# pid_file: plain-text file holding the CURRENT port-forward PID -- both
+# this watchdog and the caller read/write it, so anything checking
+# liveness (cmd_exposures, cmd_benchmark's own cleanup) always sees the
+# live PID even after a reconnect. Caller must have already written the
+# first PID there before calling this.
+# watchdog_pid_file: separate file holding the watchdog LOOP's own PID, so
+# the caller can stop it later via stop_portforward_watchdog -- without
+# this, the watchdog would keep resurrecting a port-forward the operator
+# explicitly asked to close, or one belonging to a run that already ended.
+start_portforward_watchdog() {
+  local kbin="$1" kubeconfig="$2" address="$3" ns="$4" svc="$5" port="$6" target_port="$7"
+  local pf_log="$8" pid_file="$9" watchdog_pid_file="${10}"
+  local interval="${LAB_PORTFORWARD_WATCHDOG_INTERVAL:-15}"
+
+  nohup bash -c '
+    kbin="$1" kubeconfig="$2" address="$3" ns="$4" svc="$5" port="$6" target_port="$7"
+    pf_log="$8" pid_file="$9" interval="${10}"
+    while true; do
+      sleep "$interval"
+      current_pid="$(cat "$pid_file" 2>/dev/null || true)"
+      if [[ -n "$current_pid" ]] && kill -0 "$current_pid" 2>/dev/null; then
+        continue
+      fi
+      printf "\n==> watchdog: port-forward (pid %s) is no longer running -- reconnecting %s -> %s:%s\n" \
+        "${current_pid:-none}" "$svc" "$port" "$target_port" >>"$pf_log"
+      if [[ -n "$kubeconfig" ]]; then
+        KUBECONFIG="$kubeconfig" "$kbin" -n "$ns" port-forward --address "$address" "svc/$svc" "$port:$target_port" >>"$pf_log" 2>&1 &
+      else
+        "$kbin" -n "$ns" port-forward --address "$address" "svc/$svc" "$port:$target_port" >>"$pf_log" 2>&1 &
+      fi
+      new_pid=$!
+      disown
+      echo "$new_pid" >"$pid_file"
+    done
+  ' bash "$kbin" "$kubeconfig" "$address" "$ns" "$svc" "$port" "$target_port" "$pf_log" "$pid_file" "$interval" \
+    >>"$pf_log" 2>&1 &
+  local watchdog_pid=$!
+  disown
+  echo "$watchdog_pid" >"$watchdog_pid_file"
+}
+
+# Reverse of start_portforward_watchdog: stops the watchdog loop (not the
+# port-forward it's currently tracking -- kill that PID, read from
+# pid_file, separately). Safe to call when no watchdog is running (no-op).
+stop_portforward_watchdog() {
+  local watchdog_pid_file="$1"
+  local watchdog_pid
+  watchdog_pid="$(cat "$watchdog_pid_file" 2>/dev/null || true)"
+  if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill "$watchdog_pid" 2>/dev/null || true
+  fi
+  rm -f "$watchdog_pid_file"
+}
+
+# Kills whatever PID a start_portforward_watchdog-managed pid_file
+# currently names -- read fresh each call, never a value captured before a
+# possible reconnect. Safe to call on an empty/missing/already-dead
+# pid_file (no-op).
+kill_portforward_pid_file() {
+  local pid_file="$1"
+  [[ -n "$pid_file" ]] || return 0
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+  fi
 }
 
 terraform_bin() {
@@ -749,6 +973,16 @@ PYEOF
     add_prereq_check "java" "Java 17+" "fail" "java not found -- used by Synthea seed generation: https://adoptium.net/installation/"
   fi
 
+  # Only 'backup-db' and 'seed --restore-from-backup' need this -- most
+  # seed runs never touch it, so this deliberately isn't required by 'seed'
+  # itself (the Lab Control UI's requiredPrerequisiteIds only lists it on
+  # backup-db; see lab-control-ui/backend/src/providers/gcp.ts).
+  if command -v "${PG_DUMP_BIN:-pg_dump}" >/dev/null 2>&1 && command -v "${PG_RESTORE_BIN:-pg_restore}" >/dev/null 2>&1; then
+    add_prereq_check "postgresql-client" "PostgreSQL client (pg_dump/pg_restore)" "pass" "present"
+  else
+    add_prereq_check "postgresql-client" "PostgreSQL client (pg_dump/pg_restore)" "fail" "pg_dump/pg_restore not found -- only needed for 'backup-db' and 'seed --restore-from-backup': https://www.postgresql.org/download/"
+  fi
+
   case "$CLOUD" in
     gcp)
       if command -v gcloud >/dev/null 2>&1; then
@@ -765,6 +999,16 @@ PYEOF
         add_prereq_check "gcloud-adc" "gcloud Application Default Credentials" "pass" "active"
       else
         add_prereq_check "gcloud-adc" "gcloud Application Default Credentials" "warn" "no ADC token -- Terraform will fail to authenticate. Run: gcloud auth application-default login"
+      fi
+      # Only needed when backup-db/seed --restore-from-backup actually has
+      # to start one (start_cloud_sql_proxy_if_needed -- a lab whose
+      # database is reachable directly, e.g. this host is already inside
+      # the lab's own VPC, never touches it), same "not required by seed
+      # itself" reasoning as postgresql-client above.
+      if command -v "${CLOUD_SQL_PROXY_BIN:-cloud-sql-proxy}" >/dev/null 2>&1; then
+        add_prereq_check "cloud-sql-proxy" "Cloud SQL Auth Proxy" "pass" "present"
+      else
+        add_prereq_check "cloud-sql-proxy" "Cloud SQL Auth Proxy" "fail" "cloud-sql-proxy not found -- only needed for 'backup-db'/'seed --restore-from-backup' when this host can't reach the database's private IP directly: https://github.com/GoogleCloudPlatform/cloud-sql-proxy"
       fi
       ;;
     aws)
@@ -868,6 +1112,15 @@ cmd_up() {
   terraform_workspace_ensure "$tf_bin" "$tf_dir"
 
   local apply_args=("apply" "-var" "lab_name=$NAME")
+  # Reload any opt-in Terraform variables a *targeted* apply persisted for
+  # this lab (currently just enable_shard_output_rwx/shard_output_capacity_gb
+  # from `provision-shard-storage` -- see that command's doc comment) so
+  # this untargeted `up` re-run reconciles to the SAME desired state as the
+  # last targeted apply, instead of silently destroying resources that
+  # only exist because of a variable this invocation never passed.
+  if [[ -f "$dir/shard-storage.auto.tfvars" ]]; then
+    apply_args+=("-var-file=$dir/shard-storage.auto.tfvars")
+  fi
   if [[ "$AUTO_APPROVE" == true ]]; then
     apply_args+=("-auto-approve")
   fi
@@ -895,12 +1148,12 @@ cmd_deploy() {
   local state
   state="$(state_dir)"
   local terraform_output_file="${TERRAFORM_OUTPUT_FILE:-$state/terraform-output.json}"
-  local kubeconfig_file="$state/kubeconfig"
-  if [[ -n "${LAB_KUBECONFIG:-}" ]]; then
-    kubeconfig_file="$LAB_KUBECONFIG"
-  elif [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" != *:* ]]; then
-    kubeconfig_file="$KUBECONFIG"
-  fi
+  # CLOUD/NAME are always set here (require_cloud/require_name above), so
+  # resolve_kubeconfig_file()'s state_dir() fallback always applies,
+  # matching this command's original unconditional "$state/kubeconfig"
+  # default exactly.
+  local kubeconfig_file
+  kubeconfig_file="$(resolve_kubeconfig_file)"
 
   if [[ "$DRY_RUN" == true ]]; then
     [[ -f "$terraform_output_file" ]] || log "Dry run: Terraform output file is not present yet: $terraform_output_file"
@@ -998,7 +1251,522 @@ render_job_manifest() {
   sed "${sed_args[@]}" "$template" > "$rendered"
 }
 
+# Reads database_endpoint/database_port/database_name/database_username/
+# database_password out of a `terraform output -json` file (written by
+# write_terraform_outputs during `up`/`provision-shard-storage` into this
+# lab's state_dir()) and exports them as the PG* env vars libpq's own
+# client tools (pg_dump, pg_restore, psql, ...) read automatically -- no
+# --host/--port/... flags needed on any call site below. Every cloud module
+# (infra/terraform/{aws,azure,gcp}/outputs.tf) exposes these same five keys,
+# so this is cloud-agnostic despite Cloud SQL/RDS/Flexible Server having
+# very different provisioning underneath.
+#
+# Also sets DATABASE_CONNECTION_NAME/DATABASE_PSC_SERVICE_ATTACHMENT/
+# DATABASE_PSC_DNS_NAME (possibly empty) from the GCP-only
+# database_connection_name/database_psc_service_attachment_link/
+# database_psc_dns_name outputs, used by start_cloud_sql_proxy_if_needed
+# and ensure_cloud_sql_psc_endpoint below -- optional (never aborts if
+# absent) so an aws/azure lab, or a GCP one whose terraform-output.json
+# predates these outputs, still gets a usable direct PGHOST/PGPORT here
+# exactly as before (start_cloud_sql_proxy_if_needed itself is what aborts
+# with a re-run-`up` message if DATABASE_CONNECTION_NAME is present but the
+# PSC outputs it needs aren't).
+db_connection_from_terraform_output() {
+  local output_file="$1"
+  [[ -f "$output_file" ]] || die "Terraform output not found for $CLOUD lab '$NAME': $output_file (run 'up' first)"
+
+  local exports
+  exports="$("${RUBY_BIN:-ruby}" -rjson -e '
+    data = JSON.parse(File.read(ARGV[0]))
+    keys = %w[database_endpoint database_port database_name database_username database_password]
+    keys.each do |key|
+      value = data.dig(key, "value")
+      abort "missing terraform output '\''#{key}'\'' in #{ARGV[0]}" if value.nil?
+      puts "#{key}=#{value}"
+    end
+    puts "database_connection_name=#{data.dig("database_connection_name", "value")}"
+    puts "database_psc_service_attachment_link=#{data.dig("database_psc_service_attachment_link", "value")}"
+    puts "database_psc_dns_name=#{data.dig("database_psc_dns_name", "value")}"
+  ' "$output_file")" || die "failed to read database connection details from $output_file"
+
+  local line key value
+  DATABASE_CONNECTION_NAME=""
+  DATABASE_PSC_SERVICE_ATTACHMENT=""
+  DATABASE_PSC_DNS_NAME=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      database_endpoint) PGHOST="$value" ;;
+      database_port) PGPORT="$value" ;;
+      database_name) PGDATABASE="$value" ;;
+      database_username) PGUSER="$value" ;;
+      database_password) PGPASSWORD="$value" ;;
+      database_connection_name) DATABASE_CONNECTION_NAME="$value" ;;
+      database_psc_service_attachment_link) DATABASE_PSC_SERVICE_ATTACHMENT="$value" ;;
+      database_psc_dns_name) DATABASE_PSC_DNS_NAME="$value" ;;
+    esac
+  done <<<"$exports"
+  export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+}
+
+# Queries this host's own GCE instance metadata (fails fast, and silently,
+# on a non-GCE host -- callers treat empty output as "unknown", not an
+# error, since PSC_CONSUMER_NETWORK/SUBNETWORK/REGION below cover that
+# case).
+gce_metadata_value() {
+  curl -fsS -m 2 -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/instance/$1" 2>/dev/null
+}
+
+# Idempotently provisions the consumer-side Private Service Connect
+# plumbing that `cloud-sql-proxy --psc` needs to reach a PSC-enabled Cloud
+# SQL instance (infra/terraform/gcp/main.tf's psc_config) from a network
+# OTHER than the lab's own google_compute_network.lab -- e.g. the Lab
+# Control UI's control-plane host, which is exactly why this whole feature
+# exists (see docs/lab-cli.md). None of this is Terraform-managed: unlike
+# the lab's own database, WHICH lab's instance is being backed up varies
+# per invocation, so this reconciles real GCP resources by hand, the same
+# way expose_public_service already does for firewall rules.
+#
+# What gets created, all named/scoped so a second call (a later
+# backup-db/seed --restore-from-backup for the same lab, or the first for a
+# different one) is a no-op or an addition, never a conflict:
+#   - google_compute_address + forwarding rule named "$NAME-cloudsql-psc",
+#     in the consumer network/subnet/region below, targeting
+#     DATABASE_PSC_SERVICE_ATTACHMENT -- one pair per lab (the instance
+#     connection name in DATABASE_CONNECTION_NAME is only unique per lab).
+#   - a private Cloud DNS zone named after the instance's own region (e.g.
+#     "cloudsql-psc-us-central1", visible to the consumer network) holding
+#     an A record for DATABASE_PSC_DNS_NAME -> the forwarding rule's IP --
+#     shared across every lab in that region, since cloud-sql-proxy --psc
+#     resolves this DNS name rather than dialing an IP/connection name
+#     directly (confirmed against github.com/GoogleCloudPlatform/
+#     cloud-sql-proxy's PSC docs -- there is no IP- or connection-name-only
+#     path for PSC the way default/--private-ip mode has).
+#
+# Consumer network/subnet/region come from PSC_CONSUMER_NETWORK/
+# PSC_CONSUMER_SUBNETWORK/PSC_CONSUMER_REGION if set, else autodetected via
+# this host's own GCE instance metadata (gce_metadata_value) -- set the
+# env vars explicitly when running scripts/lab from a non-GCE host with
+# routable access to the target network (e.g. over Cloud VPN/Interconnect).
+# Requires roles/compute.networkAdmin and roles/dns.admin (or equivalent)
+# on the active gcloud/ADC identity, on top of roles/cloudsql.client.
+#
+# Writes a small state file under this lab's own state_dir() recording
+# exactly what was created, so teardown_cloud_sql_psc_endpoint (called from
+# `down`) can remove it without re-deriving network/region -- deliberately
+# does NOT delete the shared per-region DNS zone, since other labs' records
+# may still live in it.
+# Blocks until the PSC DNS name answers with the endpoint's IP through this
+# host's own resolver -- the same resolver cloud-sql-proxy dials through.
+# Root-caused live (hapi-lab-t3 backup-db, 2026-09-12): the private zone and
+# A record are created by ensure_cloud_sql_psc_endpoint seconds before the
+# proxy's first dial, Cloud DNS takes a few seconds to serve a new private
+# record, and the dial fails with "dial tcp: lookup <name>" in
+# cloud-sql-proxy.log -- which pg_dump/pg_restore only ever surface as the
+# misleading "server closed the connection unexpectedly". The timeout is
+# well past Cloud DNS's default negative-caching TTL (300s), because a
+# lookup that races ahead of propagation can be negatively cached by
+# systemd-resolved for that long.
+wait_for_psc_dns() {
+  local name="$1" expected_ip="$2"
+  [[ "$DRY_RUN" == true ]] && return 0
+  local waited=0 resolved=""
+  until resolved="$(getent hosts "$name" | awk '{print $1; exit}')" && [[ "$resolved" == "$expected_ip" ]]; do
+    if [[ $waited -ge 360 ]]; then
+      die "PSC DNS name $name did not resolve to $expected_ip within 360s (last answer: '${resolved:-none}') -- check the private zone is visible to this host's VPC network"
+    fi
+    waited=$((waited + 2))
+    sleep 2
+  done
+  log "PSC DNS name $name resolves to $expected_ip (waited ${waited}s)"
+}
+
+ensure_cloud_sql_psc_endpoint() {
+  [[ "$CLOUD" == "gcp" ]] || return 0
+  [[ "$DRY_RUN" == true ]] && return 0
+  [[ -n "${DATABASE_CONNECTION_NAME:-}" ]] || return 0
+
+  need_command gcloud
+
+  local network="${PSC_CONSUMER_NETWORK:-}"
+  local subnetwork="${PSC_CONSUMER_SUBNETWORK:-}"
+  local region="${PSC_CONSUMER_REGION:-}"
+  if [[ -z "$network" || -z "$subnetwork" || -z "$region" ]]; then
+    local md_network md_subnetwork
+    # `|| true`: gce_metadata_value's curl fails on a non-GCE host (no
+    # metadata server) or a transient lookup error -- under `set -e` an
+    # unguarded failing assignment would abort the whole script here
+    # instead of falling through to the "could not determine" die() below,
+    # which is the actual intended fallback path for that case.
+    md_network="$(gce_metadata_value network-interfaces/0/network)" || true
+    md_subnetwork="$(gce_metadata_value network-interfaces/0/subnetwork)" || true
+    [[ -n "$network" ]] || network="${md_network##*/}"
+    [[ -n "$subnetwork" ]] || subnetwork="${md_subnetwork##*/}"
+    if [[ -z "$region" ]]; then
+      region="$(printf '%s' "$md_subnetwork" | sed -n 's#.*/regions/\([^/]*\)/subnetworks/.*#\1#p')"
+    fi
+  fi
+  if [[ -z "$network" || -z "$subnetwork" || -z "$region" ]]; then
+    die "could not determine this host's own VPC network/subnetwork/region (not a GCE VM?) -- set PSC_CONSUMER_NETWORK/PSC_CONSUMER_SUBNETWORK/PSC_CONSUMER_REGION explicitly"
+  fi
+
+  # DATABASE_CONNECTION_NAME is PROJECT:REGION:INSTANCE -- the PSC consumer
+  # allow-list is project-scoped (main.tf's psc_config.allowed_consumer_projects),
+  # so the consumer resources below always live in the SAME project as the
+  # target instance, never a separate --var project_id.
+  local project_id="${DATABASE_CONNECTION_NAME%%:*}"
+  local psc_name="${NAME}-cloudsql-psc"
+  local network_uri="projects/${project_id}/global/networks/${network}"
+
+  # DATABASE_PSC_DNS_NAME looks like "<uid>.<uid2>.<region>.sql.goog." --
+  # strip the two per-instance labels to get the shared zone suffix
+  # (e.g. "us-central1.sql.goog.") every lab in that region reuses.
+  local zone_suffix="${DATABASE_PSC_DNS_NAME#*.*.}"
+  local dns_zone="cloudsql-psc-${zone_suffix%.}"
+  dns_zone="${dns_zone//./-}"
+
+  # Record what this function is about to create BEFORE creating any of it.
+  # These resources live outside Terraform, teardown_cloud_sql_psc_endpoint
+  # learns what to delete only from this file, and it skips entries that
+  # were never created -- so a failure part-way through setup (DNS wait
+  # timeout, quota error, ...) still leaves `down` able to clean up.
+  mkdir -p "$(state_dir)"
+  {
+    printf 'PROJECT_ID=%s\n' "$project_id"
+    printf 'REGION=%s\n' "$region"
+    printf 'ADDRESS_NAME=%s\n' "$psc_name"
+    printf 'FORWARDING_RULE=%s\n' "$psc_name"
+    printf 'DNS_ZONE=%s\n' "$dns_zone"
+    printf 'DNS_RECORD=%s\n' "$DATABASE_PSC_DNS_NAME"
+  } >"$(state_dir)/cloud-sql-psc-endpoint.env"
+
+  if ! gcloud compute addresses describe "$psc_name" --project "$project_id" --region "$region" >/dev/null 2>&1; then
+    log "Reserving internal IP '$psc_name' for Cloud SQL PSC in $network/$subnetwork ($region)"
+    run gcloud compute addresses create "$psc_name" --project "$project_id" --region "$region" --subnet "$subnetwork"
+  fi
+
+  # A rule found by name can still target an OLD service attachment (the
+  # lab's Cloud SQL instance was recreated since the rule was made), and DNS
+  # would then point at a dead endpoint. Compare targets, normalised to the
+  # "projects/..." form, and recreate the rule when they differ.
+  local existing_target=""
+  existing_target="$(gcloud compute forwarding-rules describe "$psc_name" --project "$project_id" --region "$region" --format='value(target)' 2>/dev/null)" || existing_target=""
+  if [[ -n "$existing_target" && "projects/${existing_target#*projects/}" != "projects/${DATABASE_PSC_SERVICE_ATTACHMENT#*projects/}" ]]; then
+    log "Cloud SQL PSC forwarding rule '$psc_name' targets $existing_target, not $DATABASE_PSC_SERVICE_ATTACHMENT -- recreating it"
+    run gcloud compute forwarding-rules delete "$psc_name" --project "$project_id" --region "$region" --quiet
+    existing_target=""
+  fi
+  if [[ -z "$existing_target" ]]; then
+    log "Creating Cloud SQL PSC forwarding rule '$psc_name' -> $DATABASE_PSC_SERVICE_ATTACHMENT"
+    run gcloud compute forwarding-rules create "$psc_name" \
+      --project "$project_id" --region "$region" \
+      --network "$network_uri" --address "$psc_name" \
+      --target-service-attachment "$DATABASE_PSC_SERVICE_ATTACHMENT" \
+      --allow-psc-global-access
+  fi
+
+  local endpoint_ip
+  endpoint_ip="$(gcloud compute addresses describe "$psc_name" --project "$project_id" --region "$region" --format='value(address)')" \
+    || die "failed to read reserved IP for Cloud SQL PSC endpoint '$psc_name'"
+
+  # The zone is shared by every lab in the region, so another run can create
+  # it between this describe and this create; treat "already exists" as success.
+  if ! gcloud dns managed-zones describe "$dns_zone" --project "$project_id" >/dev/null 2>&1; then
+    log "Creating shared private DNS zone '$dns_zone' ($zone_suffix) for Cloud SQL PSC in $network"
+    if ! run gcloud dns managed-zones create "$dns_zone" \
+      --project "$project_id" --dns-name "$zone_suffix" --visibility private \
+      --networks "$network_uri" \
+      --description "scripts/lab: Cloud SQL PSC DNS zone for cloud-sql-proxy --psc from $network. Shared across every lab's backup-db/seed --restore-from-backup in this region; not deleted by any single lab's 'down' (see teardown_cloud_sql_psc_endpoint)."; then
+      gcloud dns managed-zones describe "$dns_zone" --project "$project_id" >/dev/null 2>&1 \
+        || die "failed to create shared private DNS zone '$dns_zone'"
+      log "Shared DNS zone '$dns_zone' was created concurrently by another run; reusing it"
+    fi
+  fi
+
+  if gcloud dns record-sets describe "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A >/dev/null 2>&1; then
+    run gcloud dns record-sets update "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A --rrdatas "$endpoint_ip"
+  else
+    run gcloud dns record-sets create "$DATABASE_PSC_DNS_NAME" --project "$project_id" --zone "$dns_zone" --type A --rrdatas "$endpoint_ip"
+  fi
+
+  wait_for_psc_dns "$DATABASE_PSC_DNS_NAME" "$endpoint_ip"
+}
+
+# Reverse of ensure_cloud_sql_psc_endpoint for one lab: deletes its
+# forwarding rule + reserved IP + DNS record (never the shared per-region
+# DNS zone -- other labs' records may still live in it). Safe to call even
+# when no PSC endpoint was ever created for this lab (no state file ->
+# no-op). Called from `down`, non-fatally, same as unexpose_public_service.
+teardown_cloud_sql_psc_endpoint() {
+  [[ "$CLOUD" == "gcp" ]] || return 0
+  local state_file
+  state_file="$(state_dir)/cloud-sql-psc-endpoint.env"
+  [[ -f "$state_file" ]] || return 0
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would clean up the Cloud SQL PSC consumer endpoint recorded in $state_file (state kept)"
+    return 0
+  fi
+
+  need_command gcloud
+
+  local project_id region address_name forwarding_rule dns_zone dns_record
+  project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
+  region="$(grep -m1 '^REGION=' "$state_file" | cut -d= -f2)" || true
+  address_name="$(grep -m1 '^ADDRESS_NAME=' "$state_file" | cut -d= -f2)" || true
+  forwarding_rule="$(grep -m1 '^FORWARDING_RULE=' "$state_file" | cut -d= -f2)" || true
+  dns_zone="$(grep -m1 '^DNS_ZONE=' "$state_file" | cut -d= -f2)" || true
+  dns_record="$(grep -m1 '^DNS_RECORD=' "$state_file" | cut -d= -f2)" || true
+
+  log "Cleaning up Cloud SQL PSC consumer endpoint for lab '$NAME' (forwarding rule '$forwarding_rule') -- shared DNS zone '$dns_zone' is left in place for other labs"
+
+  if [[ -n "$dns_record" && -n "$dns_zone" ]] && gcloud dns record-sets describe "$dns_record" --project "$project_id" --zone "$dns_zone" --type A >/dev/null 2>&1; then
+    run gcloud dns record-sets delete "$dns_record" --project "$project_id" --zone "$dns_zone" --type A --quiet
+  fi
+  if [[ -n "$forwarding_rule" ]] && gcloud compute forwarding-rules describe "$forwarding_rule" --project "$project_id" --region "$region" >/dev/null 2>&1; then
+    run gcloud compute forwarding-rules delete "$forwarding_rule" --project "$project_id" --region "$region" --quiet
+  fi
+  if [[ -n "$address_name" ]] && gcloud compute addresses describe "$address_name" --project "$project_id" --region "$region" >/dev/null 2>&1; then
+    run gcloud compute addresses delete "$address_name" --project "$project_id" --region "$region" --quiet
+  fi
+
+  rm -f "$state_file"
+}
+
+# Starts the Cloud SQL Auth Proxy (GCP only) in --psc mode and rewrites
+# PGHOST/PGPORT (already exported by db_connection_from_terraform_output,
+# which must be called first) to point at it, so pg_dump/pg_restore can
+# reach a private-IP-only Cloud SQL instance from a host outside this lab's
+# own dedicated VPC (infra/terraform/gcp/main.tf's google_compute_network.lab)
+# -- e.g. the Lab Control UI's control-plane host, which lives on a
+# different network than the lab's own Terraform-managed one.
+#
+# Deliberately does NOT use --private-ip (needs a VPC route this host
+# doesn't have, confirmed live: `dial tcp 10.99.0.3:3307: i/o timeout`) or
+# default/public mode (needs the instance to have a public IP; this one
+# doesn't -- main.tf's ipv4_enabled is false -- so default mode's local
+# port opens fine but every real connection gets closed immediately once
+# the proxy fails to dial a public IP that doesn't exist, confirmed live:
+# pg_dump's "server closed the connection unexpectedly"). --psc is the only
+# mode that works for a private-IP-only instance from outside its VPC; see
+# ensure_cloud_sql_psc_endpoint above for what it requires.
+#
+# No-op (leaves PGHOST/PGPORT untouched) for aws/azure or a dry run. On GCP
+# it aborts -- rather than falling back to the private PGHOST, which a host
+# outside the lab's VPC can't reach -- when terraform-output.json lacks
+# database_connection_name or the PSC outputs; a lab whose output predates
+# them needs a fresh `up`/apply.
+#
+# The proxy listens on CLOUD_SQL_PROXY_PORT if set, otherwise on a free port
+# chosen for this run, and readiness is read from this run's own proxy log
+# ("Listening on 127.0.0.1:<port>" and "ready for new connections"), never
+# from a bare TCP connect. Two proxy-using actions running at once (two labs,
+# or backup-db and a restore for one lab) must never reach each other's proxy
+# and dump or restore the wrong database.
+#
+# Sets CLOUD_SQL_PROXY_PID (empty if the proxy was never started). Callers
+# MUST install `trap stop_cloud_sql_proxy EXIT` BEFORE calling this, so a
+# readiness failure inside it (die) or a failed pg_dump/pg_restore (which
+# exits the whole script under `set -e`) never leaves the proxy running.
+CLOUD_SQL_PROXY_PID=""
+
+start_cloud_sql_proxy_if_needed() {
+  CLOUD_SQL_PROXY_PID=""
+  [[ "$CLOUD" == "gcp" ]] || return 0
+  [[ "$DRY_RUN" == true ]] && return 0
+
+  if [[ -z "${DATABASE_CONNECTION_NAME:-}" || -z "${DATABASE_PSC_SERVICE_ATTACHMENT:-}" || -z "${DATABASE_PSC_DNS_NAME:-}" ]]; then
+    die "terraform-output.json for lab '$NAME' is missing database_connection_name/database_psc_service_attachment_link/database_psc_dns_name (it predates Private Service Connect support) -- re-run 'scripts/lab up' (or 'terraform apply') for this lab to pick up those outputs, then retry"
+  fi
+
+  ensure_cloud_sql_psc_endpoint
+
+  local proxy_bin="${CLOUD_SQL_PROXY_BIN:-cloud-sql-proxy}"
+  need_command "$proxy_bin"
+
+  local proxy_port="${CLOUD_SQL_PROXY_PORT:-}"
+  if [[ -z "$proxy_port" ]]; then
+    proxy_port="$("${RUBY_BIN:-ruby}" -rsocket -e 's = TCPServer.new("127.0.0.1", 0); puts s.addr[1]; s.close')" \
+      || die "could not pick a free local port for cloud-sql-proxy (set CLOUD_SQL_PROXY_PORT explicitly)"
+  fi
+  mkdir -p "$(state_dir)"
+  local proxy_log
+  proxy_log="$(state_dir)/cloud-sql-proxy.$$.log"
+  log "Starting Cloud SQL Auth Proxy (PSC) for $DATABASE_CONNECTION_NAME on 127.0.0.1:$proxy_port -- $PGHOST is only directly reachable from inside this lab's own VPC"
+
+  nohup "$proxy_bin" --port "$proxy_port" --psc "$DATABASE_CONNECTION_NAME" >"$proxy_log" 2>&1 &
+  CLOUD_SQL_PROXY_PID=$!
+  disown
+
+  # Ready only once THIS process says so in its own log. A TCP connect alone
+  # could succeed against another run's proxy already holding the port; ours
+  # would then fail to bind and exit, which the kill -0 check catches.
+  local waited=0
+  until grep -qF "Listening on 127.0.0.1:$proxy_port" "$proxy_log" 2>/dev/null \
+    && grep -qF "ready for new connections" "$proxy_log" 2>/dev/null; do
+    if ! kill -0 "$CLOUD_SQL_PROXY_PID" 2>/dev/null; then
+      die "cloud-sql-proxy exited before becoming ready (127.0.0.1:$proxy_port may already be in use, or the active gcloud/ADC identity lacks roles/cloudsql.client, or the Cloud SQL Admin API is disabled); see $proxy_log"
+    fi
+    waited=$((waited + 1))
+    if [[ $waited -ge 30 ]]; then
+      die "cloud-sql-proxy did not become ready on 127.0.0.1:$proxy_port within 30s; see $proxy_log"
+    fi
+    sleep 1
+  done
+  kill -0 "$CLOUD_SQL_PROXY_PID" 2>/dev/null \
+    || die "cloud-sql-proxy exited right after reporting ready; see $proxy_log"
+
+  PGHOST="127.0.0.1"
+  PGPORT="$proxy_port"
+  export PGHOST PGPORT
+}
+
+# Reverse of start_cloud_sql_proxy_if_needed -- safe to call even when no
+# proxy was started (CLOUD_SQL_PROXY_PID left empty).
+stop_cloud_sql_proxy() {
+  if [[ -n "$CLOUD_SQL_PROXY_PID" ]] && kill -0 "$CLOUD_SQL_PROXY_PID" 2>/dev/null; then
+    kill "$CLOUD_SQL_PROXY_PID" 2>/dev/null || true
+  fi
+  CLOUD_SQL_PROXY_PID=""
+}
+
+# Default backup location for a given lab: namespaced under its own
+# state_dir() (same directory `up` already writes terraform-output.json
+# and kubeconfig into) so backups from different labs never collide and
+# `down` tearing down one lab's Terraform state doesn't touch another's.
+db_backup_dir_default() {
+  printf '%s/db-backup' "$(state_dir)"
+}
+
+# pg_dump's directory format (-Fd) instead of a single custom-format file:
+# supports parallel jobs (-j) in both directions, which matters at the
+# T2/T3 row counts this lab seeds -- and the operator explicitly wants a
+# *directory* they can point --backup-dir at, not an opaque single file.
+cmd_backup_db() {
+  require_cloud
+  require_name
+
+  local dir
+  dir="$(state_dir)"
+  local terraform_output_file="$dir/terraform-output.json"
+  local backup_dir="${BACKUP_DIR:-$(db_backup_dir_default)}"
+  local jobs="${BACKUP_JOBS:-4}"
+  local pg_dump_bin="${PG_DUMP_BIN:-pg_dump}"
+  need_command_unless_dry_run "$pg_dump_bin"
+
+  if [[ "$DRY_RUN" == true && ! -f "$terraform_output_file" ]]; then
+    log "Dry run: Terraform output file is not present yet: $terraform_output_file"
+  else
+    db_connection_from_terraform_output "$terraform_output_file"
+  fi
+  # Recorded in lab-backup-metadata.json below -- the real database host,
+  # not 127.0.0.1, even once start_cloud_sql_proxy_if_needed rewrites PGHOST
+  # to point at the local proxy instead.
+  local real_pghost="${PGHOST:-}"
+  trap stop_cloud_sql_proxy EXIT
+  start_cloud_sql_proxy_if_needed
+
+  log "Backing up database '${PGDATABASE:-<unknown, dry run>}' at ${real_pghost:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} to $backup_dir (directory format, $jobs parallel job(s))"
+  # pg_dump -Fd refuses to write into a non-empty directory; this backup
+  # location is meant to be overwritten by each successive `backup-db`, not
+  # accumulated, so clear it first rather than requiring the operator to
+  # manage that themselves.
+  if [[ "$DRY_RUN" != true ]]; then
+    rm -rf "$backup_dir"
+    mkdir -p "$(dirname "$backup_dir")"
+  fi
+  run "$pg_dump_bin" --format=directory --jobs="$jobs" --no-owner --no-privileges --file="$backup_dir" "${PGDATABASE:-}"
+
+  if [[ "$DRY_RUN" != true ]]; then
+    "${RUBY_BIN:-ruby}" -rjson -rtime -e '
+      File.write(ARGV[0], JSON.pretty_generate({
+        "database" => ARGV[1],
+        "host" => ARGV[2],
+        "created_at" => Time.now.utc.iso8601,
+      }))
+    ' "$backup_dir/lab-backup-metadata.json" "$PGDATABASE" "$real_pghost"
+  fi
+
+  stop_cloud_sql_proxy
+  trap - EXIT
+  log "Backup complete: $backup_dir (pass --restore-from-backup --backup-dir $backup_dir to 'seed' on a later run to reuse it)"
+}
+
+# Restores a prior `backup-db` directory-format dump straight into this
+# lab's database instead of regenerating + re-POSTing synthetic data via
+# Synthea/echis_seed.rb -- called from cmd_seed below when
+# --restore-from-backup is set, bypassing SEED_GENERATOR_MODE entirely
+# (restoring is generator-agnostic; whichever generator originally produced
+# the backup doesn't matter once it's a database dump).
+# pg_restore 17 -- required, since pg_dump must be at least the source
+# server's major version and the lab image therefore ships 17 -- opens every
+# worker connection with `SET transaction_timeout = 0`, a PostgreSQL-17-only
+# parameter. Against an older (e.g. 16) target that SET fails once per
+# connection; pg_restore carries on, restores every object, and then exits 1
+# with "errors ignored on restore: N". Root-caused live restoring
+# hapi-lab-t3's dump into hapi-lab-t4 (2026-09-12): exact row counts on the
+# six largest tables, 179/179 indexes and 132/132 constraints all matched the
+# source, yet the command reported failure. True only when there was at
+# least one pg_restore error and EVERY one of them was that preamble.
+pg_restore_errors_only_transaction_timeout() {
+  local errfile="$1" total benign
+  total="$(grep -c 'pg_restore: error:' "$errfile" || true)"
+  benign="$(grep 'pg_restore: error:' "$errfile" | grep -c 'unrecognized configuration parameter "transaction_timeout"' || true)"
+  [[ "$total" -gt 0 && "$total" == "$benign" ]]
+}
+
+cmd_seed_restore_from_backup() {
+  require_cloud
+  require_name
+
+  local dir
+  dir="$(state_dir)"
+  local terraform_output_file="$dir/terraform-output.json"
+  local backup_dir="${BACKUP_DIR:-$(db_backup_dir_default)}"
+  local jobs="${BACKUP_JOBS:-4}"
+  local pg_restore_bin="${PG_RESTORE_BIN:-pg_restore}"
+  need_command_unless_dry_run "$pg_restore_bin"
+
+  if [[ "$DRY_RUN" == true && ! -d "$backup_dir" ]]; then
+    log "Dry run: backup directory is not present yet: $backup_dir"
+  else
+    [[ -d "$backup_dir" ]] || die "backup directory not found: $backup_dir (run 'backup-db' first, or pass --backup-dir)"
+  fi
+
+  if [[ "$DRY_RUN" == true && ! -f "$terraform_output_file" ]]; then
+    log "Dry run: Terraform output file is not present yet: $terraform_output_file"
+  else
+    db_connection_from_terraform_output "$terraform_output_file"
+  fi
+  local real_pghost="${PGHOST:-}"
+  trap stop_cloud_sql_proxy EXIT
+  start_cloud_sql_proxy_if_needed
+
+  log "Restoring database '${PGDATABASE:-<unknown, dry run>}' at ${real_pghost:-<unknown, dry run>}:${PGPORT:-<unknown, dry run>} from backup $backup_dir ($jobs parallel job(s)) instead of generating new synthetic data"
+  # --clean --if-exists: this database was already seeded once (that's how
+  # the backup was produced), so drop its existing objects before restoring
+  # rather than failing on every already-exists conflict.
+  local restore_err rc=0
+  restore_err="$(mktemp)"
+  run "$pg_restore_bin" --format=directory --jobs="$jobs" --clean --if-exists --no-owner --no-privileges --dbname="${PGDATABASE:-}" "$backup_dir" 2>"$restore_err" || rc=$?
+  cat "$restore_err" >&2
+  if [[ $rc -ne 0 ]] && pg_restore_errors_only_transaction_timeout "$restore_err"; then
+    log "pg_restore exited $rc, but every error was the benign PostgreSQL-17-client 'SET transaction_timeout' preamble against an older server -- treating the restore as successful"
+    rc=0
+  fi
+  rm -f "$restore_err"
+  [[ $rc -eq 0 ]] || die "pg_restore failed (exit $rc) -- see the pg_restore errors above"
+
+  stop_cloud_sql_proxy
+  trap - EXIT
+  log "Restore complete from $backup_dir"
+}
+
 cmd_seed() {
+  if [[ "$RESTORE_FROM_BACKUP" == true ]]; then
+    cmd_seed_restore_from_backup
+    return 0
+  fi
+
   case "$SEED_GENERATOR_MODE" in
     synthea|native) ;;
     *) die "unsupported LAB_SEED_GENERATOR_MODE '$SEED_GENERATOR_MODE'; expected synthea or native" ;;
@@ -1108,8 +1876,14 @@ cmd_seed_native_in_cluster() {
   kbin="$(kubectl_bin)"
   need_command_unless_dry_run "$kbin"
 
-  log "Creating/updating ConfigMap $configmap_name from scripts/echis_seed.rb"
-  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+  # The generator also needs the eCHIS reference content snapshot. It goes in
+  # gzipped: raw, it would push this ConfigMap past the 262KB
+  # last-applied-configuration annotation that `kubectl apply` writes.
+  local content_gz="$dir/echis-content.json.gz"
+  run bash -c "set -euo pipefail; gzip -9 -n -c \"$ROOT_DIR/benchmarks/echis/content/echis-content.json\" > \"$content_gz\""
+
+  log "Creating/updating ConfigMap $configmap_name from scripts/echis_seed.rb and the eCHIS content snapshot"
+  run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_seed.rb=\"$ROOT_DIR/scripts/echis_seed.rb\" --from-file=minimal_fhir_seed.rb=\"$ROOT_DIR/scripts/minimal_fhir_seed.rb\" --from-file=echis-content.json.gz=\"$content_gz\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
 
   log "Applying rendered seed Job: $rendered"
   run "$kbin" apply -f "$rendered"
@@ -1270,6 +2044,171 @@ record_echis_tier_progress() {
   ' "$progress_file" "$tier"
 }
 
+# Provisions (or reconciles) the ReadWriteMany PVC that `benchmark
+# --in-cluster --parallel-shards N` needs for N > 1 -- every shard pod
+# mounts /shard-output concurrently, which plain GCE PD storage classes
+# (ReadWriteOnce only) cannot support. Two steps:
+#   1. A *targeted* `terraform apply -target=google_filestore_instance
+#      .shard_output -var enable_shard_output_rwx=true` against the lab's
+#      EXISTING workspace -- targeted so it never touches any other
+#      resource regardless of whether every -var this lab was originally
+#      `up`'d with is re-passed here (see infra/terraform/gcp/variables.tf's
+#      enable_shard_output_rwx doc comment). This is the one Terraform
+#      resource in that module that's opt-in rather than part of every
+#      lab's baseline `up` -- Filestore is real money (~$0.20/GB-month,
+#      billed hourly; BASIC_HDD's 1TB floor is still only a few cents/hour)
+#      that a lab never using more than 1 shard shouldn't pay for.
+#   2. Renders and applies manifests/k6-shard-job/echis-shard-output-pv.yaml
+#      (a static PV/PVC pointing at that Filestore instance's IP/share,
+#      via the core `nfs` volume plugin -- no CSI driver/cluster addon
+#      needed) so the PVC `cmd_benchmark_in_cluster` expects
+#      (shard_output_pvc(), default `echis-shard-output`) actually exists.
+#
+# Torn down automatically by `down`'s `terraform destroy` (same module,
+# same workspace) -- no unprovision command, no special-casing in cmd_down.
+cmd_provision_shard_storage() {
+  require_cloud
+  require_name
+  [[ "$CLOUD" == "gcp" ]] || die "provision-shard-storage is currently GCP-only (Filestore is a GCP-specific service); see manifests/k6-shard-job/README.md for the general ReadWriteMany requirement on other clouds"
+
+  local tf_bin
+  tf_bin="$(terraform_bin)"
+  need_command_unless_dry_run "$tf_bin"
+  local tf_dir
+  tf_dir="$(terraform_dir)"
+  [[ -d "$tf_dir" ]] || die "Terraform module not found: $tf_dir"
+
+  log "Provisioning RWX shard-output storage for $CLOUD lab '$NAME' (targeted Terraform apply -- no other resource in this lab is touched)"
+  run "$tf_bin" -chdir="$tf_dir" init
+  terraform_workspace_select "$tf_bin" "$tf_dir"
+
+  local apply_args=(
+    "apply" "-target=google_filestore_instance.shard_output"
+    "-var" "lab_name=$NAME"
+    "-var" "enable_shard_output_rwx=true"
+  )
+  if [[ -n "$SHARD_OUTPUT_CAPACITY_GB" ]]; then
+    apply_args+=("-var" "shard_output_capacity_gb=$SHARD_OUTPUT_CAPACITY_GB")
+  fi
+  if [[ "$AUTO_APPROVE" == true ]]; then
+    apply_args+=("-auto-approve")
+  fi
+  if ((${#TF_VARS[@]})); then
+    apply_args+=("${TF_VARS[@]}")
+  fi
+
+  local dir
+  dir="$(state_dir)"
+  mkdir -p "$dir"
+  terraform_apply_reusing_existing "$tf_bin" "$tf_dir" "$dir/terraform-apply-shard-storage.log" "${apply_args[@]}"
+  write_terraform_outputs "$tf_bin" "$tf_dir" "$dir"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would read the Filestore IP/share name from Terraform output and apply manifests/k6-shard-job/echis-shard-output-pv.yaml"
+    return 0
+  fi
+
+  local filestore_ip filestore_share capacity_gi
+  filestore_ip="$("$tf_bin" -chdir="$tf_dir" output -raw shard_output_filestore_ip)"
+  filestore_share="$("$tf_bin" -chdir="$tf_dir" output -raw shard_output_filestore_share_name)"
+  [[ -n "$filestore_ip" && -n "$filestore_share" ]] ||
+    die "Terraform applied but shard_output_filestore_ip/shard_output_filestore_share_name are empty -- enable_shard_output_rwx may not have taken effect"
+  capacity_gi="${SHARD_OUTPUT_CAPACITY_GB:-1024}"
+
+  # Persist enable_shard_output_rwx=true for THIS lab so a later plain `up`
+  # re-run (e.g. to pick up an unrelated infra/terraform/gcp/*.tf change)
+  # doesn't silently destroy the Filestore instance just provisioned above.
+  # The apply that created it is deliberately *targeted*
+  # (-target=google_filestore_instance.shard_output, see this function's
+  # doc comment) and never writes the variable anywhere Terraform would
+  # remember it on its own -- variables are not part of state, only
+  # resources are. Without this file, `enable_shard_output_rwx` reverts to
+  # its `default = false` (infra/terraform/gcp/variables.tf) on the next
+  # untargeted `apply`, and Terraform reads that as "this lab no longer
+  # wants this resource" and tears it down. Root-caused live: an `up`
+  # re-run (for an unrelated Cloud SQL Query Insights change) destroyed a
+  # previously-working shard-output Filestore instance mid-benchmark,
+  # stranding all 5 shard pods in Init forever on an NFS mount to an IP
+  # that no longer resolved to anything. `cmd_up` below loads this file via
+  # -var-file when present, ahead of any operator-supplied $TF_VARS so an
+  # explicit `--var enable_shard_output_rwx=false` can still override it.
+  cat > "$dir/shard-storage.auto.tfvars" <<EOF
+enable_shard_output_rwx = true
+shard_output_capacity_gb = $capacity_gi
+EOF
+
+  local pv_template="$ROOT_DIR/manifests/k6-shard-job/echis-shard-output-pv.yaml"
+  [[ -f "$pv_template" ]] || die "PV/PVC manifest not found: $pv_template"
+  local rendered="$dir/echis-shard-output-pv.rendered.yaml"
+  render_job_manifest "$pv_template" "$rendered" \
+    "<FILESTORE_IP>" "$filestore_ip" \
+    "<FILESTORE_SHARE_NAME>" "$filestore_share" \
+    "<SHARD_OUTPUT_CAPACITY_GI>" "$capacity_gi" \
+    "<SHARD_OUTPUT_PVC>" "$(shard_output_pvc)"
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  need_command_unless_dry_run "$kbin"
+  # spec.persistentVolumeSource is immutable on a PV once created -- if this
+  # lab's Filestore instance was ever destroyed and recreated (e.g. by a
+  # `down`+`up`, or by the enable_shard_output_rwx footgun this function's
+  # doc comment now guards against), the new instance gets a NEW IP and a
+  # plain re-apply of the OLD PV object fails outright ("Forbidden:
+  # spec.persistentvolumesource is immutable after creation"). Delete
+  # PVC-then-PV first (PVC before PV: the PV's pv-protection finalizer
+  # otherwise blocks on the still-bound claim) so the apply below always
+  # creates a fresh pair bound to the current Filestore IP. Safe to run even
+  # when nothing changed -- ignore-not-found makes this a no-op on a first
+  # provision, and PV/PVC recreation is invisible to callers since nothing
+  # should be actively mounting shard-output between benchmark runs.
+  run "$kbin" delete pvc "$(shard_output_pvc)" -n fhir --ignore-not-found
+  run "$kbin" delete pv echis-shard-output-pv --ignore-not-found
+  log "Applying $(shard_output_pvc) PV/PVC (Filestore $filestore_ip:/$filestore_share)"
+  run "$kbin" apply -f "$rendered"
+
+  log "RWX shard storage ready. 'benchmark --in-cluster --parallel-shards N' with N > 1 will now work; torn down automatically by 'down'."
+}
+
+# `kubectl wait --for=condition=complete` only ever fires for the Complete
+# condition -- it never returns for a Job that instead reaches the Failed
+# condition (e.g. more than maxFailedIndexes shards breached their k6
+# thresholds, per the manifest's own backoffLimitPerIndex/maxFailedIndexes
+# comment), so it hangs until the full --timeout instead of surfacing the
+# already-final result. Root-caused live: a 5-shard run whose Job had been
+# sitting Failed for 20+ minutes while `scripts/lab`/the Lab Control UI
+# kept waiting, on course for the full 7200s timeout, before anyone
+# noticed. Runs two `kubectl wait`s in parallel (one per condition) and
+# returns as soon as either fires, killing the other -- so a genuinely
+# failed run is reported (and this function dies) within moments of
+# Kubernetes marking it Failed, same as it already does for Complete.
+wait_for_shard_job() {
+  local kbin="$1" job_name="$2" timeout="$3"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run: would wait for job/$job_name to reach Complete or Failed (timeout ${timeout})"
+    return 0
+  fi
+
+  "$kbin" wait --for=condition=complete "job/$job_name" -n fhir --timeout="$timeout" &
+  local complete_pid=$!
+  "$kbin" wait --for=condition=failed "job/$job_name" -n fhir --timeout="$timeout" &
+  local failed_pid=$!
+
+  # Whichever condition the Job actually reaches first returns here; the
+  # other wait is still running against the same (now resolved) Job and
+  # gets cleaned up below rather than left to its own full timeout.
+  wait -n "$complete_pid" "$failed_pid" || true
+  kill "$complete_pid" "$failed_pid" 2>/dev/null || true
+  wait "$complete_pid" "$failed_pid" 2>/dev/null || true
+
+  local failed_status
+  failed_status="$("$kbin" get "job/$job_name" -n fhir \
+    -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+  if [[ "$failed_status" == "True" ]]; then
+    die "job/$job_name reached the Failed condition (more shards breached their k6 thresholds/errored than maxFailedIndexes tolerates) -- see 'kubectl describe job/$job_name -n fhir' and each failed shard's own logs"
+  fi
+}
+
 # Renders manifests/k6-shard-job/echis-k6-shard-job.yaml, applies it, and
 # waits for completion -- distributing k6 load generation across
 # --parallel-shards Kubernetes Job pods instead of one local k6 process, per
@@ -1281,6 +2220,11 @@ record_echis_tier_progress() {
 # item mapping is static; retargeting requires updating both together. The
 # final merge step (scripts/merge_k6_shards.rb) is left as a follow-up, same
 # reason as cmd_seed_native_in_cluster.
+#
+# Each shard pod streams its own live metrics to Prometheus remote-write
+# (over cluster-DNS, no port-forward needed -- see the PROMETHEUS_REMOTE_WRITE_URL
+# comment below), so an in-cluster run shows up in Grafana's "k6 Prometheus"
+# dashboard exactly like a local-mode benchmark does.
 cmd_benchmark_in_cluster() {
   local shard_count="${PARALLEL_SHARDS:-1}"
   [[ "$shard_count" =~ ^[0-9]+$ && "$shard_count" -gt 0 ]] || die "--parallel-shards must be a positive integer"
@@ -1292,6 +2236,7 @@ cmd_benchmark_in_cluster() {
   dir="$(run_dir)"
   mkdir -p "$dir"
   local rendered="$dir/echis-k6-shard-job.rendered.yaml"
+  local job_name="echis-k6-shard-job"
   local configmap_name="echis-k6-shard-job-scripts"
   local pvc_name
   pvc_name="$(shard_output_pvc)"
@@ -1301,31 +2246,177 @@ cmd_benchmark_in_cluster() {
     die "K6_SCRIPT is set to '$K6_SCRIPT' but --in-cluster always targets $k6_script (the manifest's ConfigMap items are static, per manifests/k6-shard-job/README.md's sharding strategy); unset K6_SCRIPT, or retarget both the manifest and this command together"
   fi
 
+  # Unlike ensure_local_prometheus_remote_write (local-mode benchmarks),
+  # this needs no port-forward at all: each shard pod already runs inside
+  # the cluster, so it can reach Prometheus by its cluster-DNS Service name
+  # directly. Same PROMETHEUS_NAMESPACE/PROMETHEUS_SERVICE_NAME
+  # override/defaults as local mode; NOT gated on NO_PROMETHEUS_RW (v1 of
+  # this: --no-prometheus-remote-write is documented as a local-mode-only
+  # escape hatch for when a kubeconfig can't be resolved at all -- that
+  # doesn't apply here, since --in-cluster already hard-requires a working
+  # kubectl/kubeconfig to apply the Job manifest itself).
+  local prom_ns="${PROMETHEUS_NAMESPACE:-monitoring}"
+  local prom_svc="${PROMETHEUS_SERVICE_NAME:-prometheus-kube-prometheus-prometheus}"
+  local prometheus_rw_url="http://${prom_svc}.${prom_ns}.svc.cluster.local:9090/api/v1/write"
+  log "Streaming live k6 metrics from each in-cluster shard pod to Prometheus remote-write at $prometheus_rw_url"
+
+  # Tolerates up to ~30% of shards failing (e.g. a genuine k6 threshold
+  # breach under heavy load -- expected at stress scale) before the whole
+  # Job is marked Failed, rather than one bad shard discarding every other
+  # shard's already-complete, valid results (see the manifest's own
+  # backoffLimitPerIndex/maxFailedIndexes comment for the root-caused
+  # incident this fixes). Always at least 1 so a lone shard failing doesn't
+  # nuke a --parallel-shards 1 run's only result either.
+  local max_failed_shards=$(((shard_count * 3 + 9) / 10))
+  ((max_failed_shards >= 1)) || max_failed_shards=1
+
+  # --households of the seeded eCHIS dataset; > 0 adds the echis workload's
+  # sync-engine operations against it (benchmarks/k6/lib/fhir_benchmark.js).
+  local seeded_households="${ECHIS_SEEDED_HOUSEHOLDS:-0}"
+  [[ "$seeded_households" =~ ^[0-9]+$ ]] || die "ECHIS_SEEDED_HOUSEHOLDS must be a non-negative integer"
+
   log "Rendering $manifest_template for $shard_count shard(s)"
   render_job_manifest "$manifest_template" "$rendered" \
     "<SHARD_COUNT>" "$shard_count" \
     "<FHIR_BASE_URL>" "$FHIR_BASE_URL" \
     "<K6_SCRIPTS_CONFIGMAP>" "$configmap_name" \
-    "<SHARD_OUTPUT_PVC>" "$pvc_name"
+    "<SHARD_OUTPUT_PVC>" "$pvc_name" \
+    "<PROMETHEUS_REMOTE_WRITE_URL>" "$prometheus_rw_url" \
+    "<MAX_FAILED_SHARDS>" "$max_failed_shards" \
+    "<ECHIS_SEEDED_HOUSEHOLDS>" "$seeded_households"
 
   local kbin
   kbin="$(kubectl_bin)"
   need_command_unless_dry_run "$kbin"
 
+  # A single shard only needs ReadWriteOnce (only one pod ever mounts it,
+  # since parallelism=completions=1) -- Kubernetes will happily provision
+  # that from the default StorageClass on its own the first time the Job
+  # applies, no pre-provisioning needed. More than one shard needs
+  # ReadWriteMany (every shard pod mounts $pvc_name concurrently), which
+  # plain GCE PD storage classes cannot provide -- fail loudly here with a
+  # concrete next step, rather than letting shard pods hang Pending on an
+  # unschedulable multi-attach RWO volume until the 7200s `kubectl wait`
+  # below times out.
+  if [[ "$shard_count" -gt 1 && "$DRY_RUN" != true ]]; then
+    "$kbin" get pvc "$pvc_name" -n fhir >/dev/null 2>&1 ||
+      die "--parallel-shards $shard_count needs a ReadWriteMany PVC named '$pvc_name' in namespace fhir, which doesn't exist yet -- run 'scripts/lab provision-shard-storage --cloud $CLOUD --name $NAME --var project_id=<id>' first (manifests/k6-shard-job/README.md)"
+  fi
+
   log "Creating/updating ConfigMap $configmap_name from $k6_script"
   run bash -c "set -euo pipefail; \"$kbin\" create configmap \"$configmap_name\" --from-file=echis_load_100.js=\"$k6_script\" --from-file=fhir_benchmark.js=\"$ROOT_DIR/benchmarks/k6/lib/fhir_benchmark.js\" -n fhir --dry-run=client -o yaml | \"$kbin\" apply -f -"
+
+  # The Job name is always the fixed 'echis-k6-shard-job' (never
+  # per-run/label-suffixed), and a Kubernetes Job's pod template is
+  # immutable once created -- so a PRIOR run's Job (whether it Completed,
+  # Failed, or is still lingering after being abandoned) must be deleted
+  # before this run's `apply`, not just re-applied over. Root-caused live:
+  # re-applying an identical rendered manifest onto an already-Failed Job
+  # from an earlier run is a silent no-op ("job.batch/... unchanged", zero
+  # new pods created), and the immediately-following wait then reports
+  # that STALE Job's already-terminal Failed condition -- making a brand
+  # new benchmark trigger fail instantly with no new shards ever run.
+  # --ignore-not-found so the normal case (no prior Job) is a no-op here.
+  log "Deleting any prior $job_name Job so this run starts fresh"
+  run "$kbin" delete job "$job_name" -n fhir --ignore-not-found
 
   log "Applying rendered k6 shard Job: $rendered"
   run "$kbin" apply -f "$rendered"
 
-  log "Waiting for k6 shard Job to complete ($shard_count shard(s))"
-  run "$kbin" wait --for=condition=complete job/echis-k6-shard-job -n fhir --timeout=7200s
+  log "Waiting for k6 shard Job to finish ($shard_count shard(s))"
+  wait_for_shard_job "$kbin" "$job_name" "7200s"
 
   log "Job complete. Shard output lives on PVC $pvc_name; merge with:"
   log "  ruby scripts/merge_k6_shards.rb --shard-dir <path into PVC $pvc_name> --shard-count $shard_count --output $dir/k6-fhir-summary.json"
 }
 
+# Makes "live k6 metrics in Grafana" the default behavior of `scripts/lab
+# benchmark`, regardless of which caller triggers it (direct CLI or the
+# Lab Control UI) -- not something that only works when the invocation
+# happens to also set K6_PROMETHEUS_RW_SERVER_URL by hand. Never called
+# when that env var is already set (an explicit value always wins) or
+# --no-prometheus-remote-write/NO_PROMETHEUS_RW is set.
+#
+# Starts a localhost-only `kubectl port-forward` into Prometheus's remote
+# write endpoint, on an OS-chosen ephemeral local port (":9090", not a
+# fixed one) so this never collides with an already-running
+# expose-prometheus port-forward (which defaults to a fixed 9090) or
+# anything else already bound to 9090. No firewall rule is opened -- this
+# is purely local, for the k6 process running alongside `scripts/lab`
+# itself to reach.
+#
+# Sets K6_PROMETHEUS_RW_SERVER_URL (exported), PROMETHEUS_RW_PID_FILE, and
+# PROMETHEUS_RW_WATCHDOG_PID_FILE on success (all empty otherwise) --
+# cmd_benchmark's own cleanup reads the CURRENT pid from
+# PROMETHEUS_RW_PID_FILE (not a variable captured once here) since a
+# reconnect can change it, and stops the watchdog via
+# PROMETHEUS_RW_WATCHDOG_PID_FILE so it doesn't outlive this run. Never
+# dies: cmd_benchmark doesn't require --cloud/--name (only FHIR_BASE_URL),
+# so a resolvable kubeconfig is often simply unavailable, and a
+# missing/not-yet-installed monitoring stack must never block a benchmark
+# run -- this just falls back to running without live metrics, same as
+# before this existed.
+ensure_local_prometheus_remote_write() {
+  PROMETHEUS_RW_PID_FILE=""
+  PROMETHEUS_RW_WATCHDOG_PID_FILE=""
+
+  local kbin
+  kbin="$(kubectl_bin)"
+  command -v "$kbin" >/dev/null 2>&1 || { log "kubectl not found; continuing without live k6 metrics in Grafana"; return 0; }
+
+  local kubeconfig_file
+  kubeconfig_file="$(resolve_kubeconfig_file)"
+  if [[ -z "$kubeconfig_file" || ! -f "$kubeconfig_file" ]]; then
+    log "No kubeconfig resolved (set KUBECONFIG, LAB_KUBECONFIG, or pass --cloud/--name); continuing without live k6 metrics in Grafana"
+    return 0
+  fi
+
+  local ns="${PROMETHEUS_NAMESPACE:-monitoring}"
+  local svc="${PROMETHEUS_SERVICE_NAME:-prometheus-kube-prometheus-prometheus}"
+
+  local dir
+  dir="$(run_dir)"
+  mkdir -p "$dir"
+  local pf_log="$dir/prometheus-remote-write-portforward.log"
+
+  KUBECONFIG="$kubeconfig_file" nohup "$kbin" -n "$ns" port-forward "svc/$svc" :9090 >"$pf_log" 2>&1 &
+  local pf_pid=$!
+  disown
+  sleep 2
+  if ! kill -0 "$pf_pid" 2>/dev/null; then
+    log "Could not reach Prometheus ($ns/$svc) for live k6 metrics; continuing without them -- see $pf_log"
+    return 0
+  fi
+
+  local local_port
+  local_port="$(grep -m1 -oE 'Forwarding from 127\.0\.0\.1:[0-9]+' "$pf_log" | cut -d: -f2)"
+  if [[ -z "$local_port" ]]; then
+    log "Could not determine local port for the Prometheus port-forward; continuing without live k6 metrics -- see $pf_log"
+    kill "$pf_pid" 2>/dev/null || true
+    return 0
+  fi
+
+  export K6_PROMETHEUS_RW_SERVER_URL="http://127.0.0.1:${local_port}/api/v1/write"
+  log "Streaming live k6 metrics to Prometheus remote-write at $K6_PROMETHEUS_RW_SERVER_URL (local only, no firewall rule opened)"
+
+  # Reconnects on this SAME local_port if the tunnel drops mid-run (see
+  # start_portforward_watchdog's doc comment) -- K6_PROMETHEUS_RW_SERVER_URL
+  # above is resolved once and never re-read by k6 after it starts, so the
+  # reconnect target must stay on the exact port k6 already has.
+  PROMETHEUS_RW_PID_FILE="$dir/prometheus-remote-write-portforward.pid"
+  PROMETHEUS_RW_WATCHDOG_PID_FILE="$dir/prometheus-remote-write-watchdog.pid"
+  printf '%s' "$pf_pid" >"$PROMETHEUS_RW_PID_FILE"
+  start_portforward_watchdog "$kbin" "$kubeconfig_file" "127.0.0.1" "$ns" "$svc" "$local_port" 9090 \
+    "$pf_log" "$PROMETHEUS_RW_PID_FILE" "$PROMETHEUS_RW_WATCHDOG_PID_FILE"
+}
+
 cmd_benchmark() {
+  # Always defined by the time they're checked after the k6 run below,
+  # even when ensure_local_prometheus_remote_write is never called (set -u
+  # would otherwise error on referencing them unset in that case).
+  PROMETHEUS_RW_PID_FILE=""
+  PROMETHEUS_RW_WATCHDOG_PID_FILE=""
+
   require_profile
   if [[ -n "$ECHIS_TIER" ]]; then
     require_echis_tier_sequence "$ECHIS_TIER"
@@ -1386,7 +2477,24 @@ cmd_benchmark() {
   # target Prometheus to have enableRemoteWriteReceiver on (see
   # ansible/group_vars/lab.yml's enable_prometheus_remote_write, default
   # true) -- lets this run's load/latency/failure-rate be watched live in
-  # Grafana instead of only from the post-run k6 JSON summary.
+  # Grafana instead of only from the post-run k6 JSON summary. An operator
+  # (or the Lab Control UI) can still set K6_PROMETHEUS_RW_SERVER_URL
+  # explicitly beforehand to point at a different Prometheus -- that value
+  # always wins and skips the auto-detection below entirely.
+  if [[ -z "${K6_PROMETHEUS_RW_SERVER_URL:-}" && "$DRY_RUN" != true && "$NO_PROMETHEUS_RW" != true ]]; then
+    ensure_local_prometheus_remote_write
+    if [[ -n "$PROMETHEUS_RW_PID_FILE" ]]; then
+      # EXIT (not RETURN): a failing k6 run (e.g. threshold breach) must
+      # still stop the port-forward and its watchdog even though `set -e`
+      # ends the whole script right after the `run` call below, before
+      # reaching the explicit cleanup further down. kill_portforward_pid_file
+      # re-reads PROMETHEUS_RW_PID_FILE at trap time (not a PID captured
+      # now), so this still stops the right process even if the watchdog
+      # has since reconnected it under a new PID.
+      trap 'kill_portforward_pid_file "$PROMETHEUS_RW_PID_FILE"; stop_portforward_watchdog "$PROMETHEUS_RW_WATCHDOG_PID_FILE"' EXIT
+    fi
+  fi
+
   local k6_out_args=(--out "json=$dir/k6-raw.jsonl")
   if [[ -n "${K6_PROMETHEUS_RW_SERVER_URL:-}" ]]; then
     k6_out_args+=(--out experimental-prometheus-rw)
@@ -1400,6 +2508,12 @@ cmd_benchmark() {
     "${k6_out_args[@]}" \
     --summary-export "$dir/k6-summary.json" \
     "$script"
+
+  if [[ -n "$PROMETHEUS_RW_PID_FILE" ]]; then
+    kill_portforward_pid_file "$PROMETHEUS_RW_PID_FILE"
+    stop_portforward_watchdog "$PROMETHEUS_RW_WATCHDOG_PID_FILE"
+    trap - EXIT
+  fi
 
   if [[ -n "$ECHIS_TIER" ]]; then
     record_echis_tier_progress "$ECHIS_TIER"
@@ -1489,6 +2603,23 @@ confirm_destroy() {
 public_exposure_state_file() {
   local slug="$1"
   printf '%s/%s-public-exposure.env' "$(state_dir)" "$slug"
+}
+
+# Live PID tracking for expose_public_service's port-forward, kept
+# separate from public_exposure_state_file's FIREWALL_RULE/PORT/
+# PROJECT_ID/URL fields (which never change once written) because
+# start_portforward_watchdog rewrites this file on every reconnect --
+# state_file's own PORT_FORWARD_PID= field is written once at expose-*
+# time and is informational only, not to be relied on for liveness after
+# this. cmd_exposures/unexpose_public_service read PID liveness from here.
+public_portforward_pid_file() {
+  local slug="$1"
+  printf '%s/%s-public-portforward.pid' "$(state_dir)" "$slug"
+}
+
+public_portforward_watchdog_pid_file() {
+  local slug="$1"
+  printf '%s/%s-public-portforward-watchdog.pid' "$(state_dir)" "$slug"
 }
 
 # Best-effort public-IP self-lookup of *this host* (where scripts/lab is
@@ -1591,10 +2722,18 @@ expose_public_service() {
       --description="scripts/lab expose-$state_slug: public access to $display_name ($svc) in lab '$NAME'. Run 'scripts/lab unexpose-$state_slug' or 'scripts/lab down' to remove."
   fi
 
-  local state_file
+  local state_file pid_file watchdog_pid_file
   state_file="$(public_exposure_state_file "$state_slug")"
+  pid_file="$(public_portforward_pid_file "$state_slug")"
+  watchdog_pid_file="$(public_portforward_watchdog_pid_file "$state_slug")"
+
+  # Stop any previous watchdog FIRST -- otherwise it can "helpfully"
+  # resurrect the port-forward we're about to kill the instant we kill it,
+  # racing the fresh one started below.
+  stop_portforward_watchdog "$watchdog_pid_file"
   local old_pid
-  old_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
+  old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$old_pid" ]] || old_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
   if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
     log "Stopping previous exposed port-forward (pid $old_pid)"
     run kill "$old_pid"
@@ -1613,6 +2752,13 @@ expose_public_service() {
   disown
   sleep 2
   kill -0 "$pf_pid" 2>/dev/null || die "port-forward failed to start; see $pf_log"
+  printf '%s' "$pf_pid" >"$pid_file"
+
+  # Reconnects on drop -- kubectl port-forward has no built-in reconnect,
+  # and this is meant to stay up for hours (see start_portforward_watchdog's
+  # doc comment for why/how this was confirmed live, not theoretical).
+  start_portforward_watchdog "$kbin" "" "0.0.0.0" "$ns" "$svc" "$port" "$target_port" \
+    "$pf_log" "$pid_file" "$watchdog_pid_file"
 
   # Computed before writing the state file (not just for the log line below)
   # so `exposures` (a read-only status query the Lab Control UI polls,
@@ -1626,12 +2772,15 @@ expose_public_service() {
   {
     printf 'FIREWALL_RULE=%s\n' "$firewall_rule"
     printf 'PORT=%s\n' "$port"
+    # Informational only (the pid at expose-* time) -- a reconnect
+    # rewrites $pid_file, not this. Liveness checks (cmd_exposures,
+    # unexpose_public_service) read $pid_file, never this field.
     printf 'PORT_FORWARD_PID=%s\n' "$pf_pid"
     printf 'PROJECT_ID=%s\n' "$project_id"
     printf 'URL=%s\n' "$url"
   } >"$state_file"
 
-  log "$display_name is reachable at $url (firewall rule '$firewall_rule', port-forward pid $pf_pid)"
+  log "$display_name is reachable at $url (firewall rule '$firewall_rule', port-forward pid $pf_pid, auto-reconnect watchdog on)"
   log "Run 'scripts/lab unexpose-$state_slug --cloud gcp --name $NAME --var project_id=$project_id' to close this early, or 'down' cleans it up automatically."
 }
 
@@ -1651,15 +2800,22 @@ unexpose_public_service() {
     return 0
   fi
 
-  local state_file
+  local state_file pid_file watchdog_pid_file
   state_file="$(public_exposure_state_file "$state_slug")"
+  pid_file="$(public_portforward_pid_file "$state_slug")"
+  watchdog_pid_file="$(public_portforward_watchdog_pid_file "$state_slug")"
+
+  # Stop the watchdog BEFORE killing the port-forward it's tracking --
+  # otherwise it just reconnects the thing we're trying to close.
+  stop_portforward_watchdog "$watchdog_pid_file"
 
   local firewall_rule="" pf_pid="" project_id=""
   if [[ -f "$state_file" ]]; then
     firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
-    pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
     project_id="$(grep -m1 '^PROJECT_ID=' "$state_file" | cut -d= -f2)" || true
   fi
+  pf_pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$pf_pid" ]] || pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" 2>/dev/null | cut -d= -f2)" || true
   [[ -n "$project_id" ]] || project_id="$(tf_var_get project_id)" || true
   [[ -n "$firewall_rule" ]] || firewall_rule="allow-${rule_prefix}-${PORT:-$default_external_port}-${NAME}"
 
@@ -1677,7 +2833,7 @@ unexpose_public_service() {
     run gcloud compute firewall-rules delete "$firewall_rule" "${project_flag[@]}" --quiet
   fi
 
-  rm -f "$state_file"
+  rm -f "$state_file" "$pid_file"
 }
 
 cmd_expose_fhir() {
@@ -1698,13 +2854,19 @@ cmd_unexpose_prometheus() {
 
 cmd_expose_grafana() {
   # target_port 80 is the Grafana Service's real port; default_external_port
-  # 3000 (Grafana's own conventional UI port) is what --port defaults to
-  # locally, since binding the literal privileged port 80 needs root.
-  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana" "" 3000
+  # 3001 is what --port defaults to locally, since binding the literal
+  # privileged port 80 needs root. Deliberately not Grafana's own
+  # conventional 3000: when scripts/lab runs inside the Lab Control UI's
+  # `app` container (network_mode: host, see lab-control-ui/docker-compose.yml),
+  # the UI backend itself already owns host port 3000 (LAB_UI_PORT) --
+  # `kubectl port-forward --address 0.0.0.0 ... 3000:80` would then fail
+  # with "address already in use" (found live running expose-grafana
+  # through the UI).
+  expose_public_service grafana grafana 80 "${GRAFANA_NAMESPACE:-monitoring}" "${GRAFANA_SERVICE_NAME:-prometheus-grafana}" "Grafana" "" 3001
 }
 
 cmd_unexpose_grafana() {
-  unexpose_public_service grafana grafana 3000
+  unexpose_public_service grafana grafana 3001
 }
 
 # Read-only status query for the Lab Control UI's "once exposed, show a
@@ -1738,17 +2900,24 @@ cmd_exposures() {
 
   for i in "${!ids[@]}"; do
     local id="${ids[$i]}" label="${labels[$i]}"
-    local state_file url="" port="" firewall_rule="" pf_pid="" exposed=false
+    local state_file pid_file url="" port="" firewall_rule="" pf_pid="" exposed=false
     state_file="$(public_exposure_state_file "$id")"
+    pid_file="$(public_portforward_pid_file "$id")"
     if [[ -f "$state_file" ]]; then
       url="$(grep -m1 '^URL=' "$state_file" | cut -d= -f2-)" || true
       port="$(grep -m1 '^PORT=' "$state_file" | cut -d= -f2)" || true
       firewall_rule="$(grep -m1 '^FIREWALL_RULE=' "$state_file" | cut -d= -f2)" || true
-      pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
-      # A state file with a dead port-forward pid is stale (e.g. the host
-      # rebooted without an unexpose-* ever running) -- report not-exposed
-      # rather than showing a link that won't actually connect. Cleanup of
-      # the stale firewall rule/file itself is unexpose-*'s/down's job, not
+      # $pid_file (kept live by the auto-reconnect watchdog, see
+      # start_portforward_watchdog) is the liveness source of truth, not
+      # state_file's own PORT_FORWARD_PID= field -- that's only the pid at
+      # expose-* time and goes stale the moment a reconnect happens.
+      # Falls back to it for a state file written before this existed.
+      pf_pid="$(cat "$pid_file" 2>/dev/null || true)"
+      [[ -n "$pf_pid" ]] || pf_pid="$(grep -m1 '^PORT_FORWARD_PID=' "$state_file" | cut -d= -f2)" || true
+      # A dead port-forward pid means stale (e.g. the host rebooted
+      # without an unexpose-* ever running) -- report not-exposed rather
+      # than showing a link that won't actually connect. Cleanup of the
+      # stale firewall rule/file itself is unexpose-*'s/down's job, not
       # this read-only command's.
       if [[ -n "$pf_pid" ]] && kill -0 "$pf_pid" 2>/dev/null; then
         exposed=true
@@ -1779,11 +2948,25 @@ cmd_exposures() {
       esc_id="${id//\\/\\\\}"; esc_id="${esc_id//\"/\\\"}"
       esc_label="${label//\\/\\\\}"; esc_label="${esc_label//\"/\\\"}"
       printf '{"id":"%s","label":"%s","exposed":%s' "$esc_id" "$esc_label" "$exposed"
-      if [[ "$exposed" == true ]]; then
-        esc_url="${url//\\/\\\\}"; esc_url="${esc_url//\"/\\\"}"
+      # firewallRule/port describe the STATE FILE (does an exposure exist
+      # to potentially recover?) and are emitted whenever one is present,
+      # regardless of exposed -- this is the one signal that distinguishes
+      # "never exposed" from "was exposed, tunnel just isn't alive right
+      # now" (e.g. a container restart killed the port-forward but the GCP
+      # firewall rule survived), which callers need even when exposed is
+      # false (e.g. the Lab Control UI's boot-time exposure-recovery hook,
+      # exposureRecovery.ts). url is kept conditional on exposed == true:
+      # showing a URL that won't currently connect would be actively
+      # misleading, unlike port/firewallRule which are just facts about
+      # what's on disk.
+      if [[ -n "$firewall_rule" ]]; then
         esc_rule="${firewall_rule//\\/\\\\}"; esc_rule="${esc_rule//\"/\\\"}"
         esc_port="${port//\\/\\\\}"; esc_port="${esc_port//\"/\\\"}"
-        printf ',"url":"%s","port":"%s","firewallRule":"%s"' "$esc_url" "$esc_port" "$esc_rule"
+        printf ',"port":"%s","firewallRule":"%s"' "$esc_port" "$esc_rule"
+      fi
+      if [[ "$exposed" == true ]]; then
+        esc_url="${url//\\/\\\\}"; esc_url="${esc_url//\"/\\\"}"
+        printf ',"url":"%s"' "$esc_url"
       fi
       if [[ "$id" == grafana ]]; then
         printf ',"credentialsAvailable":%s' "$creds_available"
@@ -1807,6 +2990,9 @@ cmd_exposures() {
             printf '%-12s login: %s\n' "" "$creds_reason"
           fi
         fi
+      elif [[ -n "$firewall_rule" ]]; then
+        printf '%-12s not exposed (firewall rule %s is still open, but the tunnel is down -- re-run expose-%s to restore it)\n' \
+          "$label" "$firewall_rule" "$id"
       else
         printf '%-12s not exposed\n' "$label"
       fi
@@ -1820,13 +3006,6 @@ cmd_down() {
   require_cloud
   require_name
 
-  if [[ "$CLOUD" == "gcp" ]]; then
-    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus'/'expose-grafana' before destroying infrastructure"
-    cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
-    cmd_unexpose_prometheus || log "WARNING: could not fully clean up public Prometheus exposure (see above); continuing with destroy anyway"
-    cmd_unexpose_grafana || log "WARNING: could not fully clean up public Grafana exposure (see above); continuing with destroy anyway"
-  fi
-
   local tf_bin
   tf_bin="$(terraform_bin)"
   need_command_unless_dry_run "$tf_bin"
@@ -1839,6 +3018,16 @@ cmd_down() {
   run "$tf_bin" -chdir="$tf_dir" init
   terraform_workspace_select "$tf_bin" "$tf_dir"
   confirm_destroy
+
+  # Only after confirmation: these clean-ups can't be undone, and a cancelled
+  # or mistyped confirmation must leave the lab fully usable.
+  if [[ "$CLOUD" == "gcp" ]]; then
+    log "Cleaning up any public exposure from 'expose-fhir'/'expose-prometheus'/'expose-grafana' before destroying infrastructure"
+    cmd_unexpose_fhir || log "WARNING: could not fully clean up public FHIR exposure (see above); continuing with destroy anyway"
+    cmd_unexpose_prometheus || log "WARNING: could not fully clean up public Prometheus exposure (see above); continuing with destroy anyway"
+    cmd_unexpose_grafana || log "WARNING: could not fully clean up public Grafana exposure (see above); continuing with destroy anyway"
+    teardown_cloud_sql_psc_endpoint || log "WARNING: could not fully clean up this lab's Cloud SQL PSC consumer endpoint (see above); continuing with destroy anyway"
+  fi
 
   local destroy_args=("destroy" "-var" "lab_name=$NAME")
   if [[ "$YES" == true || "$AUTO_APPROVE" == true ]]; then
@@ -1901,11 +3090,34 @@ fi
 
 parse_args "$@"
 
+# Every kubectl this script shells out to must reach THIS lab's cluster.
+# Nine commands/helpers call kubectl without passing --kubeconfig
+# (cmd_benchmark_in_cluster, cmd_exposures, cmd_pause_autoscaling,
+# cmd_resume_autoscaling, cmd_provision_shard_storage,
+# cmd_seed_native_in_cluster, collect_prerequisite_checks,
+# expose_public_service, wait_for_shard_job), so they silently depended on
+# the caller's environment. With nothing set, kubectl falls back to
+# http://localhost:8080 -- and in the Lab Control UI's host-networked
+# container that is an expose-fhir port-forward to HAPI. Root-caused live
+# (hapi-lab-t4 provision-shard-storage, 2026-09-12): `kubectl delete pvc`
+# died on "the server could not find the requested resource", which was
+# HAPI FHIR answering Kubernetes' API discovery with a 404. Nothing was
+# deleted only because discovery failed first; had :8080 been a real API
+# (e.g. a kubectl proxy to another lab) those deletes would have hit the
+# wrong cluster. Resolved once here so every call site is covered. Only
+# exported when the file exists, so `up` (which creates it) and --dry-run
+# invocations behave exactly as before.
+lab_kubeconfig="$(resolve_kubeconfig_file)"
+if [[ -n "$lab_kubeconfig" && -f "$lab_kubeconfig" ]]; then
+  export KUBECONFIG="$lab_kubeconfig"
+fi
+
 case "$COMMAND" in
   up) cmd_up ;;
   doctor) cmd_doctor ;;
   deploy) cmd_deploy ;;
   seed) cmd_seed ;;
+  backup-db) cmd_backup_db ;;
   benchmark) cmd_benchmark ;;
   report) cmd_report ;;
   down) cmd_down ;;
@@ -1918,6 +3130,7 @@ case "$COMMAND" in
   expose-grafana) cmd_expose_grafana ;;
   unexpose-grafana) cmd_unexpose_grafana ;;
   exposures) cmd_exposures ;;
+  provision-shard-storage) cmd_provision_shard_storage ;;
   help) usage ;;
   *) die "unknown command: $COMMAND" ;;
 esac

@@ -49,9 +49,32 @@ fieldset {
   word-break: break-word;
 }
 
+.run-history-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.5rem 0 1rem;
+  font-size: 0.9em;
+}
+
+.action-group {
+  margin-bottom: 1.25rem;
+}
+
+.action-group-label {
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+  margin: 0 0 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
 .action-list {
   list-style: none;
   padding: 0;
+  margin: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
@@ -68,6 +91,72 @@ fieldset {
   opacity: 0.7;
   max-width: 12rem;
   text-align: center;
+}
+
+.benchmark-options {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85em;
+}
+
+.benchmark-shards {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.benchmark-shards input[type='number'] {
+  width: 4rem;
+}
+
+.benchmark-options .help-text {
+  max-width: 16rem;
+  text-align: center;
+}
+
+.run-duration {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* Still ticking -- the run hasn't ended yet. */
+.run-duration-live {
+  color: var(--warn);
+}
+
+/* Locked at the final elapsed time once the run ended. */
+.run-duration-final {
+  opacity: 0.75;
+}
+
+.results-panel-file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.results-panel-file summary {
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.results-panel-content {
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.results-panel-empty {
+  opacity: 0.7;
+  font-size: 0.9em;
 }
 
 .prerequisite-panel {
@@ -111,6 +200,12 @@ fieldset {
   padding: 0.75rem;
   border-radius: 6px;
   font-size: 0.85em;
+}
+
+.log-truncated-notice {
+  font-size: 0.8em;
+  opacity: 0.75;
+  margin: 0.25rem 0;
 }
 
 .error {

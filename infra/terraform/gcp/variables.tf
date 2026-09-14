@@ -124,3 +124,56 @@ variable "db_max_connections" {
   type        = number
   default     = 100
 }
+
+variable "enable_shard_output_rwx" {
+  description = <<-EOT
+    Provisions a Filestore instance (BASIC_HDD tier, the cheapest available --
+    ~$0.20/GB-month, billed hourly) to back a ReadWriteMany PersistentVolume
+    for `scripts/lab benchmark --in-cluster --parallel-shards N` with N > 1:
+    every shard pod mounts the same /shard-output concurrently, which plain
+    GCE PD storage classes (ReadWriteOnce only) cannot support. Opt-in
+    (default false) so a lab that never needs more than 1 shard doesn't pay
+    for storage it doesn't use. `scripts/lab provision-shard-storage`
+    (docs/lab-cli.md) sets this true via a *targeted* apply against an
+    already-`up` lab, rather than requiring a full `up` re-run. Because a
+    variable value isn't part of Terraform state (only resources are),
+    provision-shard-storage ALSO writes a per-lab
+    shard-storage.auto.tfvars (ansible/artifacts/lab/gcp/<name>/) so a
+    later plain `scripts/lab up` re-run -- e.g. to pick up an unrelated
+    change elsewhere in this module -- still passes true here instead of
+    silently reverting to this default and destroying the Filestore
+    instance out from under a lab that's actively using it. Torn down
+    automatically by `scripts/lab down`'s `terraform destroy` like every
+    other resource in this module -- no special-case cleanup needed.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "shard_output_capacity_gb" {
+  description = "Filestore BASIC_HDD capacity in GiB for the RWX shard-output volume (enable_shard_output_rwx). 1024 is BASIC_HDD's minimum; the shard output itself (JSON summaries) is tiny, so this is sized at the tier floor, not for actual usage."
+  type        = number
+  default     = 1024
+
+  validation {
+    condition     = var.shard_output_capacity_gb >= 1024
+    error_message = "shard_output_capacity_gb must be at least 1024 (BASIC_HDD's minimum)."
+  }
+}
+
+variable "enable_read_replica" {
+  description = "Provision a Cloud SQL read replica of the primary (same tier/edition/region). Opt-in and disabled by default -- capacity-enhancement-tracker Stage 5: the replica is provisioned here as infrastructure only; nothing routes queries to it yet, since the pinned hapi-fhir-jpaserver-starter image has no read/write datasource routing support (would require forking the pinned image, against this repo's guardrails)."
+  type        = bool
+  default     = false
+}
+
+variable "db_work_mem_kb" {
+  description = "Cloud SQL `work_mem` in kB. 0 (the default) leaves the flag unset, so PostgreSQL's own 4MB default applies. Measured warning before raising this: a global 32768 (32MB) on db-custom-2-7680 REGRESSED the 10-shard T3 `load` benchmark badly (271.4 -> 92.8 req/s, 0.05% -> 5.50% failures, 963 -> 5,630ms mean latency) -- work_mem is per sort/hash operation per connection, so a large global value multiplied across ~100 concurrent connections starved a 7.5GB instance. It also did NOT keep the dominant COUNT(DISTINCT res_id) sort in memory (2M rows needs far more), which was the reason for trying it. Raise only alongside a bigger db_sku, and re-benchmark."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = floor(var.db_work_mem_kb) == var.db_work_mem_kb && (var.db_work_mem_kb == 0 || var.db_work_mem_kb >= 64)
+    error_message = "db_work_mem_kb must be a whole number of kB: 0 (unset, use the PostgreSQL default) or at least 64 (PostgreSQL's own work_mem minimum). Cloud SQL rejects a decimal value such as 64.5."
+  }
+}

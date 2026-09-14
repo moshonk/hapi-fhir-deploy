@@ -83,10 +83,39 @@ export function createActionsRouter(deps: AppDeps): Router {
       confirmed?: unknown;
       overridePrerequisites?: unknown;
       targetRunId?: unknown;
+      inCluster?: unknown;
+      parallelShards?: unknown;
+      restoreFromBackup?: unknown;
+      backupDir?: unknown;
     };
     const confirmed = body.confirmed === true;
     const overridePrerequisites = body.overridePrerequisites === true;
     const targetRunId = typeof body.targetRunId === 'string' ? body.targetRunId : undefined;
+
+    // `benchmark`-only, ephemeral trigger-time options -- not a persisted
+    // ConfigField (see gcp.ts's 'benchmark' case doc comment). Validated
+    // here rather than left to the CLI's own argument parsing so a bad
+    // value is rejected before a run is ever created.
+    const inCluster = body.inCluster === true;
+    let parallelShards = 1;
+    if (inCluster && body.parallelShards !== undefined) {
+      const n = Number(body.parallelShards);
+      if (!Number.isInteger(n) || n < 1) {
+        res.status(400).json({ error: 'parallelShards must be a positive integer' });
+        return;
+      }
+      parallelShards = n;
+    }
+
+    // `seed`-only, ephemeral trigger-time options (gcp.ts's 'seed' case doc
+    // comment) -- same pattern as inCluster/parallelShards above. `backup-db`
+    // reuses just backupDir (as its destination rather than a restore source).
+    const restoreFromBackup = actionName === 'seed' && body.restoreFromBackup === true;
+    const backupDir = typeof body.backupDir === 'string' ? body.backupDir.trim() : '';
+    if (restoreFromBackup && !backupDir) {
+      res.status(400).json({ error: 'backupDir is required when restoreFromBackup is true' });
+      return;
+    }
 
     // FR-016: refuse a second concurrent trigger before anything else.
     const already = currentlyRunning(lab.id, actionName);
@@ -140,9 +169,20 @@ export function createActionsRouter(deps: AppDeps): Router {
       return;
     }
 
+    // Only threaded onto fieldValues for the action that reads them --
+    // harmless no-ops for every other action.
+    let fieldValues = lab.fields;
+    if (actionName === 'benchmark' && inCluster) {
+      fieldValues = { ...lab.fields, in_cluster: true, parallel_shards: parallelShards };
+    } else if (actionName === 'seed' && restoreFromBackup) {
+      fieldValues = { ...lab.fields, restore_from_backup: true, backup_dir: backupDir };
+    } else if (actionName === 'backup-db' && backupDir) {
+      fieldValues = { ...lab.fields, backup_dir: backupDir };
+    }
+
     let cmd;
     try {
-      cmd = buildCommand(provider, actionName, lab.fields, { cliRunLabel: cliRunLabelOverride });
+      cmd = buildCommand(provider, actionName, fieldValues, { cliRunLabel: cliRunLabelOverride });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
       return;

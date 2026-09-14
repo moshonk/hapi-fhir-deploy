@@ -1,6 +1,7 @@
 # Lab Control UI image: the Node backend (serving the built React frontend
 # statically) PLUS the full scripts/lab toolchain (Terraform, Helm, kubectl,
-# Ansible, Ruby, k6, Java, gcloud + gke-gcloud-auth-plugin). The container is
+# Ansible, Ruby, k6, Java, gcloud + gke-gcloud-auth-plugin, postgresql-client,
+# cloud-sql-proxy). The container is
 # the one spawning `scripts/lab` as a child process (research.md §1/§4), so
 # it needs every tool `scripts/lab doctor` checks for on its own PATH --
 # "always fire up the service" means the image is self-sufficient, not just
@@ -20,7 +21,18 @@
 #   - Helm v3.15.4                           -- matches docs/getting-started-benchmark-lab.md
 #   - kubectl v1.35.6                        -- matches the GCP default kubernetes_version
 #   - k6 2.2.0                               -- latest available on Grafana's Debian repo at pin time
+#   - cloud-sql-proxy v2.25.3                -- latest release at pin time (github.com/
+#     GoogleCloudPlatform/cloud-sql-proxy); lets backup-db/seed --restore-from-backup reach a
+#     private-IP-only Cloud SQL instance from outside the lab's own VPC (docs/lab-cli.md)
 #   - ansible-core 2.19.1 / kubernetes 36.0.3 -- matches ansible/requirements.txt exactly
+#   - postgresql-client-17                   -- PGDG apt repo. Major 17 (not bookworm's default
+#     15, and not "latest") because pg_dump/pg_restore MUST be >= the Cloud SQL server's major
+#     version: v15 can't dump a v16/v17 server at all, and a client NEWER than the server writes
+#     GUCs into the archive the server rejects (pg_dump 18 emits `SET transaction_timeout` ->
+#     "unrecognized configuration parameter" against v16, and pg_restore then exits non-zero).
+#     17 is the Constitution's max supported PostgreSQL target, so it covers both v16 and v17
+#     labs cleanly. Patch version is NOT pinned -- PGDG only retains the latest 17.x (same
+#     documented exception as gcloud below).
 #   - Ruby, OpenJDK 17                       -- Debian bookworm's own package versions (no
 #     upstream apt repo offers exact pins for these the way Terraform/k6 do)
 #   - gcloud CLI / gke-gcloud-auth-plugin    -- intentionally NOT version-pinned; Google's own
@@ -86,7 +98,28 @@ RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.35.6/bin/li
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client
 
-# --- Ruby, OpenJDK 17, Python (for Ansible), git (scripts/lab's repo-root detection) ---
+# --- Cloud SQL Auth Proxy (direct binary, pinned) ---
+RUN curl -fsSLo /usr/local/bin/cloud-sql-proxy \
+      "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.25.3/cloud-sql-proxy.linux.amd64" \
+    && chmod +x /usr/local/bin/cloud-sql-proxy \
+    && cloud-sql-proxy --version
+
+# --- postgresql-client-17 (PGDG apt repo) -- pg_dump/pg_restore for
+# backup-db / seed --restore-from-backup. Major 17 deliberately: it must be
+# >= the Cloud SQL server major version (16 or 17 per the Constitution) --
+# see the header note. bookworm's own postgresql-client is 15, which cannot
+# dump a v16 server at all. ---
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --dearmor -o /usr/share/keyrings/pgdg-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg-archive-keyring.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-17 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pg_dump --version
+
+# --- Ruby, OpenJDK 17, Python (for Ansible), git (scripts/lab's repo-root
+# detection) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ruby-full \
       openjdk-17-jre-headless \

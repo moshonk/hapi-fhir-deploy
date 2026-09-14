@@ -27,6 +27,9 @@ const FIELDS = {
   ttl_hours: 4,
   expose_source_ranges: '0.0.0.0/0',
   pause_replicas: 5,
+  shard_output_capacity_gb: 1024,
+  enable_pgbouncer: false,
+  pgbouncer_default_pool_size: 20,
   households: 33333,
   individuals_per_household: 3,
   echis_seed: 12345,
@@ -76,11 +79,145 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'db_disk_size_gb=256',
       '--var',
       'ttl_hours=4',
+        '--var',
+        'enable_read_replica=false',
+        '--var',
+        'db_work_mem_kb=0',
     ]);
   });
 
-  it('deploy', () => {
-    expect(run('deploy').argv).toEqual(['deploy', '--cloud', 'gcp', '--name', 'hapi-fhir-lab']);
+  it('deploy (enable_pgbouncer: false -> --extra-vars enable_pgbouncer=false, always explicit)', () => {
+    expect(run('deploy').argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=false',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+        '--extra-vars',
+        'hapi_max_replicas=',
+        '--extra-vars',
+        'hapi_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_limit=',
+        '--extra-vars',
+        'hapi_tomcat_max_threads=',
+        '--extra-vars',
+        'hapi_min_replicas=',
+    ]);
+  });
+
+  it('deploy (enable_pgbouncer: true, custom pool size)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, pgbouncer_default_pool_size: 25 }).argv).toEqual(
+      [
+        'deploy',
+        '--cloud',
+        'gcp',
+        '--name',
+        'hapi-fhir-lab',
+        '--extra-vars',
+        'enable_pgbouncer=true',
+        '--extra-vars',
+        'pgbouncer_default_pool_size=25',
+        '--extra-vars',
+        'hapi_max_replicas=',
+        '--extra-vars',
+        'hapi_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_request=',
+        '--extra-vars',
+        'pgbouncer_cpu_limit=',
+        '--extra-vars',
+        'hapi_tomcat_max_threads=',
+        '--extra-vars',
+        'hapi_min_replicas=',
+      ],
+    );
+  });
+
+  it('deploy (PgBouncer CPU request/limit overrides passed through)', () => {
+    expect(
+      run('deploy', { enable_pgbouncer: true, pgbouncer_cpu_request: '1000m', pgbouncer_cpu_limit: '1000m' }).argv,
+    ).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=1000m',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=1000m',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=',
+      '--extra-vars',
+      'hapi_min_replicas=',
+    ]);
+  });
+
+  it('deploy (HAPI Tomcat max threads override passed through)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, hapi_tomcat_max_threads: '40' }).argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=40',
+      '--extra-vars',
+      'hapi_min_replicas=',
+    ]);
+  });
+
+  it('deploy (HAPI min replicas override passed through)', () => {
+    expect(run('deploy', { enable_pgbouncer: true, hapi_min_replicas: '6' }).argv).toEqual([
+      'deploy',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--extra-vars',
+      'enable_pgbouncer=true',
+      '--extra-vars',
+      'pgbouncer_default_pool_size=20',
+      '--extra-vars',
+      'hapi_max_replicas=',
+      '--extra-vars',
+      'hapi_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_request=',
+      '--extra-vars',
+      'pgbouncer_cpu_limit=',
+      '--extra-vars',
+      'hapi_tomcat_max_threads=',
+      '--extra-vars',
+      'hapi_min_replicas=6',
+    ]);
   });
 
   it('expose-fhir (requires KUBECONFIG, same as pause/resume-autoscaling)', () => {
@@ -185,10 +322,31 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
   });
 
+  it('provision-shard-storage (requires KUBECONFIG for its kubectl-applied PV/PVC step, same as pause/resume-autoscaling)', () => {
+    const cmd = run('provision-shard-storage');
+    expect(cmd.argv).toEqual([
+      'provision-shard-storage',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--auto-approve',
+      '--var',
+      'project_id=my-project',
+      '--capacity-gb',
+      '1024',
+    ]);
+    expect(cmd.env).toEqual({ KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig' });
+  });
+
   it('seed', () => {
     const cmd = run('seed');
     expect(cmd.argv).toEqual([
       'seed',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
       '--households',
       '33333',
       '--individuals-per-household',
@@ -202,6 +360,51 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       FHIR_BASE_URL: 'http://localhost:8080/fhir',
       LAB_SEED_GENERATOR_MODE: 'native',
     });
+  });
+
+  it("seed (restore_from_backup: true skips generation and pg_restore's the given directory)", () => {
+    const cmd = run('seed', {
+      restore_from_backup: true,
+      backup_dir: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    });
+    expect(cmd.argv).toEqual([
+      'seed',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--restore-from-backup',
+      '--backup-dir',
+      'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+      '--run',
+      'hapi-fhir-lab-20260101-000000',
+    ]);
+    expect(cmd.env).toEqual({
+      FHIR_BASE_URL: 'http://localhost:8080/fhir',
+      LAB_SEED_GENERATOR_MODE: 'native',
+    });
+  });
+
+  it('backup-db (explicit backup_dir)', () => {
+    const cmd = run('backup-db', {
+      backup_dir: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    });
+    expect(cmd.argv).toEqual([
+      'backup-db',
+      '--cloud',
+      'gcp',
+      '--name',
+      'hapi-fhir-lab',
+      '--backup-dir',
+      'ansible/artifacts/lab/gcp/hapi-fhir-lab/db-backup',
+    ]);
+    expect(cmd.env).toEqual({});
+  });
+
+  it('backup-db (no backup_dir -- omits --backup-dir so scripts/lab applies its own default)', () => {
+    const cmd = run('backup-db');
+    expect(cmd.argv).toEqual(['backup-db', '--cloud', 'gcp', '--name', 'hapi-fhir-lab']);
+    expect(cmd.env).toEqual({});
   });
 
   it('benchmark (T3 tier -> echis_load_1000.js)', () => {
@@ -218,6 +421,11 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     expect(cmd.env).toEqual({
       FHIR_BASE_URL: 'http://localhost:8080/fhir',
       K6_SCRIPT: 'benchmarks/k6/echis_load_1000.js',
+      // scripts/lab's ensure_local_prometheus_remote_write needs this to
+      // auto-detect a kubeconfig for the live-metrics port-forward --
+      // without it, every UI-triggered benchmark would silently run
+      // without live k6 metrics in Grafana.
+      KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig',
     });
   });
 
@@ -237,6 +445,46 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
       'hapi-fhir-lab-20260101-000000',
     ]);
     expect(cmd.env.K6_SCRIPT).toBeUndefined();
+  });
+
+  it('benchmark (in_cluster -> --in-cluster/--parallel-shards, cluster-DNS FHIR_BASE_URL, no --echis-tier/K6_SCRIPT)', () => {
+    const cmd = run('benchmark', { in_cluster: true, parallel_shards: 5 });
+    expect(cmd.argv).toEqual([
+      'benchmark',
+      '--profile',
+      'load',
+      '--in-cluster',
+      '--parallel-shards',
+      '5',
+      '--run',
+      'hapi-fhir-lab-20260101-000000',
+    ]);
+    expect(cmd.env).toEqual({
+      // Not localhost:8080 -- that would resolve to the k6 shard pod
+      // itself, not FHIR, from inside the cluster.
+      FHIR_BASE_URL: 'http://hapi-fhir-hapi-fhir-jpaserver.fhir.svc.cluster.local:8080/fhir',
+      KUBECONFIG: 'ansible/artifacts/lab/gcp/hapi-fhir-lab/kubeconfig',
+    });
+    // T3 tier is set in FIELDS -- confirms in_cluster suppresses BOTH
+    // --echis-tier and K6_SCRIPT even when a tier is configured, since
+    // cmd_benchmark_in_cluster (scripts/lab) always targets
+    // echis_load_100.js and dies if K6_SCRIPT names anything else.
+    expect(cmd.argv).not.toContain('--echis-tier');
+    expect(cmd.env.K6_SCRIPT).toBeUndefined();
+  });
+
+  it('benchmark (in_cluster, no parallel_shards override -> defaults to 1)', () => {
+    const cmd = run('benchmark', { in_cluster: true });
+    expect(cmd.argv).toEqual([
+      'benchmark',
+      '--profile',
+      'load',
+      '--in-cluster',
+      '--parallel-shards',
+      '1',
+      '--run',
+      'hapi-fhir-lab-20260101-000000',
+    ]);
   });
 
   it('report', () => {
@@ -276,7 +524,7 @@ describe('commandBuilder x gcpProvider (contracts/cli-action-map.md)', () => {
     const cmd = run('seed');
     const preview = formatCommandPreview(cmd);
     expect(preview).toBe(
-      'FHIR_BASE_URL=http://localhost:8080/fhir LAB_SEED_GENERATOR_MODE=native scripts/lab seed --households 33333 --individuals-per-household 3 --seed 12345 --run hapi-fhir-lab-20260101-000000',
+      'FHIR_BASE_URL=http://localhost:8080/fhir LAB_SEED_GENERATOR_MODE=native scripts/lab seed --cloud gcp --name hapi-fhir-lab --households 33333 --individuals-per-household 3 --seed 12345 --run hapi-fhir-lab-20260101-000000',
     );
   });
 
@@ -334,5 +582,47 @@ describe('resolveConfirmationMessage (FR-012 -- name the actual configured value
     // aren't valid field-key characters) -- must survive interpolation
     // verbatim as the real kubectl jsonpath expression it is.
     expect(message).toContain('{.data.admin-password}');
+  });
+
+  it('provision-shard-storage: interpolates shard_output_capacity_gb and lab_name', () => {
+    const provisionShardStorageAction = gcpProvider.actions.find(
+      (a) => a.name === 'provision-shard-storage',
+    )!;
+    const message = resolveConfirmationMessage(provisionShardStorageAction, {
+      lab_name: 'my-real-lab',
+      shard_output_capacity_gb: 2048,
+    })!;
+    expect(message).toContain("'my-real-lab'");
+    expect(message).toContain('2048GB');
+    expect(message).not.toContain('{shard_output_capacity_gb}');
+  });
+});
+
+describe('GCP provider prerequisite wiring (cli-action-map.md -- backup-db DB reachability)', () => {
+  const prereqIds = new Set(gcpProvider.prerequisiteChecks.map((c) => c.id));
+
+  it('exposes a blocking cloud-sql-proxy prerequisite check (Cloud SQL Auth Proxy --psc)', () => {
+    const check = gcpProvider.prerequisiteChecks.find((c) => c.id === 'cloud-sql-proxy');
+    expect(check).toBeDefined();
+    expect(check!.severity).toBe('blocking');
+  });
+
+  it("backup-db requires postgresql-client, cloud-sql-proxy AND gcloud (the proxy always starts once terraform-output.json carries database_connection_name, and PSC endpoint reconciliation shells out to gcloud)", () => {
+    const backupDb = gcpProvider.actions.find((a) => a.name === 'backup-db')!;
+    expect(backupDb.requiredPrerequisiteIds).toEqual(['postgresql-client', 'cloud-sql-proxy', 'gcloud']);
+  });
+
+  it('seed requires neither -- restore-from-backup is an ephemeral per-trigger choice, generate-fresh needs no DB client', () => {
+    const seed = gcpProvider.actions.find((a) => a.name === 'seed')!;
+    expect(seed.requiredPrerequisiteIds).not.toContain('postgresql-client');
+    expect(seed.requiredPrerequisiteIds).not.toContain('cloud-sql-proxy');
+  });
+
+  it('every requiredPrerequisiteId across all actions has a matching prerequisiteChecks entry', () => {
+    for (const action of gcpProvider.actions) {
+      for (const id of action.requiredPrerequisiteIds) {
+        expect(prereqIds.has(id), `${action.name} -> ${id}`).toBe(true);
+      }
+    }
   });
 });

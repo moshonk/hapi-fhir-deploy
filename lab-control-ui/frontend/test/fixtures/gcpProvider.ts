@@ -54,6 +54,15 @@ export const gcpProviderFixture: ProviderPublicShape = {
       helpText: '',
       cliMapping: '',
     },
+    {
+      key: 'enable_pgbouncer',
+      label: 'Enable PgBouncer pooled tier',
+      scope: 'common',
+      type: 'boolean',
+      default: false,
+      helpText: '',
+      cliMapping: '',
+    },
   ],
   actions: [
     {

@@ -10,6 +10,14 @@ const PROFILE = "load";
 const WORKLOAD = "echis";
 
 export const options = {
+  // Connection reuse (k6's default) plus Kubernetes' per-connection
+  // (not per-request) Service load balancing pins each VU's traffic to
+  // whichever pod its keep-alive connection first landed on, largely
+  // deciding "which replica does the work" during the early ramp rather
+  // than letting KEDA-added replicas actually share load -- see
+  // echis_load_1000.js's options comment for the full diagnosis (found
+  // live against T3, applies equally here).
+  noConnectionReuse: true,
   summaryTrendStats: ["avg", "min", "med", "p(50)", "p(95)", "p(99)", "max"],
   scenarios: {
     fhir_workload: {
@@ -68,13 +76,13 @@ export function handleSummary(data) {
   const summary = benchmarkSummary(data, PROFILE);
   const parsed = JSON.parse(summary.stdout);
   // individual/total-record counts are what scripts/echis_seed.rb --households 33333
-  // --individuals-per-household 3 actually produces (verified locally), not the round
-  // 100,000/600,000 figures a flat "individuals-per-household * 6 records" estimate
-  // would suggest -- see docs/echis-benchmark-tiers.md for the derivation.
+  // --individuals-per-household 3 --seed 12345 actually produces (verified locally),
+  // not a round 100,000-individual estimate -- see docs/echis-benchmark-tiers.md for
+  // the derivation.
   parsed.concurrency_target = 100;
   parsed.individual_load_target = 99999;
   parsed.household_load_target = 33333;
-  parsed.total_record_load_target = 583996;
+  parsed.total_record_load_target = 545285;
 
   const output = {
     stdout: `${JSON.stringify(parsed, null, 2)}\n`
