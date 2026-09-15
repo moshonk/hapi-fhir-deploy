@@ -157,14 +157,16 @@ class EchisSeedTest < Minitest::Test
     assert_equal capture_bundles(households: 20), capture_bundles(households: 20)
   end
 
-  # Regression: a shard whose range starts off a 100-household boundary has
-  # bundles spanning two Community Health Units. Their shared facility, ward,
-  # and sub-county Locations were emitted twice in one transaction, which
-  # HAPI rejects (HAPI-0535) -- and the lost CHV then failed every later
-  # bundle (HAPI-1094). Shard 1 of 3 over 4,000 households starts at 1,333,
-  # so the bundle for households 1,933-2,032 spans units 1 and 2.
+  # Regression: when a bundle holds the first households of two Community
+  # Health Units, both units' Location chains were emitted into it, repeating
+  # the facility/ward/sub-county they share -- HAPI rejects that transaction
+  # (HAPI-0535), and the lost CHV then failed every later bundle (HAPI-1094).
+  # That is what failed the hapi-lab-t3-devmodel T3 seed: shard 3 of 10 began
+  # at household 99,999, so its first bundle spanned units 99 and 100. Here
+  # shard 1 of 2 over 3,960 households begins at 1,980, so its first bundle
+  # spans units 1 and 2, which share ward 0 and sub-county 0.
   def test_bundles_spanning_units_never_repeat_a_resource
-    content, *households = capture_bundles(households: 4000, shard_index: 1, shard_count: 3)
+    content, *households = capture_bundles(households: 3960, shard_index: 1, shard_count: 2)
 
     households.each_with_index do |bundle, position|
       keys = bundle["entry"].map { |entry| "#{entry.dig("resource", "resourceType")}/#{entry.dig("resource", "id")}" }
