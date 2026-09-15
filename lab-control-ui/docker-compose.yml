@@ -17,6 +17,12 @@ services:
     # host, not containerized). See nginx/nginx.conf's proxy_pass comment
     # for the corresponding change this requires on the nginx side.
     network_mode: host
+    # Run a real init (Docker's tini) as PID 1 so exited children get
+    # reaped. Without it PID 1 is node, which never reaps the orphaned
+    # `kubectl port-forward`s scripts/lab disowns: they pile up as zombies
+    # (78 found on the control-plane VM), and a zombie still passes
+    # `kill -0`, so expose-* watchdogs never reconnected a dropped tunnel.
+    init: true
     environment:
       # Required, no default -- the app itself refuses to start without this
       # (config.ts's fail-closed guard, spec.md Edge Case 5). Set it in .env.
