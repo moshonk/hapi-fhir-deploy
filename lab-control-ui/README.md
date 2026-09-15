@@ -104,6 +104,24 @@ This path is gitignored and mounted read-only into the `nginx` container by
 If your cert's private key ships encrypted (e.g. `openssl aes-256-cbc`),
 decrypt it before placing it — nginx does not prompt for a passphrase.
 
+**FHIR and Grafana on the same hostname**: `nginx.conf` also proxies
+`https://hapilab.intellisoftkenya.com/fhir/` to the host port `expose-fhir`
+listens on (8080) and `/grafana/` to `expose-grafana`'s (3001), so an exposed
+lab is reachable over the certificate's HTTPS name instead of bare
+`http://IP:port`. Each returns 502 until that expose action is running for
+some lab. Two settings keep links working behind the proxy:
+
+- Grafana serves from `/grafana/` when `grafana_public_root_url` in
+  `ansible/group_vars/lab.yml` is set (applied by `deploy`); it then answers
+  under `/grafana/` on port 3001 too.
+- HAPI builds `https://` paging links from the forwarded headers
+  (`use_apache_address_strategy` in `charts/hapi-fhir-deploy/values.yaml`,
+  applied by `deploy`).
+
+Who can reach these paths follows the GCP firewall for ports 80/443 on the
+control-plane VM, not the expose actions' `--source-ranges`. Neither path sits
+behind the UI's login.
+
 **Running `docker compose` via `sudo`**: sudo resets `$HOME` to `/root`, so
 `GCLOUD_CONFIG_DIR`'s `${HOME}` default silently resolves to the wrong
 directory (see `.env.example`'s note) — set `GCLOUD_CONFIG_DIR` explicitly

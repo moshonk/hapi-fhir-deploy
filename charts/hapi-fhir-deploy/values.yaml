@@ -49,6 +49,14 @@ hapi-fhir-jpaserver:
         properties:
           hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
           hibernate.search.enabled: false
+    hapi:
+      fhir:
+        # Build Bundle paging links and Location headers from
+        # X-Forwarded-Host/-Proto when a reverse proxy sets them, e.g.
+        # lab-control-ui's nginx serving https://hapilab.intellisoftkenya.com/fhir/.
+        # Requests without forwarding headers (in-cluster k6, port-forwards)
+        # keep using the address they arrived on.
+        use_apache_address_strategy: true
     management:
       endpoint:
         health:

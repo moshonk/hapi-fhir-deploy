@@ -42,6 +42,11 @@ hapi_database_secret_key: password
 
 install_prometheus_stack: true
 install_grafana: true
+# Public URL Grafana is served under behind lab-control-ui's nginx, whose
+# /grafana/ location proxies to expose-grafana's host port 3001. Sets
+# grafana.ini's server.root_url + serve_from_sub_path, so Grafana answers
+# under /grafana/ on port 3001 as well. Set to "" to serve Grafana from /.
+grafana_public_root_url: "https://hapilab.intellisoftkenya.com/grafana/"
 install_metrics_server: true
 install_keda: true
 apply_autoscaling: true
