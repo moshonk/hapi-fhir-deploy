@@ -46,6 +46,10 @@
             # prometheus-grafana -o jsonpath='{.data.admin-password}' |
             # base64 -d. Admin user defaults to "admin".
             enabled: "{{ install_grafana | bool }}"
+            # Serve Grafana under the reverse-proxy sub-path when one is set
+            # (grafana_public_root_url, group_vars/lab.yml); an empty value
+            # adds nothing, keeping the chart's own grafana.ini.
+            grafana.ini: "{{ {'server': {'root_url': grafana_public_root_url, 'serve_from_sub_path': true}} if grafana_public_root_url | length > 0 else {} }}"
           prometheus:
             prometheusSpec:
               # Off by default upstream: lets k6 (`k6 run -o
