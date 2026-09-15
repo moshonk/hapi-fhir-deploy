@@ -157,7 +157,45 @@ class EchisSeedTest < Minitest::Test
     assert_equal capture_bundles(households: 20), capture_bundles(households: 20)
   end
 
+  # Regression: when a bundle holds the first households of two Community
+  # Health Units, both units' Location chains were emitted into it, repeating
+  # the facility/ward/sub-county they share -- HAPI rejects that transaction
+  # (HAPI-0535), and the lost CHV then failed every later bundle (HAPI-1094).
+  # That is what failed the hapi-lab-t3-devmodel T3 seed: shard 3 of 10 began
+  # at household 99,999, so its first bundle spanned units 99 and 100. Here
+  # shard 1 of 2 over 3,960 households begins at 1,980, so its first bundle
+  # spans units 1 and 2, which share ward 0 and sub-county 0.
+  def test_bundles_spanning_units_never_repeat_a_resource
+    content, *households = capture_bundles(households: 3960, shard_index: 1, shard_count: 2)
+
+    households.each_with_index do |bundle, position|
+      keys = bundle["entry"].map { |entry| "#{entry.dig("resource", "resourceType")}/#{entry.dig("resource", "id")}" }
+      duplicates = keys.tally.select { |_, count| count > 1 }.keys
+      assert_empty duplicates, "household bundle #{position} repeats resources, which HAPI rejects as a transaction"
+    end
+
+    sent = content["entry"].to_set { |entry| "#{entry.dig("resource", "resourceType")}/#{entry.dig("resource", "id")}" }
+    households.each_with_index do |bundle, position|
+      bundle["entry"].each { |entry| sent << "#{entry.dig("resource", "resourceType")}/#{entry.dig("resource", "id")}" }
+      dangling = bundle["entry"].flat_map { |entry| references(entry["resource"]) }.reject { |ref| sent.include?(ref) }.uniq
+      assert_empty dangling, "household bundle #{position} references resources no earlier bundle created"
+    end
+  end
+
+  def test_rejected_bundle_resends_its_shared_resources
+    _content, rejected, following = capture_bundles(households: 200, reject_requests: [1], expect_success: false)
+
+    %w[Organization/echis-org000001 Location/echis-loc-chu000000 PractitionerRole/echis-cha000000].each do |key|
+      assert_includes resource_keys(rejected), key
+      assert_includes resource_keys(following), key, "#{key} must be re-sent after the bundle carrying it was rejected"
+    end
+  end
+
   private
+
+  def resource_keys(bundle)
+    bundle["entry"].map { |entry| "#{entry.dig("resource", "resourceType")}/#{entry.dig("resource", "id")}" }
+  end
 
   def run_seed(households:, run_id:, seed: 12345, shard_index: 0, shard_count: 1, include_specimen: false, content: nil)
     Dir.mktmpdir do |dir|
@@ -183,11 +221,12 @@ class EchisSeedTest < Minitest::Test
   end
 
   # Runs a live (non-metadata-only) seed against a stub server and returns
-  # every transaction bundle it POSTed, in order.
-  def capture_bundles(households:)
+  # every transaction bundle it POSTed, in order. reject_requests lists the
+  # 0-based request positions the stub answers with HTTP 400.
+  def capture_bundles(households:, shard_index: 0, shard_count: 1, reject_requests: [], expect_success: true)
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
-    thread = Thread.new { serve_transactions(server) }
+    thread = Thread.new { serve_transactions(server, reject_requests) }
 
     Dir.mktmpdir do |dir|
       stdout, stderr, status = Open3.capture3(
@@ -196,9 +235,12 @@ class EchisSeedTest < Minitest::Test
         "--seed", "12345",
         "--run-id", "echis-seed-test-capture",
         "--metadata", File.join(dir, "metadata.json"),
+        "--shard-index", shard_index.to_s,
+        "--shard-count", shard_count.to_s,
+        "--max-retries", "0",
         "--fhir-base-url", "http://127.0.0.1:#{port}/fhir"
       )
-      assert status.success?, "#{stdout}\n#{stderr}"
+      assert_equal expect_success, status.success?, "#{stdout}\n#{stderr}"
     end
 
     server.close
@@ -206,7 +248,7 @@ class EchisSeedTest < Minitest::Test
     thread.value
   end
 
-  def serve_transactions(server)
+  def serve_transactions(server, reject_requests = [])
     requests = []
     loop do
       ready = IO.select([server], nil, nil, ACCEPT_TIMEOUT_SECONDS)
@@ -222,6 +264,13 @@ class EchisSeedTest < Minitest::Test
       length = headers.find { |header| header.downcase.start_with?("content-length:") }.to_s.split(":", 2).last.to_i
       request = JSON.parse(socket.read(length))
       requests << request
+
+      if reject_requests.include?(requests.length - 1)
+        body = JSON.generate("resourceType" => "OperationOutcome", "issue" => [{ "severity" => "error", "code" => "processing", "diagnostics" => "rejected by test" }])
+        socket.write "HTTP/1.1 400 Bad Request\r\nContent-Type: application/fhir+json\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}"
+        socket.close
+        next
+      end
 
       body = JSON.generate(
         "resourceType" => "Bundle",
